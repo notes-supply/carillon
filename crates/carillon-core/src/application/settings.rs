@@ -25,9 +25,7 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 /// A change named on the command line.
 #[derive(Debug, PartialEq, Eq)]
 enum Edit {
-    /// `key=value`.
     Set { key: String, value: String },
-    /// `reset <key>`.
     Reset { key: String },
 }
 
@@ -209,8 +207,6 @@ impl Owner {
                 };
                 answer(operator.send(request).await?).await
             }
-            // An agent's page holds only its runtime's lines, titled with
-            // the agent's ID.
             Self::Agent { relay, agent_id } => {
                 let subject = Subject::Agent {
                     agent_id: agent_id.clone(),

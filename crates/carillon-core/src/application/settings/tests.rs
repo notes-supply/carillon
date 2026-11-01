@@ -126,8 +126,6 @@ fn a_page_is_drawn_as_its_owners_return_it() {
          Model     GPT-6.1 Sol · default\n\
          Thinking  Medium · default\n"
     );
-    // A value set here has no suffix, a value no choice names shows its ID,
-    // many values are listed, and nothing applying shows nothing.
     let page = Page {
         title: "assistant".to_owned(),
         subject: Subject::Agent {
@@ -289,7 +287,6 @@ fn an_unknown_key_or_value_lists_what_the_line_accepts() {
         refusal(change(&page, &set("model", ""))),
         format!("Model needs a value. Its choices are:\n{choices}")
     );
-    // A name two choices share names neither.
     let mut shared = home(0);
     lines_mut(&mut shared)
         .filter(|line| line.id == "model")
@@ -297,7 +294,8 @@ fn an_unknown_key_or_value_lists_what_the_line_accepts() {
         .for_each(|choice| "Sonnet".clone_into(&mut choice.name));
     assert!(
         refusal(change(&shared, &set("model", "sonnet")))
-            .starts_with("sonnet is not a choice of Model.")
+            .starts_with("sonnet is not a choice of Model."),
+        "a name two choices share names neither"
     );
 }
 
@@ -487,7 +485,6 @@ async fn channels_are_listed_shown_and_changed_left_to_right() -> Result<()> {
         "300  #home  assistant, always, threads, GPT-6.1 Sol, Medium\n"
     );
     assert_eq!(run(&config, None, &["300"]).await?, render(&home(0)));
-    // The second change names the revision the first one's page gave it.
     assert_eq!(
         run(
             &config,
@@ -519,7 +516,8 @@ async fn channels_are_listed_shown_and_changed_left_to_right() -> Result<()> {
             change("model.thinking", Some("high"), 4),
             change("model", Some(MODELS[1].0), 103),
             change("model.thinking", None, 204),
-        ]
+        ],
+        "each change names the revision of the page read before it"
     );
     crate::assert_refused(
         run(&config, None, &["999"]).await,
