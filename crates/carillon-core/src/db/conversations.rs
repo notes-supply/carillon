@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-use super::{ExternalEvent, Result, params};
+use super::{Database, ExternalEvent, OptionalExtension, Result, params};
 
 /// Records the channel `event` names as its conversation's, unless the
 /// conversation has one already: the first record stands.
@@ -25,17 +25,29 @@ pub(super) fn record_channel(
     Ok(())
 }
 
+impl Database {
+    /// The channel recorded for a conversation, if it has had a turn.
+    pub(crate) fn recorded_channel(
+        &self,
+        interface_id: &str,
+        agent_id: &str,
+        audience_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(channel(&self.connect()?, interface_id, agent_id, audience_id).optional()?)
+    }
+}
+
 /// The channel recorded for a conversation that has a turn.
 pub(super) fn channel(
     connection: &Connection,
     interface_id: &str,
     agent_id: &str,
     audience_id: &str,
-) -> Result<String> {
-    Ok(connection.query_row(
+) -> rusqlite::Result<String> {
+    connection.query_row(
         "SELECT channel_id FROM conversations
          WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3",
         params![interface_id, agent_id, audience_id],
         |row| row.get(0),
-    )?)
+    )
 }

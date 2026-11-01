@@ -338,6 +338,7 @@ async fn commands(
     let config = state.config();
     let interface = interface_provider(&headers, &config)?;
     let runtime = state.core.query_runtime(&interface.id, &query)?;
+    let channel_id = state.core.conversation_channel(&interface.id, &query)?;
     let runtime = config.provider(&runtime.id, ProviderRole::Runtime)?;
     let token = runtime_token(&config, runtime)?;
     let mut url = Url::parse(&format!("{}/v1/commands", runtime.url))
@@ -346,7 +347,7 @@ async fn commands(
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("interface_id", &interface.id);
         pairs.append_pair("agent_id", &query.agent_id);
-        pairs.append_pair("channel_id", &query.channel_id);
+        pairs.append_pair("channel_id", &channel_id);
         if let Some(audience_id) = &query.audience_id {
             pairs.append_pair("audience_id", audience_id);
         }

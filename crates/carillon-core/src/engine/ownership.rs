@@ -30,6 +30,24 @@ impl Core {
         Ok(Owner::Current(agent?))
     }
 
+    /// The channel a conversation query is about: the one core recorded for
+    /// the conversation, which its turns run in, else the one the interface
+    /// names for a conversation without a turn yet.
+    pub(crate) fn conversation_channel(
+        &self,
+        interface_id: &str,
+        query: &ConversationQuery,
+    ) -> Result<String, CoreError> {
+        let recorded = match &query.audience_id {
+            Some(audience) => {
+                self.database
+                    .recorded_channel(interface_id, &query.agent_id, audience)?
+            }
+            None => None,
+        };
+        Ok(recorded.unwrap_or_else(|| query.channel_id.clone()))
+    }
+
     /// Refuses an interactive request for a conversation whose agent moved or was removed.
     /// Messages instead commit their interruption notice during admission.
     /// # Errors

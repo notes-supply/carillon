@@ -352,3 +352,20 @@ async fn command_calls_refuse_stranded_conversations_before_transport() -> Resul
     services.shutdown().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_conversation_with_a_turn_asks_for_commands_in_its_recorded_channel() -> Result<()> {
+    let directory = tempdir()?;
+    let (state, mut received, mut services) = relay_fixture(directory.path()).await?;
+    accept(&state, "two", "current").await?;
+    let uri = "/v1/commands?agent_id=test-agent&channel_id=400&audience_id=current";
+    let (status, _) = call(&state, INTERFACE, "GET", uri, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, call) = received.try_recv()?;
+    assert_eq!(
+        call["query"]["channel_id"], "test-channel",
+        "the channel its turns run in, not the one the interface names now"
+    );
+    services.shutdown().await;
+    Ok(())
+}
