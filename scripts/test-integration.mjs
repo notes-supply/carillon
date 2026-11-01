@@ -1067,16 +1067,13 @@ project_id = "project-1"
     await restart("core");
     await start("runtime-t3");
     // The fake T3 server answers from this process, so the command must not block it.
-    const { stdout } = await promisify(execFile)(binary, [
-      "--home",
-      installation,
-      "settings",
-      "--agent",
-      "assistant",
-      "model=claudeAgent/claude-sonnet-5",
-      "effort=low",
-    ]);
-    assert.equal(stdout, "assistant\nModel      Claude Sonnet 5\nEffort     Low\nFast Mode  Off\n");
+    const agent = ["--home", installation, "settings", "--agent", "assistant"];
+    const changes = ["model=claudeAgent/claude-sonnet-5", "effort=low"];
+    const { stdout } = await promisify(execFile)(binary, [...agent, ...changes]);
+    assert.equal(
+      stdout,
+      "assistant\nModel      Claude Sonnet 5\nEffort     Low\nFast Mode  Off · default\n",
+    );
     // The example module draws these cards: the bundled text, coloured.
     discordSettings = await readFile(providerConfigPath());
     run("--home", installation, "discord", "module", "enable", exampleModule);

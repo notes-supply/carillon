@@ -375,7 +375,7 @@ export const SettingSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   choices: Type.Array(ChoiceSchema),
   value: Type.Union([SettingValueSchema, Type.Null()]),
-  /** The value comes from the agent, not from this subject. */
+  /** This subject does not set the value: it comes from the agent, or is the owner's default. */
   inherited: Type.Boolean(),
   revision: RevisionSchema,
 });

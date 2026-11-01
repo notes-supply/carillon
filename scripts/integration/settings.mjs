@@ -45,7 +45,7 @@ export async function testSettings(services) {
   const reasoner = await click(threaded, 1, "Local reasoner");
   assert.equal(
     reasoner.content,
-    card("302", [...BESIDE_THINKING, "Model     Local reasoner", "Thinking  Medium"]),
+    card("302", [...BESIDE_THINKING, "Model     Local reasoner", "Thinking  Medium · default"]),
   );
   const thinking = await click(reasoner, 0, "Thinking");
   assert.deepEqual(
@@ -85,16 +85,24 @@ export async function testSettings(services) {
   assert.equal(persisted.content, card("302", low), "the ledger outlives the runtime process");
   const reset = await interact("302", null, "component", customIds(persisted)[2]);
   assert.equal(reset.content, root.content, "Reset returns the channel to its agent's model");
+  const pinned = [
+    "#302",
+    ...BESIDE_THINKING,
+    "Model     Local reasoner",
+    "Thinking  Medium · default",
+  ];
+  assert.equal(settings("302", "model=reasoner"), pinned.join("\n"));
   assert.equal(
-    settings("302", "model=reasoner"),
-    ["#302", ...BESIDE_THINKING, "Model     Local reasoner", "Thinking  Medium"].join("\n"),
+    settings("302", "thinking=high", "reset", "thinking"),
+    pinned.join("\n"),
+    "an option's Reset keeps the channel's model",
   );
-  assert.equal(settings("302", "reset", "thinking"), ["#302", ...INHERITED].join("\n"));
+  assert.equal(settings("302", "reset", "model"), ["#302", ...INHERITED].join("\n"));
 
   const held = await services.holdTurn("settings-held");
   assert.equal(
     settings("--agent", "assistant", "model=local/reasoner"),
-    "assistant\nModel     Local reasoner\nThinking  Medium",
+    "assistant\nModel     Local reasoner\nThinking  Medium · default",
   );
   const released = await held.release();
   assert.match(released.output, /model local\/echo\.$/u, "an admitted turn keeps its model");

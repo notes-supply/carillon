@@ -1,9 +1,10 @@
 /**
  * The model settings a runtime keeps for its agents and their channels. Each
- * agent and each channel stores at most one model unit, the model with its
- * options. A channel without one inherits its agent's, and the agent's is the
- * only agent default. The ledger stores what was chosen; what runs is
- * `resolved` against the runtime's current catalogue.
+ * agent and each channel stores at most one model unit, the model with the
+ * options chosen for it. A channel without one inherits its agent's, and the
+ * agent's is the only agent default. The ledger stores what was chosen; what
+ * runs is `resolved` against the runtime's current catalogue, with each
+ * option not chosen at its model's default.
  */
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
@@ -16,7 +17,7 @@ import { ExplainedFailure } from "./failure.ts";
 import { publish, Unsynced } from "./publish.ts";
 import { Serial } from "./serial.ts";
 
-/** A model with the value of each of its options, as a runtime runs it. */
+/** A model with values for its options: those chosen, or all of them as a runtime runs it. */
 export const SelectionSchema = Type.Object({
   provider: Type.String({ minLength: 1 }),
   model: Type.String({ minLength: 1 }),
@@ -228,12 +229,13 @@ export class SettingsLedger {
     const options = (entry?.options ?? []).map((option): Setting => {
       const id = `${OPTION}${option.id}`;
       const value = running?.options[option.id] ?? option.default;
+      const chosen = unit?.options[option.id];
       return {
         id,
         name: option.name,
         choices: option.choices.map((choice) => ({ id: choice.id, name: choice.name })),
         value: one(value),
-        inherited,
+        inherited: inherited || chosen === undefined || !offers(option, chosen),
         revision: revision(id),
       };
     });
@@ -271,35 +273,39 @@ export class SettingsLedger {
 }
 
 /**
- * The subject's own unit after `change`: none on a reset; a new model with
- * its options' defaults, so option values never outlive their model; or the
- * unit that applied with one option changed.
+ * The subject's own unit after `change`: none on a reset of the model; a new
+ * model with no options chosen, so option values never outlive their model;
+ * or the unit that applied with one option chosen, or no longer chosen on
+ * its reset. A subject that inherits chooses no option, so resetting one
+ * leaves it inheriting.
  */
 function changed(
   catalogue: Catalogue,
-  current: { unit: Selection | null },
+  current: { unit: Selection | null; inherited: boolean },
   change: Change,
 ): Selection | null {
-  if (change.value === null) return null;
-  const id = single(change.value);
   if (change.setting === MODEL) {
+    if (change.value === null) return null;
+    const id = single(change.value);
     const model = catalogue.models.find((candidate) => modelChoiceId(candidate) === id);
     if (model === undefined) throw new ExplainedFailure(422, `${id} is not a model offered here.`);
-    return {
-      provider: model.provider,
-      model: model.model,
-      options: Object.fromEntries(model.options.map((option) => [option.id, option.default])),
-    };
+    return { provider: model.provider, model: model.model, options: {} };
   }
-  const running = current.unit === null ? null : resolved(catalogue, current.unit);
-  const option = (running === null ? undefined : offeredModel(catalogue, running))?.options.find(
+  const { unit } = current;
+  const option = (unit === null ? undefined : offeredModel(catalogue, unit))?.options.find(
     (candidate) => `${OPTION}${candidate.id}` === change.setting,
   );
-  if (running === null || option === undefined)
+  if (unit === null || option === undefined)
     throw new ExplainedFailure(409, "This setting changed meanwhile.");
+  if (change.value === null) {
+    if (current.inherited) return null;
+    const options = Object.entries(unit.options).filter(([chosen]) => chosen !== option.id);
+    return { ...unit, options: Object.fromEntries(options) };
+  }
+  const id = single(change.value);
   if (!offers(option, id))
     throw new ExplainedFailure(422, `${id} is not a ${option.name} choice here.`);
-  return { ...running, options: { ...running.options, [option.id]: id } };
+  return { ...unit, options: { ...unit.options, [option.id]: id } };
 }
 
 function single(value: SettingValue): string {

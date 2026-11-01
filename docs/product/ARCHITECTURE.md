@@ -258,10 +258,11 @@ what the owners return and defines no setting of its own.
   or in the channel. The Discord provider keeps routes in its settings file.
 - The runtime that serves an agent owns its model and the model's options.
   It keeps them in `settings.json` in its component directory: at most one
-  model unit per agent and one per channel. A channel without a unit
-  inherits its agent's, which is the only agent default. Choosing a model
-  replaces the unit with that model's option defaults, so an option value
-  never outlives its model.
+  model unit per agent and one per channel: the model and the options
+  chosen for it, each other option at the model's default. A channel
+  without a unit inherits its agent's, which is the only agent default.
+  Choosing a model replaces the unit with that model alone, so an option
+  value never outlives its model.
 
 A revision digests everything that decides a setting's meaning at its
 subject: the subject's interface, channel and agent, the stored unit,

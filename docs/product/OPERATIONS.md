@@ -195,13 +195,14 @@ Model     GPT-6.1 Sol · default
 Thinking  Medium · default
 ```
 
-`· default` marks a value the channel takes from its agent. Pick a line,
-then a value. The change applies at once and the page redraws. **Reset**
-returns the channel's model and its options to the agent's. A model change
-applies to the next message each conversation in the channel receives.
-Changing any model line, Thinking included, gives the channel its own model,
-which no longer follows the agent's until **Reset**. Choosing another model
-resets its options to that model's defaults. On T3,
+`· default` marks a value the channel does not set itself: its agent's, or
+its model's default. Pick a line, then a value. The change applies at once
+and the page redraws. A model change applies to the next message each
+conversation in the channel receives. Changing any model line, Thinking
+included, gives the channel its own model, which no longer follows the
+agent's until **Reset** on Model. **Reset** on an option such as Thinking
+returns it to its model's default and keeps the channel's model. Choosing
+another model returns its options to that model's defaults. On T3,
 a message keeps the model it started with. On Pi, a conversation runs one
 model at a time: the next message moves the whole conversation to the new
 model, an answer still in progress there included.
@@ -219,7 +220,7 @@ The terminal shows the same pages:
 carillon settings                              # one line per routed channel
 carillon settings CHANNEL_ID                   # that channel's page
 carillon settings CHANNEL_ID thinking=high     # change lines, left to right
-carillon settings CHANNEL_ID reset thinking    # take the agent's value again
+carillon settings CHANNEL_ID reset model       # take the agent's model again
 carillon settings --agent assistant            # the agent's own values
 carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 ```

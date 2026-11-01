@@ -168,7 +168,7 @@ it("replaces the unit when the model changes and keeps the model when an option 
           interface_id: "discord-private",
           channel_id: "300",
           agent_id: "assistant",
-          model: { provider: "local", model: "deliberate", options: { thinking: "high" } },
+          model: { provider: "local", model: "deliberate", options: {} },
         },
       ],
     });
@@ -216,6 +216,50 @@ it("refuses to reset a value pinned after the reset was drawn", async () => {
       expected: current.revision,
     });
     expect(line(reset, "model").inherited).toBe(true);
+  });
+});
+
+it("resets an option to its model's default and keeps the channel's own model", async () => {
+  await withLedger(async (ledger, path) => {
+    await choose(ledger, agent, "model", "local/reasoner");
+    const inheriting = await readFile(path, "utf8");
+    const untouched = await ledger.change(catalogue, home, {
+      setting: "model.thinking",
+      value: null,
+      expected: line(await ledger.settings(catalogue, home), "model.thinking").revision,
+    });
+    expect(line(untouched, "model").inherited).toBe(true);
+    expect(await readFile(path, "utf8")).toBe(inheriting);
+
+    const chosen = await choose(ledger, home, "model", "local/deliberate");
+    expect(line(chosen, "model.thinking")).toMatchObject({
+      value: { kind: "one", id: "high" },
+      inherited: true,
+    });
+    await choose(ledger, home, "model.thinking", "medium");
+    const reset = await ledger.change(catalogue, home, {
+      setting: "model.thinking",
+      value: null,
+      expected: line(await ledger.settings(catalogue, home), "model.thinking").revision,
+    });
+    expect(line(reset, "model")).toMatchObject({
+      value: { kind: "one", id: "local/deliberate" },
+      inherited: false,
+    });
+    expect(line(reset, "model.thinking")).toMatchObject({
+      value: { kind: "one", id: "high" },
+      inherited: true,
+    });
+
+    const inherited = await ledger.change(catalogue, home, {
+      setting: "model",
+      value: null,
+      expected: line(reset, "model").revision,
+    });
+    expect(line(inherited, "model")).toMatchObject({
+      value: { kind: "one", id: "local/reasoner" },
+      inherited: true,
+    });
   });
 });
 

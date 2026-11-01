@@ -54,7 +54,8 @@ pub struct Setting {
     /// What applies here, or `None` when nothing does.
     #[serde(deserialize_with = "required_nullable")]
     pub value: Option<Value>,
-    /// The value comes from the agent, not from this subject.
+    /// This subject does not set the value: it comes from the agent, or is
+    /// the owner's default.
     pub inherited: bool,
     pub revision: Revision,
 }
@@ -202,8 +203,8 @@ impl Page {
     }
 
     /// The lines every renderer shows: each setting's name, padded to the
-    /// longest and two spaces, then what applies, marked ` · default` when it
-    /// is the agent's.
+    /// longest and two spaces, then what applies, marked ` · default` when the
+    /// subject does not set it.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let width = self
