@@ -71,8 +71,9 @@ pub(crate) async fn change(
     Ok(composed(core, route, title, Ok(runtime)))
 }
 
-/// How long before the end of a card's calls a change gives up, so the page
-/// can still be read again after a change that got no answer.
+/// How long before the end of a card's calls a change gives up, or half the
+/// time left when that is less, so the page can still be read again after a
+/// change that got no answer.
 const REREAD: Duration = Duration::from_secs(2);
 
 /// What a card shows after a change: the page it left, or the page read again
@@ -85,7 +86,8 @@ pub(crate) async fn settled(
     change: Change,
     until: Instant,
 ) -> (Page, Option<Notice>) {
-    let written_by = until.checked_sub(REREAD).unwrap_or(until);
+    let left = until.saturating_duration_since(Instant::now());
+    let written_by = until - REREAD.min(left / 2);
     let failure = match self::change(core, route, title.clone(), change, written_by).await {
         Ok(page) => return (page, None),
         Err(failure) => failure,

@@ -299,6 +299,7 @@ impl Core {
             &interface.id,
             &ConversationQuery {
                 agent_id: event.agent_id.clone(),
+                channel_id: event.channel_id.clone(),
                 audience_id: Some(event.audience_id.clone()),
             },
         )?;

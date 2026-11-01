@@ -8,6 +8,8 @@ export const PROVIDER_HEADER = "x-carillon-provider";
 export const ConversationQuerySchema = Type.Object({
   interface_id: Type.String({ minLength: 1 }),
   agent_id: Type.String({ minLength: 1 }),
+  /** The interface's channel the conversation belongs to. */
+  channel_id: Type.String({ minLength: 1 }),
   audience_id: Type.Optional(Type.String({ minLength: 1 })),
 });
 export type ConversationQuery = Static<typeof ConversationQuerySchema>;

@@ -20,6 +20,7 @@ import {
 const conversation = {
   interface_id: "discord-channel",
   agent_id: "default",
+  channel_id: "300",
   audience_id: "channel-1",
 };
 const turn = (correlation: string, input: string, extra: Record<string, unknown> = {}) =>
@@ -169,12 +170,11 @@ it("refuses a bound commands request until a message creates the current project
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
   });
-  next.modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
   await runtime.commands(conversation);
   expect(fake.threads.size).toBe(2);
   expect(next.messages).toEqual([]);
   expect(old.modelSelection.model).toBe("claude-sonnet-5");
-  expect(fake.refreshes).toEqual([{ instanceId: "codex", cwd: resources }]);
+  expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 });
 
 it.each(["default", "code"])(

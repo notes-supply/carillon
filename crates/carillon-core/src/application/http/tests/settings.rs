@@ -299,7 +299,7 @@ async fn a_disabled_runtime_is_not_called_for_settings() -> Result<()> {
 async fn command_catalogues_come_from_the_current_conversation_runtime() -> Result<()> {
     let directory = tempdir()?;
     let (state, mut received, mut services) = relay_fixture(directory.path()).await?;
-    let uri = "/v1/commands?agent_id=test-agent&audience_id=fresh";
+    let uri = "/v1/commands?agent_id=test-agent&channel_id=300&audience_id=fresh";
     let (status, _) = call(&state, Caller::Interface("wrong"), "GET", uri, None).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
@@ -313,7 +313,12 @@ async fn command_catalogues_come_from_the_current_conversation_runtime() -> Resu
         call,
         json!({
             "auth": "Bearer test-only",
-            "query": {"interface_id": "test-interface", "agent_id": "test-agent", "audience_id": "fresh"},
+            "query": {
+                "interface_id": "test-interface",
+                "agent_id": "test-agent",
+                "channel_id": "300",
+                "audience_id": "fresh",
+            },
         })
     );
     services.shutdown().await;
@@ -338,7 +343,7 @@ async fn command_calls_refuse_stranded_conversations_before_transport() -> Resul
             "removed agent" => state.config.value.agents.clear(),
             _ => {}
         }
-        let uri = "/v1/commands?agent_id=test-agent&audience_id=pinned";
+        let uri = "/v1/commands?agent_id=test-agent&channel_id=300&audience_id=pinned";
         let (status, body) = call(&state, INTERFACE, "GET", uri, None).await?;
         assert_eq!(status, StatusCode::CONFLICT, "{availability}");
         assert_eq!(body["error"], explanation);

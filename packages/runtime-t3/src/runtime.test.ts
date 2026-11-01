@@ -1806,16 +1806,13 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   expect(fake.threads.size).toBe(0);
   expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 
-  // A thread T3's UI moved onto another instance offers that instance's commands.
+  // A thread T3's UI moved onto another instance still offers the commands of
+  // the channel's model, which Carillon's next turn there runs on.
   const reply = execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.commands(conversation)).commands.map((command) => command.name)).toEqual([
-    "status",
-    "deploy-notes",
-    "only-person",
-  ]);
+  expect((await runtime.commands(conversation)).commands).toHaveLength(32);
   // So does an agent whose default is on it.
   const code = { ...conversation, agent_id: "code" };
   expect((await runtime.commands(code)).commands.map((command) => command.name)).toEqual([

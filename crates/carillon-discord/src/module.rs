@@ -169,6 +169,7 @@ impl InteractionCalls {
             Ok(HostRequest::Commands) => {
                 let query = ConversationQuery {
                     agent_id: self.route.agent.clone(),
+                    channel_id: self.route.channel_id.clone(),
                     audience_id: self.audience_id.clone(),
                 };
                 match within(until, self.core.commands(&query)).await {

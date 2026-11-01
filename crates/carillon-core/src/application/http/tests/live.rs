@@ -446,6 +446,7 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
             "test-interface",
             &ConversationQuery {
                 agent_id: "test-agent".to_owned(),
+                channel_id: "300".to_owned(),
                 audience_id: None,
             },
         );

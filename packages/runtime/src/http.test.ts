@@ -125,7 +125,10 @@ it("sends callers only the displayable part of explanations and logs redacted di
     });
     // The command catalogue is the runtime's, for the queried conversation.
     expect(
-      await call("GET", "/v1/commands?interface_id=discord-private&agent_id=default&audience_id=c"),
+      await call(
+        "GET",
+        "/v1/commands?interface_id=discord-private&agent_id=default&channel_id=300&audience_id=c",
+      ),
     ).toEqual({ status: 200, body: { commands: [{ name: "compact", hint: "<instructions>" }] } });
     expect(await call("GET", "/v1/commands?agent_id=default")).toEqual({
       status: 400,

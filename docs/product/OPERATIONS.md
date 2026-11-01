@@ -199,7 +199,9 @@ Thinking  Medium · default
 then a value. The change applies at once and the page redraws. **Reset**
 returns the channel's model and its options to the agent's. A model change
 applies to the next message each conversation in the channel receives.
-Choosing another model resets its options to that model's defaults. On T3,
+Changing any model line, Thinking included, gives the channel its own model,
+which no longer follows the agent's until **Reset**. Choosing another model
+resets its options to that model's defaults. On T3,
 a message keeps the model it started with. On Pi, a conversation runs one
 model at a time: the next message moves the whole conversation to the new
 model, an answer still in progress there included.

@@ -104,15 +104,17 @@ fn edits(words: &[String]) -> Result<Vec<Edit>> {
 }
 
 /// The change `edit` asks of `page`, refused before it is sent when its key
-/// names no line of the page or its value no choice of the line.
+/// names no line of the page, or none the runtime could show, or its value
+/// no choice of the line.
 fn change(page: &Page, edit: &Edit) -> Result<Change> {
     let (Edit::Set { key, .. } | Edit::Reset { key }) = edit;
-    let setting = line(page, key).ok_or_else(|| {
-        anyhow!(
+    let setting = line(page, key).ok_or_else(|| match &page.runtime {
+        RuntimePart::Unavailable { reason } => anyhow!("{key} cannot be changed now. {reason}"),
+        RuntimePart::Settings(_) => anyhow!(
             "{key} is not a setting of {}. Its settings are:\n{}",
             page.title,
             listed(page.settings().map(|setting| (&setting.id, &setting.name)))
-        )
+        ),
     })?;
     let value = match edit {
         Edit::Set { value, .. } => Some(Value::One {

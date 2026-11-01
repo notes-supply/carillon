@@ -770,6 +770,9 @@ pub struct StateCounts {
 pub struct ConversationQuery {
     #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub agent_id: String,
+    /// The interface's channel the conversation belongs to.
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
+    pub channel_id: String,
     #[serde(
         default,
         deserialize_with = "crate::fields::optional_nonempty_string",

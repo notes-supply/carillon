@@ -212,6 +212,7 @@ impl CoreClient {
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("agent_id", &query.agent_id);
+            pairs.append_pair("channel_id", &query.channel_id);
             if let Some(audience_id) = &query.audience_id {
                 pairs.append_pair("audience_id", audience_id);
             }

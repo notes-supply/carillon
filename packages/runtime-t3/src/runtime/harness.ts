@@ -210,6 +210,7 @@ export function answer(run: Run, text: string): void {
 export const conversation = {
   interface_id: "discord-private",
   agent_id: "default",
+  channel_id: "300",
   audience_id: "conversation-1",
 };
 

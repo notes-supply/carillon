@@ -138,16 +138,3 @@ export async function turnSelection(
   if (selection === undefined) throw new NoModel(channel.agent_id);
   return toNative(models, selection);
 }
-
-/** The provider instance of the agent's own model, among those T3 lists, if it has one. */
-export async function agentInstance(
-  connection: T3Connection,
-  ledger: SettingsLedger,
-  agentId: string,
-): Promise<string | undefined> {
-  const models = await offered(connection);
-  const lines = await ledger.settings(models, { kind: "agent", agent_id: agentId });
-  const value = lines.find(({ id }) => id === "model")?.value;
-  if (value?.kind !== "one") return undefined;
-  return models.providers.find(({ id }) => value.id.startsWith(`${id}/`))?.id;
-}

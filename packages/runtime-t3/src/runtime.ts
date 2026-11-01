@@ -56,7 +56,7 @@ import { commandCatalog } from "./commands.ts";
 import { holdTurns, type Answer, type StopsFile } from "./held.ts";
 import { stopReport, wakeReport, withStop, type Stop } from "./stop.ts";
 import { uploadImages, type PreparedImages } from "./images.ts";
-import { agentInstance, offered, turnSelection } from "./models.ts";
+import { offered, turnSelection } from "./models.ts";
 import {
   conversationId,
   ensureThread,
@@ -257,21 +257,23 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     commands(query: ConversationQuery): Promise<CommandCatalog> {
       return track(() =>
         connected(async (connection) => {
-          // The instance the conversation's last run took, in its agent's
-          // workspace: its thread's, else the agent's own model's.
+          // The instance the conversation's next run takes, in its agent's
+          // workspace: its channel's model's, else its agent's.
           const agent = agentOf(query.agent_id);
           const audience = query.audience_id;
-          const thread =
-            audience === undefined
-              ? undefined
-              : await readThread(
-                  connection,
-                  await bindThread(connection, { ...query, audience_id: audience }),
-                  timeoutMs,
-                );
-          const instanceId =
-            thread?.thread.modelSelection.instanceId ??
-            (await agentInstance(connection, options.ledger, query.agent_id));
+          if (audience !== undefined)
+            await readThread(
+              connection,
+              await bindThread(connection, { ...query, audience_id: audience }),
+              timeoutMs,
+            );
+          const { interface_id, channel_id, agent_id } = query;
+          const selection = await options.ledger.selection(await offered(connection), {
+            interface_id,
+            channel_id,
+            agent_id,
+          });
+          const instanceId = selection?.provider;
           if (instanceId === undefined) return { commands: [] };
           return commandCatalog(
             await connection.call(

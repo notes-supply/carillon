@@ -187,12 +187,22 @@ fn change(
             expected,
         })
     });
+    let Some(change) = change else {
+        // A runtime that did not answer leaves its lines off the page, which
+        // says why; nobody changed the line.
+        let outage = matches!(page.runtime, RuntimePart::Unavailable { .. })
+            && !page
+                .settings()
+                .any(|setting| fingerprint(&[&setting.id]) == line);
+        let view = View {
+            line: Some(line),
+            ..View::default()
+        };
+        return Ok((page, (!outage).then_some(Notice::Stale), view));
+    };
     let view = View {
         line: Some(line),
         ..View::default()
-    };
-    let Some(change) = change else {
-        return Ok((page, Some(Notice::Stale), view));
     };
     let (page, notice) = host.change_setting(change)?;
     Ok((page, notice, view))

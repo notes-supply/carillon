@@ -616,3 +616,15 @@ async fn an_unreachable_owner_is_named() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_change_while_the_runtime_is_out_names_the_outage() {
+    let mut page = home(0);
+    page.runtime = RuntimePart::Unavailable {
+        reason: "The runtime is not reachable right now.".to_owned(),
+    };
+    assert_eq!(
+        refusal(change(&page, &set("thinking", "high"))),
+        "thinking cannot be changed now. The runtime is not reachable right now."
+    );
+}

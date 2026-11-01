@@ -691,3 +691,23 @@ fn a_page_beyond_discords_limit_is_cut_where_it_ends() -> Result<(), String> {
     assert!(reply.content.chars().count() <= 2000);
     Ok(())
 }
+
+#[test]
+fn a_click_while_the_runtime_is_out_shows_only_its_reason() -> Result<(), String> {
+    let mut host = FakeHost::new(home()?);
+    let reply = run(&mut host, &command())?;
+    let reply = pick(&mut host, &reply, "Thinking")?;
+    host.page.runtime = RuntimePart::Unavailable {
+        reason: "The runtime did not answer in time.".to_owned(),
+    };
+    let redrawn = choose(&mut host, &reply, "High")?;
+    assert!(
+        redrawn
+            .content
+            .starts_with("⚠ The runtime did not answer in time.\n<#300>\n"),
+        "{}",
+        redrawn.content
+    );
+    assert!(host.changes().is_empty(), "nothing is sent");
+    Ok(())
+}

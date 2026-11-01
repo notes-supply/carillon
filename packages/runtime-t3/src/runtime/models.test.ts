@@ -187,3 +187,26 @@ it("fails a turn with no model of its channel or agent in the runtime's own word
   expect(await runtime.commands(conversation)).toEqual({ commands: [] });
   expect(fake.refreshes).toEqual([]);
 });
+
+it("lists the commands of the instance the channel's next turn runs on", async () => {
+  const channel = {
+    kind: "channel",
+    interface_id: conversation.interface_id,
+    channel_id: conversation.channel_id,
+    agent_id: conversation.agent_id,
+  } as const;
+  const model = (await runtime.settings({ subject: channel })).settings.find(
+    ({ id }) => id === "model",
+  );
+  if (model === undefined) throw new Error("no model line");
+  await runtime.settings({
+    subject: channel,
+    change: {
+      setting: "model",
+      value: { kind: "one", id: "codex/gpt-6-astra" },
+      expected: model.revision,
+    },
+  });
+  await runtime.commands(conversation);
+  expect(fake.refreshes).toMatchObject([{ instanceId: "codex" }]);
+});
