@@ -363,7 +363,11 @@ export const ChoiceSchema = Type.Object({
 });
 export type Choice = Static<typeof ChoiceSchema>;
 
-/** One line of a page. Without `choices` it is shown and not editable; `value` is null when nothing applies. */
+/**
+ * One line of a page. `choices` include the value's own; a line that offers
+ * nothing besides its value is shown and not editable. `value` is null when
+ * nothing applies.
+ */
 export const SettingSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),

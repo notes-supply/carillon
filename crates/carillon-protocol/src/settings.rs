@@ -48,8 +48,8 @@ pub struct Setting {
     /// What the line is called, such as `Model`.
     #[serde(deserialize_with = "nonempty_string")]
     pub name: String,
-    /// The values the owner accepts here now. Without any, the line is shown
-    /// and not editable.
+    /// The values the owner accepts here now, the value's own included. A
+    /// line that offers nothing besides its value is shown and not editable.
     pub choices: Vec<Choice>,
     /// What applies here, or `None` when nothing does.
     #[serde(deserialize_with = "required_nullable")]
