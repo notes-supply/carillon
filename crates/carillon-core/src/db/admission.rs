@@ -1,6 +1,7 @@
 use super::{
     Capture, Database, EventReceipt, ExternalEvent, OptionalExtension, Result, TurnState, Value,
-    bail, conversation_runtime, event_receipt, params, state_column, timestamp, write_transaction,
+    bail, conversation_runtime, conversations, event_receipt, params, state_column, timestamp,
+    write_transaction,
 };
 
 #[derive(Clone, Copy)]
@@ -87,6 +88,7 @@ impl Database {
                 (providers, resources, Some(explanation))
             }
         };
+        conversations::record_channel(&transaction, interface_id, event)?;
         let now = timestamp()?;
         let turn_id = uuid::Uuid::now_v7().to_string();
         transaction.execute(

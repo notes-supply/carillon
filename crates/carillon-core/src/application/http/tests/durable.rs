@@ -5,7 +5,6 @@
 use std::{collections::VecDeque, fs, path::Path, sync::Mutex};
 
 use anyhow::Context as _;
-use axum::body::Bytes;
 use carillon_protocol::turns::{Silence, TurnOpening};
 use tempfile::tempdir;
 
@@ -361,7 +360,10 @@ async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_o
     assert_eq!(restarted.core.recover_interrupted()?, 0);
     // Its 202 may have been lost, so it is handed over again, in order.
     assert_eq!(state_of(&restarted, &held.turn_id)?, TurnState::Queued);
-    assert_eq!(state_of(&restarted, &opened.turn_id)?, TurnState::Running);
+    assert_eq!(
+        state_of(&restarted, &opened.receipt.turn_id)?,
+        TurnState::Running
+    );
     for _ in 0..2 {
         assert_eq!(dispatch(&restarted).await?, WorkerStep::Advanced);
     }
@@ -369,7 +371,7 @@ async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_o
     assert_eq!(runtime.request(1)?.correlation_id, held.turn_id);
     assert!(delivered(&restarted)?.is_empty());
     let answer = json!({"outcome": "answered", "output": "Done after the restart."});
-    for turn in [&held.turn_id, &unrecorded.turn_id, &opened.turn_id] {
+    for turn in [&held.turn_id, &unrecorded.turn_id, &opened.receipt.turn_id] {
         for _ in 0..2 {
             assert_eq!(
                 settle(&restarted, RUNTIME, turn, &answer).await?,
@@ -385,7 +387,7 @@ async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_o
         [
             held.turn_id.as_str(),
             unrecorded.turn_id.as_str(),
-            opened.turn_id.as_str()
+            opened.receipt.turn_id.as_str()
         ]
     );
     assert_eq!(dispatch(&restarted).await?, WorkerStep::Idle);

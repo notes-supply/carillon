@@ -19,7 +19,6 @@ use carillon_installation::{
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
-use carillon_protocol::models::AvailableModel;
 use serde::Deserialize;
 
 use super::{
@@ -40,7 +39,22 @@ pub(super) struct Options {
 #[derive(Deserialize)]
 struct Offer {
     projects: Vec<Project>,
-    models: Vec<AvailableModel>,
+    models: Vec<OfferedModel>,
+}
+
+/// A model a runtime offers an agent, as its setup commands print it.
+#[derive(Deserialize)]
+struct OfferedModel {
+    provider: String,
+    model: String,
+    name: String,
+}
+
+impl OfferedModel {
+    /// The ID a runtime's settings name the model by.
+    fn id(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -345,7 +359,7 @@ fn configure_agents(
             &model_labels(models),
             0,
         )?];
-        let model = format!("{}/{}", model.provider, model.model);
+        let model = model.id();
         let args = [
             "--agent",
             &agent.id,
@@ -524,7 +538,7 @@ fn slug(title: &str) -> String {
 /// The model picker's labels: each model's name and T3 instance, and its
 /// slug, which is what is saved, when another model of that instance shares
 /// the name.
-fn model_labels(models: &[AvailableModel]) -> Vec<String> {
+fn model_labels(models: &[OfferedModel]) -> Vec<String> {
     models
         .iter()
         .map(|model| {

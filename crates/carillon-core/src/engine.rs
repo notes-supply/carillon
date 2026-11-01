@@ -12,8 +12,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    ACTIVITY_REPORT_LIMIT, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
-    EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, ModelQuery, RuntimeTurnRequest,
+    ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
+    EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, RuntimeTurnRequest,
     SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
 };
 pub use dispatch::{InboxFailure, Stalled};
@@ -297,7 +297,7 @@ impl Core {
     ) -> Result<Admitted, CoreError> {
         let owner = self.conversation_owner(
             &interface.id,
-            &ModelQuery {
+            &ConversationQuery {
                 agent_id: event.agent_id.clone(),
                 audience_id: Some(event.audience_id.clone()),
             },
@@ -567,6 +567,7 @@ impl Core {
             interface_id: turn.interface_id.clone(),
             agent_id: turn.agent_id.clone(),
             audience_id: turn.audience_id.clone(),
+            channel_id: turn.channel_id.clone(),
             input: turn.input.clone(),
             native: turn.native.clone(),
             resource_root: resources::root(&self.snapshot_store(), &turn.resource_snapshot_id)

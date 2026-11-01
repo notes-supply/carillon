@@ -14,6 +14,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{Context as _, Result, anyhow};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -23,14 +24,16 @@ use carillon_installation::{
     config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
     loopback,
 };
-use carillon_protocol::model::{
-    Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent,
-    Health, INSTANCE_HEADER, JobPage, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
-    RuntimeModelUpdate, SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState,
-    TurnSummary,
+use carillon_protocol::{
+    model::{
+        ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
+        EventStatus, ExternalEvent, Health, INSTANCE_HEADER, JobPage, PROVIDER_HEADER,
+        SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState, TurnSummary,
+    },
+    settings::{SettingsRequest, Subject},
 };
 use reqwest::{Client, RequestBuilder, Url};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
@@ -130,6 +133,13 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// A body read after authentication, so a caller that is refused learns
+/// nothing of what core would accept.
+fn body<T: DeserializeOwned>(bytes: &Bytes, what: &str) -> Result<T, ApiError> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid {what}: {error}")))
+}
+
 /// Open the installation's core exactly as [`serve`] does, without listening,
 /// recovering turns or writing: the registry and the current core schema.
 pub(super) fn check(config: &LoadedConfig) -> Result<()> {
@@ -217,7 +227,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
-        .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/settings", post(settings))
         .route("/v1/commands", get(commands))
         .route("/v1/status", get(status))
         .route("/v1/registry", get(registry_status).post(apply_registry))
@@ -267,109 +277,92 @@ async fn event_status(
     Ok(Json(state.core.event_status(&interface.id, &event_id)?))
 }
 
-/// Model and command calls answer a waiting user; they give up well before
-/// the interface's own deadline does.
-const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Settings, command and control calls answer a waiting user; they give up
+/// well before the interface's own deadline does.
+const RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn model_state(
+/// Reads, after changing, a subject's settings at the runtime that serves
+/// its agent now. An interface names only its own channels; the operator,
+/// who sends no provider identity, names any channel or agent.
+async fn settings(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<ModelQuery>,
-) -> Result<Response, ApiError> {
-    relay_query(&state, &headers, "/v1/model", query).await
-}
-
-/// The runtime's own commands for the conversation, relayed like a model read.
-async fn commands(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<ModelQuery>,
-) -> Result<Response, ApiError> {
-    relay_query(&state, &headers, "/v1/commands", query).await
-}
-
-/// Relays a read about the agent or one conversation to the runtime that
-/// owns the conversation, naming the calling interface.
-async fn relay_query(
-    state: &AppState,
-    headers: &HeaderMap,
-    path: &str,
-    query: ModelQuery,
+    bytes: Bytes,
 ) -> Result<Response, ApiError> {
     let config = state.config();
-    let interface = interface_provider(headers, &config)?;
-    let runtime = model_runtime(&state.core, &config, &interface.id, &query)?;
-    let token = runtime_token(&config, runtime)?;
-    let query = RuntimeModelQuery {
-        interface_id: interface.id.clone(),
-        query,
+    let interface = if headers.contains_key(PROVIDER_HEADER) {
+        Some(interface_provider(&headers, &config)?)
+    } else {
+        authorize(&headers, &config.value.core.operator_token_hash)?;
+        None
     };
-    let mut url = Url::parse(&format!("{}{path}", runtime.url))
-        .with_context(|| format!("runtime provider {} has an invalid URL", runtime.id))?;
+    let request: SettingsRequest = body(&bytes, "settings request")?;
+    if let Some(interface) = interface
+        && !matches!(&request.subject, Subject::Channel { interface_id, .. } if *interface_id == interface.id)
     {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("interface_id", &query.interface_id);
-        pairs.append_pair("agent_id", &query.query.agent_id);
-        if let Some(audience_id) = &query.query.audience_id {
-            pairs.append_pair("audience_id", audience_id);
-        }
+        return Err(ApiError::forbidden(
+            "an interface reads and changes only its own channels' settings",
+        ));
     }
-    relay_model_call(state.client.get(url).bearer_auth(token)).await
-}
-
-async fn set_model(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(update): Json<ModelUpdate>,
-) -> Result<Response, ApiError> {
-    let config = state.config();
-    let interface = interface_provider(&headers, &config)?;
-    let runtime = model_runtime(
-        &state.core,
-        &config,
-        &interface.id,
-        &ModelQuery {
-            agent_id: update.agent_id.clone(),
-            audience_id: update.audience_id.clone(),
-        },
-    )?;
+    let agent = request.subject.agent_id();
+    let runtime = state
+        .core
+        .agent_runtime(agent)?
+        .ok_or_else(|| ApiError::not_found(format!("Carillon has no agent {agent}.")))?;
+    if !runtime.enabled {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The agent's runtime is disabled.",
+        ));
+    }
+    let runtime = config.provider(&runtime.id, ProviderRole::Runtime)?;
     let token = runtime_token(&config, runtime)?;
-    let update = RuntimeModelUpdate {
-        interface_id: interface.id.clone(),
-        update,
-    };
-    relay_model_call(
+    relay_runtime_call(
         state
             .client
-            .put(format!("{}/v1/model", runtime.url))
+            .post(format!("{}/v1/settings", runtime.url))
             .bearer_auth(token)
-            .json(&update),
+            .json(&request),
     )
     .await
 }
 
-/// Refuses stranded conversations before reading a runtime credential or
-/// issuing a model or command request.
-fn model_runtime<'a>(
-    core: &Core,
-    config: &'a LoadedConfig,
-    interface_id: &str,
-    query: &ModelQuery,
-) -> Result<&'a Provider, ApiError> {
-    let runtime = core.query_runtime(interface_id, query)?;
-    Ok(config.provider(&runtime.id, ProviderRole::Runtime)?)
+/// The runtime's own commands for the conversation, from the runtime that
+/// owns it, naming the calling interface. A stranded conversation is
+/// refused before a runtime credential is read.
+async fn commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ConversationQuery>,
+) -> Result<Response, ApiError> {
+    let config = state.config();
+    let interface = interface_provider(&headers, &config)?;
+    let runtime = state.core.query_runtime(&interface.id, &query)?;
+    let runtime = config.provider(&runtime.id, ProviderRole::Runtime)?;
+    let token = runtime_token(&config, runtime)?;
+    let mut url = Url::parse(&format!("{}/v1/commands", runtime.url))
+        .with_context(|| format!("runtime provider {} has an invalid URL", runtime.id))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("interface_id", &interface.id);
+        pairs.append_pair("agent_id", &query.agent_id);
+        if let Some(audience_id) = &query.audience_id {
+            pairs.append_pair("audience_id", audience_id);
+        }
+    }
+    relay_runtime_call(state.client.get(url).bearer_auth(token)).await
 }
 
-/// Forwards a model call and relays the runtime's answer. Runtimes phrase
-/// their rejections for people, so status and body pass through unchanged;
-/// only transport failures are described here.
-async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError> {
+/// Forwards a call and relays the runtime's answer. Runtimes phrase their
+/// rejections for people, so status and body pass through unchanged; only
+/// transport failures are described here.
+async fn relay_runtime_call(request: RequestBuilder) -> Result<Response, ApiError> {
     let response = request
-        .timeout(MODEL_CALL_TIMEOUT)
+        .timeout(RELAY_TIMEOUT)
         .send()
         .await
         .map_err(|error| {
-            warn!(%error, "model call failed to reach the runtime");
+            warn!(%error, "relayed call failed to reach the runtime");
             if error.is_timeout() {
                 ApiError::new(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -384,7 +377,7 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
         })?;
     let status = response.status();
     let unusable = |error: &dyn std::fmt::Display| {
-        warn!(%error, %status, "runtime model, command or control response was not JSON");
+        warn!(%error, %status, "runtime settings, command or control response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "The runtime gave an unusable answer.",

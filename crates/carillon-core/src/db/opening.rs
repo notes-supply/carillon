@@ -1,10 +1,11 @@
 use carillon_protocol::{
-    model::{EventReceipt, TurnState},
+    model::{EventReceipt, OpenedTurn, TurnState},
     turns::TurnOpening,
 };
 
 use super::{
-    Database, OptionalExtension, Result, params, state_column, timestamp, write_transaction,
+    Database, OptionalExtension, Result, conversations, params, state_column, timestamp,
+    write_transaction,
 };
 
 /// How the event identities of turns runtimes open begin, followed by the
@@ -15,7 +16,7 @@ pub(crate) const RUNTIME_EVENT_PREFIX: &str = "runtime:";
 /// What opening a turn found.
 #[derive(Debug)]
 pub(crate) enum Opened {
-    Receipt(EventReceipt),
+    Receipt(OpenedTurn),
     /// The key opened a turn in another conversation.
     Elsewhere,
     /// The agent runs on another runtime now, or no longer exists.
@@ -31,7 +32,8 @@ impl Database {
     /// same conversation, or else records a running turn `runtime_id`
     /// opened in a conversation whose latest turn is its own and whose agent
     /// runs there now, as `agent_runtime` says, with that turn's target and
-    /// snapshots and nothing a person sent.
+    /// snapshots and nothing a person sent. Either comes with the
+    /// conversation's channel.
     pub(crate) fn open_turn(
         &self,
         runtime_id: &str,
@@ -54,13 +56,24 @@ impl Database {
                 |row| Ok((row.get::<_, String>(0)?, state_column(row, 1)?, row.get(2)?)),
             )
             .optional()?;
+        let channel = |transaction: &rusqlite::Transaction<'_>| {
+            conversations::channel(
+                transaction,
+                &opening.interface_id,
+                &opening.agent_id,
+                &opening.audience_id,
+            )
+        };
         match earlier {
             Some((turn_id, state, true)) => {
-                return Ok(Opened::Receipt(EventReceipt {
-                    event_id,
-                    turn_id,
-                    state,
-                    duplicate: true,
+                return Ok(Opened::Receipt(OpenedTurn {
+                    receipt: EventReceipt {
+                        event_id,
+                        turn_id,
+                        state,
+                        duplicate: true,
+                    },
+                    channel_id: channel(&transaction)?,
                 }));
             }
             Some((_, _, false)) => return Ok(Opened::Elsewhere),
@@ -99,12 +112,16 @@ impl Database {
                 timestamp()?,
             ],
         )?;
+        let channel_id = channel(&transaction)?;
         transaction.commit()?;
-        Ok(Opened::Receipt(EventReceipt {
-            event_id,
-            turn_id,
-            state: TurnState::Running,
-            duplicate: false,
+        Ok(Opened::Receipt(OpenedTurn {
+            receipt: EventReceipt {
+                event_id,
+                turn_id,
+                state: TurnState::Running,
+                duplicate: false,
+            },
+            channel_id,
         }))
     }
 }

@@ -1,5 +1,5 @@
 use super::{AgentOptions, Core, CoreError, RuntimeProvider};
-use carillon_protocol::model::ModelQuery;
+use carillon_protocol::model::ConversationQuery;
 
 pub(super) enum Owner<'a> {
     Current(&'a AgentOptions),
@@ -13,7 +13,7 @@ impl Core {
     pub(super) fn conversation_owner(
         &self,
         interface_id: &str,
-        query: &ModelQuery,
+        query: &ConversationQuery,
     ) -> Result<Owner<'_>, CoreError> {
         let agent = self.agent(&query.agent_id);
         if let Some(audience) = &query.audience_id
@@ -37,7 +37,7 @@ impl Core {
     pub(crate) fn query_runtime(
         &self,
         interface_id: &str,
-        query: &ModelQuery,
+        query: &ConversationQuery,
     ) -> Result<RuntimeProvider, CoreError> {
         match self.conversation_owner(interface_id, query)? {
             Owner::Current(agent) => self.enabled_runtime(&agent.runtime),
@@ -50,6 +50,20 @@ impl Core {
                 current.map(|agent| agent.runtime.as_str()),
             ))),
         }
+    }
+
+    /// The runtime that serves `agent_id` now, enabled or not, or `None`
+    /// for an agent core does not know.
+    /// # Errors
+    /// Returns a runtime that is not configured.
+    pub(crate) fn agent_runtime(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<RuntimeProvider>, CoreError> {
+        self.agent(agent_id)
+            .ok()
+            .map(|agent| self.runtime(&agent.runtime))
+            .transpose()
     }
 }
 
