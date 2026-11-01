@@ -14,9 +14,9 @@ new interface or runtime doesn't mean rebuilding the rest.
    the owner's authority, and watch a running turn on a Discord card.
 5. Route each channel to an agent: Carillon's assistant, on Pi, or plain T3
    Code in a project.
-6. Choose models and their settings for a conversation, or an agent's
-   default for new conversations, with `/model`, and run the runtime's own
-   commands with `/command`.
+6. See and change a channel's model and its settings with `/settings` or
+   `carillon settings`, set an agent's own model with `carillon settings
+   --agent`, and run the runtime's own commands with `/command`.
 7. Change users, routes and runtime availability while Carillon runs; other
    settings apply on restart.
 8. Replace the Discord module (slash commands and cards) without restarting.
@@ -71,9 +71,10 @@ native state between engines or T3 projects.
 - **Visibility.** While a turn runs, a card shows its current tool calls,
   recent ones and delegated work, never tool output or private reasoning.
   It stays as a summary when the work ends.
-- **Model selection.** `/model` stays within the conversation's runtime. A
-  scope overrides the whole selection; returning to the default clears it.
-  Queued work runs with the selection in force when it starts.
+- **Settings.** Each setting has one owner. A channel's model comes from
+  the runtime that serves its agent, and a channel without its own takes
+  the agent's, which is the only default. A change drawn from a page that
+  has changed since writes nothing.
 - **Authority.** Every service runs as the installing user. Carillon adds no
   command broker, path allowlist or approval system; confinement, if wanted,
   belongs to the runtime or its extensions.

@@ -7,8 +7,8 @@
 1114 crates/carillon-discord/src/operations.rs
 1039 crates/carillon-discord/src/setup/tests.rs
 1112 packages/runtime-t3/src/fake.ts
-1985 packages/runtime-t3/src/runtime.test.ts
+1982 packages/runtime-t3/src/runtime.test.ts
 3366 packages/runtime-t3/src/watch.test.ts
 1868 packages/runtime-t3/src/watch.ts
 1026 scripts/test-filesystem.mjs
-2108 scripts/test-integration.mjs
+1930 scripts/test-integration.mjs
