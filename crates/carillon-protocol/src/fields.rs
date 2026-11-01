@@ -30,6 +30,26 @@ where
     Ok(value)
 }
 
+/// A provider's ID, as TypeScript's `ProviderIdentitySchema` takes it: 1 to
+/// 128 ASCII letters, digits, `_` and `-`.
+pub(crate) fn provider_identity<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(serde::de::Error::custom(
+            "expected a provider ID of 1 to 128 letters, digits, `_` or `-`",
+        ));
+    }
+    Ok(value)
+}
+
 pub(crate) fn optional_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,

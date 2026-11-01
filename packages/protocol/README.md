@@ -20,7 +20,9 @@ A settings `Page` is about one `Subject`, an agent or a routed channel. Each
 IDs, and its owner's `Revision`, which a `Change` must name. Owners supply
 display names from their native catalogues, or the ID when no name exists.
 For example, a page shows Codex's **Speed** as **Fast** while the change
-sends the choice ID `priority`.
+sends the choice ID `priority`. Only Rust sends and reads a `Page`: the
+Discord provider serves it and core's CLI reads it. Runtimes exchange
+`SettingsRequest` and `RuntimeSettings`, which TypeScript mirrors.
 
 Installation files and credentials belong to `carillon-installation`, so the
 Wasm module can use the wire types without pulling in host filesystem code.

@@ -7,7 +7,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fields::{nonempty_string, required_nullable};
+use crate::fields::{nonempty_string, optional_value, provider_identity, required_nullable};
 
 /// What a page of settings is about. Every revision covers it, so a change
 /// drawn for one agent never applies after the channel moved to another.
@@ -21,7 +21,7 @@ pub enum Subject {
     },
     /// One routed channel of an interface, and the agent it routes to.
     Channel {
-        #[serde(deserialize_with = "nonempty_string")]
+        #[serde(deserialize_with = "provider_identity")]
         interface_id: String,
         #[serde(deserialize_with = "nonempty_string")]
         channel_id: String,
@@ -67,7 +67,11 @@ pub struct Choice {
     #[serde(deserialize_with = "nonempty_string")]
     pub name: String,
     /// The heading a renderer lists the choice under, such as its provider.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub group: Option<String>,
 }
 
@@ -144,7 +148,11 @@ pub struct Change {
 #[serde(deny_unknown_fields)]
 pub struct SettingsRequest {
     pub subject: Subject,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub change: Option<Change>,
 }
 
@@ -155,7 +163,8 @@ pub struct RuntimeSettings {
 }
 
 /// Everything about one subject: the interface's own lines, then the
-/// runtime's.
+/// runtime's. Only Rust sends and reads a page, so it has no TypeScript
+/// mirror.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Page {
     /// What the interface calls the subject.
