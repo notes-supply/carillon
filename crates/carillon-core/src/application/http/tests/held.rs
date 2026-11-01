@@ -354,6 +354,7 @@ async fn a_runtime_reads_back_the_turns_core_records_running_on_it() -> Result<(
             (
                 turn.request.correlation_id.as_str(),
                 turn.request.input.as_str(),
+                turn.request.channel_id.as_str(),
                 turn.key.as_deref(),
             )
         })
@@ -361,10 +362,11 @@ async fn a_runtime_reads_back_the_turns_core_records_running_on_it() -> Result<(
     assert_eq!(
         listed,
         [
-            (held.turn_id.as_str(), "one", None),
+            (held.turn_id.as_str(), "one", "test-channel", None),
             (
                 opened.receipt.turn_id.as_str(),
                 "The nightly summary.",
+                "test-channel",
                 Some("nightly")
             ),
         ]
