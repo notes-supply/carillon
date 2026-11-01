@@ -3,8 +3,9 @@
 A self-hosted AI agent you talk to in Discord, powered by
 [Pi](https://github.com/earendil-works/pi) or [T3 Code](https://github.com/pingdotgg/t3code).
 
-Chat in channels or threads, attach files and images, pick models with
-`/model` and run the agent's own commands with `/command`. A card shows what
+Chat in channels or threads, attach files and images, change a channel's
+model and settings with `/settings` or `carillon settings`, and run the
+agent's own commands with `/command`. A card shows what
 the agent is doing while it works. Send another message while it answers to
 steer it, and react to steer, interrupt or stop a waiting one. Conversations,
 replies and, on Pi, answers in progress survive restarts.

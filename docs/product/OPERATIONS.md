@@ -37,11 +37,11 @@ Without Discord options, the installer asks at the terminal:
 2. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), and the projects T3 Code channels
    work in: each becomes an agent that is plain T3 Code through Discord.
-   Then it asks each agent's default model.
-3. **Pi** opens when an agent runs on it: sign in with `/login`,
-   choose the agent's model with `/model` and press Ctrl+S on it, then
-   leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
-   again until it is.
+   Then it asks each agent's model.
+3. **Pi** opens when an agent runs on it: sign in with `/login`, then
+   leave with Ctrl+D. Setup checks that Pi is signed in and offers to open
+   it again until it is. Then it asks the model of each Pi agent that has
+   none yet.
 4. **Discord.** The bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
@@ -62,9 +62,8 @@ setup` asks only Discord's. A rerun that changes the T3 settings or the bot
 token takes effect in a running Carillon at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
 empty thread in the current project and receive an explanation. That message
-never runs; the next message runs in the new thread. Model requests and
-commands are refused without creating anything until that thread exists, then
-use it. Returning to the original project resumes its
+never runs; the next message runs in the new thread. Commands are refused
+without creating anything until that thread exists, then use it. Returning to the original project resumes its
 original thread. A conversation without a T3 thread yet starts in the current
 project. Work already running in another project continues there.
 
@@ -104,7 +103,9 @@ curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.
 
 Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
 0600), sign in to Pi with the printed `carillon-pi` command, and run
-`carillon start`.
+`carillon start`. Choose the assistant's model last, with `carillon settings
+--agent assistant model=PROVIDER/MODEL`. A value that names no model lists
+the models Pi offers.
 
 Rerunning the installer with options keeps the registry, credentials and
 state, but rewrites the Discord settings from them. Use `carillon update`
@@ -133,6 +134,7 @@ carillon logs -f core        # or discord, runtime-pi, runtime-t3; without a nam
 carillon recent              # recent turns
 carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
+carillon settings            # each routed channel's settings, one line each
 ```
 
 An enabled runtime with no assigned agents is `idle`. Core does not probe it,
@@ -177,6 +179,56 @@ in `carillon.toml` needs a different path: the command would ask core at the
 new address or with the new credential. Make the change while Carillon is
 stopped (`carillon stop` once `carillon status` shows no running turns, edit,
 `carillon start`), or use `restart --force`.
+
+## Settings
+
+`/settings` in a routed Discord channel, or in one of its threads, shows
+that channel's settings. Only allowlisted people in the configured server
+can run it.
+
+```text
+#home
+Agent     assistant
+Listens   always
+Replies   threads
+Model     GPT-6.1 Sol · default
+Thinking  Medium · default
+```
+
+`· default` marks a value the channel takes from its agent. Pick a line,
+then a value. The change applies at once and the page redraws. **Reset**
+returns the channel's model and its options to the agent's. A model change
+applies to the next turn of every conversation in the channel; a turn
+already admitted keeps its model. Choosing another model resets its options
+to that model's defaults.
+
+If someone changed the line after the page was drawn, nothing changes and
+the page shows `⚠ Changed meanwhile`. If the runtime did not answer in time,
+the page shows `⚠ Not confirmed`, and the change may or may not have
+applied. Look at the redrawn page before you change it again. Agent,
+Listens and Replies come from the Discord settings file and are not
+editable here.
+
+The terminal shows the same pages:
+
+```sh
+carillon settings                              # one line per routed channel
+carillon settings CHANNEL_ID                   # that channel's page
+carillon settings CHANNEL_ID thinking=high     # change lines, left to right
+carillon settings CHANNEL_ID reset thinking    # take the agent's value again
+carillon settings --agent assistant            # the agent's own values
+carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
+```
+
+A key names a line, such as `model` or `thinking`. A value is a choice's ID
+or name. A value that matches no choice lists the choices. Each change uses
+the page the one before it returned, and the command stops at the first
+change that is refused.
+
+The agent's value is its channels' only default. An agent without one fails
+every message with an explanation that names `carillon settings --agent`.
+On T3, a model picked in T3's own UI for a Carillon thread lasts until
+Carillon's next turn in that thread.
 
 ## Configuration
 
@@ -284,13 +336,8 @@ None of these is selected by default:
 
 ## Discord
 
-`/model` shows the models the runtime offers and lets an allowlisted user
-change the conversation's model and settings, or the agent's default for new
-conversations. Every channel routed to the agent shares that default. Outside
-a conversation `/model` changes only the default. Its embed shows each
-selection and where it comes from. Controls use the runtime's provider,
-model and choice names, such as **Speed: Fast**, and name the scope they
-change. Reset returns that scope to its default.
+`/settings` shows and changes the channel's settings, as
+[Settings](#settings) describes.
 
 `/command` runs one of the runtime's own commands or skills in the
 conversation, exactly as written:
@@ -410,10 +457,7 @@ default. Model badges map model-ID prefixes to emotes, longest prefix first:
 
 Use emote IDs that belong to your bot's application. After editing, run
 `carillon discord settings apply`; an invalid marker names the field to fix.
-The picker uses these same model badges in its summaries. Custom emotes and
-Unicode emoji also appear beside models and providers in its menus. Other
-symbols stay in the summary text. A provider gets a menu badge when all its
-models share one.
+The `/settings` model menu shows these badges beside its models.
 
 ### Discord module
 
@@ -540,6 +584,23 @@ provider credentials: check `carillon status` afterwards.
 ```sh
 carillon update carillon-VERSION-linux-x86_64.tar.gz
 ```
+
+This release is installed fresh. `carillon update` from an earlier release
+refuses its database format and changes nothing. To move to it:
+
+1. Run `carillon stop`, then move `~/.carillon` aside.
+2. Create a new `~/.carillon` with mode 700. Copy these from the old one,
+   keeping their modes: `carillon.toml`, `providers/*.toml`, `credentials/`,
+   `pi/auth.json`, `pi/models.json`, `pi/settings.json` and `agents/`.
+3. Run the new release's `install.sh` and answer setup. It keeps the
+   Discord settings and the Pi sign-in. It asks T3's address, token and
+   projects again, because the old T3 settings name a model, and the model
+   now lives in the runtime's settings. It asks each agent's model.
+
+`state/` starts empty, so turn history, conversations, Pi's conversations
+and scheduled runs do not carry over. T3 per-thread model choices do not
+carry over either. Each channel runs its agent's model until someone picks
+one with `/settings`.
 
 Before stopping anything, update unpacks the archive inside the installation,
 checks it against its `MANIFEST` and has the new release check your registry,
