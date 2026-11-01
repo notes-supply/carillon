@@ -27,12 +27,7 @@ export function customIds(reply) {
   return reply.components.map((row) => row.components[0].custom_id);
 }
 
-/** The buttons of the last action row. */
-export function buttons(reply) {
-  return reply.components.at(-1).components.map((component) => component.custom_id);
-}
-
-export function control(reply, customId) {
+function control(reply, customId) {
   const found = reply.components
     .flatMap((row) => row.components)
     .find((component) => component.custom_id === customId);
@@ -42,16 +37,6 @@ export function control(reply, customId) {
 
 export function options(reply, customId) {
   return control(reply, customId).options;
-}
-
-export function providerControl(reply, scope) {
-  const id = customIds(reply).find((id) => id.startsWith(`model:provider:${scope}:`));
-  assert.ok(id, "provider menu is present");
-  return id;
-}
-
-export function selectedLabel(reply, customId) {
-  return options(reply, customId).find((option) => option.default)?.label;
 }
 
 /** The select value standing for the option labelled or described `text`. */

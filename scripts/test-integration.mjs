@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { testChannelCutover } from "./test-runtime-cutover.mjs";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -19,18 +19,10 @@ import {
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { availableBasePort } from "./integration/ports.mjs";
-import {
-  buttons,
-  control,
-  customIds,
-  embedText,
-  options,
-  providerControl,
-  seen,
-  selectedLabel,
-  value,
-} from "./integration/replies.mjs";
+import { embedText, seen } from "./integration/replies.mjs";
+import { testSettings } from "./integration/settings.mjs";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
@@ -56,7 +48,7 @@ let runtimeConfigPath;
 const services = new Map();
 /**
  * The Discord routes the installation serves. Channel 305 is reserved for the
- * model picker so its turns do not disturb the response counters of the
+ * settings card so its turns do not disturb the response counters of the
  * other conversations.
  */
 const DISCORD_ROUTES = [
@@ -91,6 +83,10 @@ try {
   await testConfigurationSymlinkUpdates();
   await testProviderVersions();
   await startAll();
+  assert.equal(
+    run("--home", installation, "settings", "--agent", "assistant", "model=local/echo"),
+    "assistant\nModel  Local echo",
+  );
   for (const authorization of [
     null,
     "Bearer wrong",
@@ -148,7 +144,7 @@ try {
   assert.equal(first.receipt.state, "queued");
   assert.match(first.delivery.content, /Local provider response 1/u);
   assert.match(first.delivery.content, /native extension inactive; skill inactive/u);
-  assert.match(first.delivery.content, /model local\/echo\.$/u, "turns run on the runtime default");
+  assert.match(first.delivery.content, /model local\/echo\.$/u, "turns run on the agent's model");
   assert.deepEqual(first.feedback, ["processing", "delivered"]);
 
   const duplicate = await simulate("event-1", "hello");
@@ -360,7 +356,22 @@ try {
   }
   const restored = await simulate("event-5", "continue after restore");
   assert.match(restored.delivery.content, /Local provider response 7/u);
-  await testModelPicker();
+  await testSettings({
+    interact,
+    requestInteraction,
+    interaction,
+    simulateRoute,
+    settings: (...args) => run("--home", installation, "settings", ...args),
+    ledger: join(installation, "state/components/runtime-pi/settings.json"),
+    holdTurn,
+    start,
+    stop,
+    restart,
+    configPath: configPath(),
+    corePort: basePort,
+  });
+  await testRuntimeCommands();
+  await testModuleOperations();
   await testProviderFailure();
   await testActivityVisibility();
   await testT3ActivityThroughDelivery();
@@ -377,7 +388,8 @@ try {
         diagnostics: "authenticated and queryable",
         runtime_outage: "queued and resumed",
         backup_restore: "continued",
-        model_picker: "selections reach the runtime, persist, and never wait for a running turn",
+        settings:
+          "/settings and carillon settings show one page, changes reach a channel's next turns and persist, refusals reach no core settings call",
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
         activity:
@@ -482,205 +494,19 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   assert.match(result.stderr, expected);
 }
 
-async function testModelPicker() {
-  const conversation = "discord-100-305";
-  const shown = await interact("305", null, "command", "model");
-  assert.equal(
-    seen(shown),
-    "This conversation\nLocal echo\n-# follows the default for new conversations\nDefault for new conversations\nLocal echo\n-# runtime default",
-  );
-  assert.deepEqual(customIds(shown), [
-    providerControl(shown, "conversation"),
-    "model:model:conversation",
-    "model:scope:conversation",
-  ]);
-  assert.equal(selectedLabel(shown, providerControl(shown, "conversation")), "Local");
-  assert.deepEqual(buttons(shown), [
-    "model:scope:conversation",
-    "model:scope:agent",
-    "model:default:conversation",
-  ]);
-  // Only the browsed provider's models are offered. Identities remain opaque.
-  assert.deepEqual(
-    options(shown, providerControl(shown, "conversation")).map((option) => option.label),
-    ["Local", "Substitute"],
-  );
-  assert.deepEqual(
-    options(shown, "model:model:conversation").map((option) => option.description),
-    ["echo", "reasoner"],
-  );
-  assert.ok(
-    options(shown, "model:model:conversation").every((option) =>
-      /^[0-9a-f]{16}$/u.test(option.value),
-    ),
-  );
-  assert.equal(selectedLabel(shown, "model:model:conversation"), "Local echo");
-  assert.equal(control(shown, "model:default:conversation").disabled, true);
-  // Outside a conversation only the default for new conversations is offered.
-  const outside = await interact("301", null, "command", "model");
-  assert.match(seen(outside), /\nUse \/model inside a conversation to choose its model\.$/u);
-  assert.deepEqual(customIds(outside), [
-    providerControl(outside, "agent"),
-    "model:model:agent",
-    "model:default:agent",
-  ]);
-
-  // Browsing another provider cannot apply a model or disturb inheritance.
-  const provider = providerControl(shown, "conversation");
-  const browsed = await interact("305", null, "component", provider, [
-    value(shown, provider, "Substitute"),
-  ]);
-  assert.equal(selectedLabel(browsed, providerControl(browsed, "conversation")), "Substitute");
-  assert.deepEqual(
-    options(browsed, "model:model:conversation").map((option) => option.description),
-    ["fixed"],
-  );
-  assert.equal(seen(browsed), seen(shown), "browsing changes no selection");
-  const stillActive = await simulateRoute("model-browse", "305", null, "which model");
-  assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
-  const reopened = await interact("305", null, "command", "model");
-  assert.equal(selectedLabel(reopened, providerControl(reopened, "conversation")), "Local");
-
-  // Choosing a model shows the settings it will run with, defaults included,
-  // and a turn runs with exactly those.
-  const chosen = await interact("305", null, "component", "model:model:conversation", [
-    value(shown, "model:model:conversation", "reasoner"),
-  ]);
-  assert.match(
-    seen(chosen),
-    /^This conversation\nLocal reasoner · Thinking: Medium\n-# set for this/u,
-  );
-  const thinking = customIds(chosen).find((id) => id.startsWith("model:option:conversation:"));
-  assert.ok(thinking, "the reasoner's thinking setting is offered");
-  assert.deepEqual(
-    options(chosen, thinking).map((option) => option.label),
-    ["Thinking: Off", "Thinking: Low", "Thinking: Medium", "Thinking: High"],
-  );
-  assert.equal(selectedLabel(chosen, thinking), "Thinking: Medium");
-  const defaulted = await simulateRoute("model-0", "305", null, "which model");
-  assert.equal(defaulted.conversation_id, conversation);
-  assert.match(defaulted.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
-
-  const reasoner =
-    /This conversation\nLocal reasoner · Thinking: High\n-# set for this conversation/u;
-  const tuned = await interact("305", null, "component", thinking, [
-    value(chosen, thinking, "Thinking: High"),
-  ]);
-  assert.match(seen(tuned), reasoner);
-  assert.equal(selectedLabel(tuned, thinking), "Thinking: High");
-  assert.equal(control(tuned, "model:default:conversation").disabled, false);
-  const overridden = await simulateRoute("model-1", "305", null, "which model");
-  assert.match(overridden.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
-  // A control left over from an earlier catalogue is reported, not misapplied.
-  const staleSetting = await interact("305", null, "component", thinking, ["0000000000000000"]);
-  assert.match(seen(staleSetting), /That setting is no longer available/u);
-  assert.match(seen(staleSetting), reasoner);
-  const staleModel = await interact("305", null, "component", "model:model:conversation", [
-    "0000000000000000",
-  ]);
-  assert.match(seen(staleModel), /That model is no longer available/u);
-  assert.match(seen(staleModel), reasoner);
-
-  // Core must relay the runtime's atomic precondition, not discard it.
-  const staleWrite = await fetch(`http://127.0.0.1:${String(basePort)}/v1/model`, {
-    method: "PUT",
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-provider": "discord-private",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      agent_id: "assistant",
-      audience_id: conversation,
-      scope: "conversation",
-      selection: { provider: "local", model: "echo", options: {} },
-      expected: { provider: "local", model: "reasoner", options: { thinking: "medium" } },
-    }),
+/** The Pi runtime's own setup command, as `carillon setup` runs it. */
+function runtimeSetup(options, ...flags) {
+  const [program, args] = serviceArguments("runtime", options);
+  return execFileSync(program, [...args, ...flags], {
+    encoding: "utf8",
+    stdio: "pipe",
+    timeout: 30_000,
+    env: options.env,
   });
-  assert.equal(staleWrite.status, 409, await staleWrite.text());
-  const unchanged = await interact("305", null, "command", "model");
-  assert.match(seen(unchanged), reasoner);
+}
 
-  // The default for new conversations also reaches those without a choice of their own.
-  const agentScope = await interact("305", null, "component", "model:scope:agent");
-  assert.equal(control(agentScope, "model:model:agent").placeholder, "Model for new conversations");
-  assert.deepEqual(customIds(agentScope), [
-    providerControl(agentScope, "agent"),
-    "model:model:agent",
-    "model:scope:conversation",
-  ]);
-  const agentProvider = providerControl(agentScope, "agent");
-  const agentBrowse = await interact("305", null, "component", agentProvider, [
-    value(agentScope, agentProvider, "Substitute"),
-  ]);
-  assert.match(seen(agentBrowse), reasoner);
-  assert.match(seen(agentBrowse), /Default for new conversations\nLocal echo\n/u);
-  const agentSet = await interact("305", null, "component", "model:model:agent", [
-    value(agentBrowse, "model:model:agent", "fixed"),
-  ]);
-  const substitute = /Default for new conversations\nSubstitute fixed\n-# set with \/model/u;
-  assert.match(seen(agentSet), substitute);
-  assert.match(seen(agentSet), reasoner);
-  const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
-  assert.notEqual(elsewhere.conversation_id, conversation);
-  assert.match(elsewhere.delivery.content, /model substitute\/fixed\.$/u);
-  const kept = await simulateRoute("model-3", "305", null, "which model");
-  assert.match(kept.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
-
-  // Selections live in the runtime's ledger, not in a process.
-  await restart("runtime");
-  const persisted = await interact("305", null, "command", "model");
-  assert.match(seen(persisted), reasoner);
-  assert.match(seen(persisted), substitute);
-
-  // Each scope returns to its default separately.
-  const followsAgent = await interact("305", null, "component", "model:default:conversation");
-  assert.match(seen(followsAgent), /^This conversation\nSubstitute fixed\n-# follows the default/u);
-  const runtimeDefault = await interact("305", null, "component", "model:default:agent");
-  assert.equal(seen(runtimeDefault), seen(shown), "each scope is back to its default");
-  const reset = await simulateRoute("model-4", "305", null, "which model");
-  assert.match(reset.delivery.content, /model local\/echo\.$/u);
-
-  // A change made while a turn runs is confirmed at once; the running turn
-  // keeps the selection it started with and the next turn picks up the change.
-  const held = await holdTurn("held-turn");
-  const during = await interact("305", null, "component", "model:model:agent", [
-    value(shown, "model:model:conversation", "reasoner"),
-  ]);
-  const confirmed =
-    /Default for new conversations\nLocal reasoner · Thinking: Medium\n-# set with \/model/u;
-  assert.match(seen(during), confirmed);
-  assert.match(seen(await interact("305", null, "command", "model")), confirmed);
-  const released = await held.release();
-  assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
-  const next = await simulateRoute("model-5", "305", null, "which model");
-  assert.match(next.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
-  await interact("305", null, "component", "model:default:agent");
-
-  // Interactions are admitted like messages and never reach the module otherwise.
-  for (const [changes, message] of [
-    [{ guild_id: "999" }, "other guilds must fail closed"],
-    [{ guild_id: null }, "direct messages must fail closed"],
-    [{ user_id: "999" }, "users outside the allowlist must fail closed"],
-    [{ channel_id: "399" }, "unconfigured channels must fail closed"],
-  ]) {
-    const response = await requestInteraction({
-      ...interaction("305", null, "command", "model", []),
-      ...changes,
-    });
-    assert.equal(response.status, 403, message);
-  }
-  const unauthenticated = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${await credentialValue("operator")}`,
-    },
-    body: JSON.stringify(interaction("305", null, "command", "model", [])),
-  });
-  assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
-  await testRuntimeCommands();
-  await testModuleOperations();
+function configureModel(model, options = {}) {
+  return runtimeSetup(options, "--configure", "--agent", "assistant", "--model", model);
 }
 
 /**
@@ -723,11 +549,11 @@ async function testModuleOperations() {
     spawnSync(binary, ["--home", installation, "discord", ...args], { encoding: "utf8" });
   const settingsFile = providerConfigPath();
   const custom = join(workspace, "card-colours.wasm");
-  const commands = "/model, /command";
+  const commands = "/settings, /command";
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
   assert.match(
     operate("check", exampleModule),
-    /is a usable Discord module .*: \/model, \/command\.$/u,
+    /is a usable Discord module .*: \/settings, \/command\.$/u,
   );
   // A broken candidate is refused before the settings file changes.
   const broken = join(workspace, "broken-module.wasm");
@@ -758,8 +584,8 @@ async function testModuleOperations() {
     `discord-private serves the custom Discord module ${custom}: ${commands}.`,
   );
   assert.match(
-    seen(await interact("305", null, "command", "model")),
-    /Default for new conversations/u,
+    seen(await interact("305", null, "command", "settings")),
+    /^Model {4}Local echo · default$/mu,
   );
 
   // A rebuild that breaks is declared, refused when applied, and the
@@ -776,8 +602,8 @@ async function testModuleOperations() {
   assert.notEqual(refused.status, 0, "an apply served a broken module");
   assert.match(refused.stderr, /not a usable Discord module.*nothing was applied/u);
   assert.match(
-    seen(await interact("305", null, "command", "model")),
-    /Default for new conversations/u,
+    seen(await interact("305", null, "command", "settings")),
+    /^Model {4}Local echo · default$/mu,
   );
 
   // A working rebuild at the same path serves once applied.
@@ -804,8 +630,8 @@ async function testModuleOperations() {
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
   assert.match(
-    seen(await interact("305", null, "command", "model")),
-    /Default for new conversations/u,
+    seen(await interact("305", null, "command", "settings")),
+    /^Model {4}Local echo · default$/mu,
   );
   await rm(custom);
   await writeFile(settingsFile, before);
@@ -892,7 +718,6 @@ async function testPiModelReadiness() {
   // Pi's own offline switch keeps catalog refresh local, without substituting
   // ModelRuntime or borrowing the installing user's model credentials.
   const options = { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } };
-  const settingsPath = join(privateState, "settings.json");
   const modelsPath = join(privateState, "models.json");
   const provider = {
     baseUrl: "http://127.0.0.1:1/v1",
@@ -900,45 +725,35 @@ async function testPiModelReadiness() {
     models: [{ id: "readiness-model" }],
   };
   try {
-    for (const [settings, configured, message] of [
-      [{}, provider, /no Pi model is selected/u],
-      [
-        { defaultProvider: "readiness-fixture", defaultModel: "missing-model" },
-        { ...provider, apiKey: "test-only" },
-        /selected Pi model readiness-fixture\/missing-model is not available/u,
-      ],
-      [
-        { defaultProvider: "readiness-fixture", defaultModel: "readiness-model" },
-        provider,
-        /selected Pi model readiness-fixture\/readiness-model is not available/u,
-      ],
-    ]) {
-      await writeFile(settingsPath, JSON.stringify(settings));
-      await writeFile(
-        modelsPath,
-        JSON.stringify({ providers: { "readiness-fixture": configured } }),
-      );
-      assertStartupRefused("runtime", message, [], options);
-      // Setup's readiness check is the same startup check.
-      assertStartupRefused("runtime", message, ["--check"], options);
-      assert.deepEqual(await readdir(storage), [], "setup failure must not create a native turn");
-    }
-    // Core stays stopped throughout this runtime-only readiness check, so no
-    // queued work can reach the intentionally non-listening model endpoint.
+    await writeFile(modelsPath, JSON.stringify({ providers: { "readiness-fixture": provider } }));
+    assert.throws(
+      () => runtimeSetup(options, "--check"),
+      /Pi is not ready: Pi offers no model; sign in with \/login/u,
+    );
     await writeFile(
       modelsPath,
       JSON.stringify({
         providers: { "readiness-fixture": { ...provider, apiKey: "test-only" } },
       }),
     );
-    const [program, args] = serviceArguments("runtime", options);
-    const checked = spawnSync(program, [...args, "--check"], {
-      encoding: "utf8",
-      timeout: 30_000,
-      env: options.env,
+    assert.equal(runtimeSetup(options, "--check"), "Pi is signed in and offers a model.\n");
+    assert.throws(
+      () => configureModel("readiness-fixture/missing-model", options),
+      /readiness-fixture\/missing-model is not a model offered here/u,
+    );
+    assert.equal(
+      configureModel("readiness-fixture/readiness-model", options),
+      "assistant runs readiness-model (readiness-fixture/readiness-model).\n",
+    );
+    assert.deepEqual(JSON.parse(runtimeSetup(options, "--models", "--agent", "assistant")), {
+      models: [
+        { provider: "readiness-fixture", model: "readiness-model", name: "readiness-model" },
+      ],
+      value: "readiness-fixture/readiness-model",
     });
-    assert.equal(checked.status, 0, checked.stderr);
-    assert.equal(checked.stdout, "Pi is signed in and has a default model.\n");
+    await assert.rejects(stat(storage), { code: "ENOENT" }, "setup must not create native state");
+    // Core stays stopped throughout this runtime-only readiness check, so no
+    // queued work can reach the intentionally non-listening model endpoint.
     await start("runtime", options);
     const response = await fetch(`http://${runtimeHost}:${String(basePort + 2)}/health`);
     assert.equal(response.status, 200);
@@ -950,6 +765,7 @@ async function testPiModelReadiness() {
     await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
     await rename(`${storage}-saved`, storage);
+    configureModel("local/echo");
   }
 }
 
@@ -1013,10 +829,6 @@ async function testProviderFailure() {
   const log = [];
   try {
     await writeFile(
-      join(privateState, "settings.json"),
-      JSON.stringify({ defaultProvider: "failure-fixture", defaultModel: "failure-model" }),
-    );
-    await writeFile(
       join(privateState, "models.json"),
       JSON.stringify({
         providers: {
@@ -1029,7 +841,9 @@ async function testProviderFailure() {
         },
       }),
     );
-    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" }, log });
+    const native = { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } };
+    configureModel("failure-fixture/failure-model", native);
+    await start("runtime", { ...native, log });
 
     const explained = await simulate("provider-failure-explained", "use the provider");
     assert.equal(explained.delivery.turn_state, "interrupted");
@@ -1081,6 +895,7 @@ async function testProviderFailure() {
     await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
     await rename(`${storage}-saved`, storage);
+    configureModel("local/echo");
   }
 }
 
@@ -1137,10 +952,6 @@ async function testActivityVisibility() {
   await mkdir(privateState);
   try {
     await writeFile(
-      join(privateState, "settings.json"),
-      JSON.stringify({ defaultProvider: "activity-fixture", defaultModel: "activity-model" }),
-    );
-    await writeFile(
       join(privateState, "models.json"),
       JSON.stringify({
         providers: {
@@ -1153,7 +964,9 @@ async function testActivityVisibility() {
         },
       }),
     );
-    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } });
+    const native = { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } };
+    configureModel("activity-fixture/activity-model", native);
+    await start("runtime", native);
     const answered = simulate("activity-slow", "wait for the marker");
     answered.catch(() => undefined);
     const discord = `Bearer ${await credentialValue("discord-private")}`;
@@ -1214,6 +1027,7 @@ async function testActivityVisibility() {
     await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
     await rename(`${storage}-saved`, storage);
+    configureModel("local/echo");
   }
 }
 
@@ -1256,17 +1070,21 @@ token_file = "credentials/t3.token"
 
 [agents.assistant]
 project_id = "project-1"
-
-[agents.assistant.model]
-instance_id = "claudeAgent"
-model = "claude-sonnet-5"
-
-[agents.assistant.model.options]
-effort = "low"
 `,
     );
     await restart("core");
     await start("runtime-t3");
+    // The fake T3 server answers from this process, so the command must not block it.
+    const { stdout } = await promisify(execFile)(binary, [
+      "--home",
+      installation,
+      "settings",
+      "--agent",
+      "assistant",
+      "model=claudeAgent/claude-sonnet-5",
+      "effort=low",
+    ]);
+    assert.equal(stdout, "assistant\nModel      Claude Sonnet 5\nEffort     Low\nFast Mode  Off\n");
     // The example module draws these cards: the bundled text, coloured.
     discordSettings = await readFile(providerConfigPath());
     run("--home", installation, "discord", "module", "enable", exampleModule);
@@ -1345,6 +1163,7 @@ effort = "low"
     await stop("runtime-t3");
     await writeFile(configPath(), original);
     await rm(settings, { force: true });
+    await rm(join(installation, "state/components/runtime-t3/settings.json"), { force: true });
     await rm(credential("runtime-t3"), { force: true });
     await rm(t3Token, { force: true });
     await restart("core");
@@ -1389,6 +1208,7 @@ async function testMissingResourceRoot(turnId) {
           agent_id: "assistant",
           user_id: "200",
           audience_id: "new-conversation",
+          channel_id: "300",
           delivery_target_id: "300",
           feedback_target_id: "300:missing-resources",
           content: "must not be accepted without the configured root",
@@ -1812,12 +1632,12 @@ function interaction(channelId, parentChannelId, kind, name, values, options = {
   };
 }
 
-async function requestInteraction(source) {
+async function requestInteraction(source, caller = "discord-private") {
   return fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      authorization: `Bearer ${await credentialValue(caller)}`,
     },
     body: JSON.stringify(source),
   });
@@ -1921,6 +1741,7 @@ async function postCoreEvent(eventId, content, attachments) {
       agent_id: "assistant",
       user_id: "200",
       audience_id: "discord-100-306",
+      channel_id: "306",
       delivery_target_id: "306",
       feedback_target_id: `306:${eventId}`,
       content,
@@ -1942,6 +1763,7 @@ async function submitCoreEvent(eventId, content, channel = "300") {
       agent_id: "assistant",
       user_id: "200",
       audience_id: `discord-100-${channel}`,
+      channel_id: channel,
       delivery_target_id: channel,
       feedback_target_id: `${channel}:${eventId}`,
       content,
@@ -2005,7 +1827,7 @@ async function waitForTurn(turnId, state, deliveryState = null) {
   );
 }
 
-function serviceArguments(name, { nativePi = false, module = discordModule } = {}) {
+function serviceArguments(name, { nativePi = false, module = discordModule, config } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime-t3")
     return [
@@ -2042,7 +1864,7 @@ function serviceArguments(name, { nativePi = false, module = discordModule } = {
       "discord",
       "serve",
       "--config",
-      configPath(),
+      config ?? configPath(),
       "--provider",
       "discord-private",
       "--token-file",
