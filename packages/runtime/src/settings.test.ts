@@ -241,6 +241,11 @@ it("serializes changes from separately opened ledgers on one file", async () => 
       ),
     );
     expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-    expect(outcomes.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    const lost = outcomes.flatMap((outcome) =>
+      outcome.status === "rejected" ? [outcome.reason] : [],
+    );
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toBeInstanceOf(ExplainedFailure);
+    expect((lost[0] as ExplainedFailure).status).toBe(409);
   });
 });

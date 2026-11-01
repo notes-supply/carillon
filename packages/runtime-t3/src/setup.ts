@@ -141,9 +141,11 @@ export function plain(agent: Agent): Agent {
 }
 
 /**
- * Writes the runtime's settings for `choice` on the server at `endpoint`,
- * naming the token's file, then makes the model the agent's in the settings
- * ledger. The server must offer the project, rooted at the agent's
+ * Makes the model the agent's in the settings ledger, then writes the
+ * runtime's settings for `choice` on the server at `endpoint`, naming the
+ * token's file. Settings written last mean a setup cut off between the two
+ * is asked again, as `check` refuses settings without the agent. The
+ * server must offer the project, rooted at the agent's
  * workspace, and the model. The settings of the other agents this runtime
  * serves are kept, as are the agent's model options while its model stays
  * the same; settings that do not read as valid are refused before anything
@@ -174,10 +176,6 @@ export async function configure(
   const model = modelChoiceId({ provider: choice.instanceId, model: choice.model });
   if (!offer.catalogue.models.some((candidate) => modelChoiceId(candidate) === model))
     throw new Error(`T3 offers ${agent.name} no usable model ${model}`);
-  await publishSettings(installation, endpoint, existing, {
-    ...existing?.agents,
-    [choice.agentId]: { project_id: project.id },
-  });
   const ledger = await openLedger(installation);
   const subject = { kind: "agent", agent_id: choice.agentId } as const;
   const line = (await ledger.settings(offer.catalogue, subject)).find(({ id }) => id === "model");
@@ -189,6 +187,10 @@ export async function configure(
       value: { kind: "one", id: model },
       expected: line.revision,
     });
+  await publishSettings(installation, endpoint, existing, {
+    ...existing?.agents,
+    [choice.agentId]: { project_id: project.id },
+  });
   return project;
 }
 

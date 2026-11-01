@@ -595,7 +595,8 @@ refuses its database format and changes nothing. To move to it:
 1. Run `carillon stop`, then move `~/.carillon` aside.
 2. Create a new `~/.carillon` with mode 700. Copy these from the old one,
    keeping their modes: `carillon.toml`, `providers/*.toml`, `credentials/`,
-   `pi/auth.json`, `pi/models.json`, `pi/settings.json` and `agents/`.
+   `pi/auth.json`, `pi/models.json`, `pi/settings.json`, `pi/mcp.json` if
+   you have one, and `agents/`.
 3. Run the new release's `install.sh` and answer setup. It keeps the
    Discord settings and the Pi sign-in. It asks T3's address, token and
    projects again, because the old T3 settings name a model, and the model
