@@ -37,8 +37,9 @@ pub(crate) async fn deliver(
         Applying::Unreachable => {
             change.write(loaded, provider)?;
             println!(
-                "The Discord provider does not answer at {}, so the settings file was changed in \
-                 place: a stopped provider serves it when it starts.",
+                "The Discord provider does not answer at {}, so whether it serves these settings \
+                 is not confirmed: the settings file was changed in place, and a stopped \
+                 provider reads it when it starts.",
                 operator.url
             );
         }
