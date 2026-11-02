@@ -325,8 +325,9 @@ carillon settings --agent assistant reset extensions    # the default again
 
 `extensions=` takes the whole list, comma separated, and refuses a name the
 agent does not have, listing the ones it has. Busy and Extensions are kept
-in the agent's `settings.json` in `CARILLON_HOME/agents/<agent>/`, which a
-change rewrites keeping everything else it holds; you can also edit that
+in `settings.json` in the agent's `resources` directory, which is
+`CARILLON_HOME/agents/default/` for the assistant setup creates. A change
+rewrites that file keeping everything else it holds; you can also edit that
 file by hand, such as `{ "extensions": { "add": ["schedules"] } }`. Either
 way the next message Pi receives brings the change, and from then on the
 agent's extensions apply to every request it makes, also for an answer
