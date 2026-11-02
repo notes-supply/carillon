@@ -281,9 +281,19 @@ async fn draw(
 /// Runs `/settings` until `stop`. Core is not there, so the module draws the
 /// route's lines with the runtime unavailable.
 async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters>) {
+    let Ok((_installation, writer)) = crate::config::tests::writer() else {
+        seen.failed.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
     while !stop.load(Ordering::Relaxed) {
-        let calls = crate::client::test_client("http://127.0.0.1:1".to_owned())
-            .map(|core| InteractionCalls::new(core, super::tests::route(), None));
+        let calls = crate::client::test_client("http://127.0.0.1:1".to_owned()).map(|core| {
+            InteractionCalls::new(
+                core,
+                writer.clone(),
+                crate::channels::Routing::Routed(super::tests::route()),
+                None,
+            )
+        });
         let interaction = Interaction {
             kind: InteractionKind::Command,
             name: "settings".to_owned(),

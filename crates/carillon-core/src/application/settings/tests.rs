@@ -54,11 +54,11 @@ const MODELS: [(&str, &str); 2] = [
 fn home(generation: usize) -> Page {
     let mut page = Page {
         title: "#home".to_owned(),
-        subject: Subject::Channel {
+        subject: Some(Subject::Channel {
             interface_id: "discord-private".to_owned(),
             channel_id: "300".to_owned(),
             agent_id: "assistant".to_owned(),
-        },
+        }),
         interface: vec![
             setting(
                 "agent",
@@ -126,9 +126,9 @@ fn a_page_is_drawn_as_its_owners_return_it() {
     );
     let page = Page {
         title: "assistant".to_owned(),
-        subject: Subject::Agent {
+        subject: Some(Subject::Agent {
             agent_id: "assistant".to_owned(),
-        },
+        }),
         interface: Vec::new(),
         runtime: RuntimePart::Settings(RuntimeSettings {
             settings: vec![
@@ -172,11 +172,11 @@ fn a_page_is_drawn_as_its_owners_return_it() {
 fn routed_channels_are_listed_one_line_each() {
     let other = Page {
         title: "#carillon-fresh-install".to_owned(),
-        subject: Subject::Channel {
+        subject: Some(Subject::Channel {
             interface_id: "discord-private".to_owned(),
             channel_id: "3010".to_owned(),
             agent_id: "t3-code".to_owned(),
-        },
+        }),
         runtime: RuntimePart::Unavailable {
             reason: "The runtime did not answer in time.".to_owned(),
         },
@@ -305,9 +305,9 @@ fn agent_page() -> Page {
     ];
     let mut page = Page {
         title: "assistant".to_owned(),
-        subject: Subject::Agent {
+        subject: Some(Subject::Agent {
             agent_id: "assistant".to_owned(),
-        },
+        }),
         interface: Vec::new(),
         runtime: RuntimePart::Settings(RuntimeSettings {
             settings: vec![

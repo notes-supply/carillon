@@ -9,7 +9,6 @@ use interactions::{handle_interaction, run_interaction};
 use crate::conversations::{InteractionSource, SourceAttachment, admit_interaction};
 use crate::{
     attachments::Downloads,
-    error::discord_failure_is_terminal,
     gateway::{Dispatch, Gateway, Identity, record_path, take_record},
     inbound::{
         Ingress, PREPARATION_DEADLINE, QueuedMessage, Settlements, known_receipt,
@@ -21,7 +20,7 @@ use crate::{
     InterfaceError,
     activity::{CardRecords, activity_monitor},
     client::CoreClient,
-    config::{self, DiscordConfig, Settings, state_directory},
+    config::{self, DiscordConfig, FileChange, Settings, Writer, state_directory},
     controls,
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
@@ -29,7 +28,8 @@ use crate::{
     },
     delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
     module::{
-        ChangeError, Declared, DiscordApp, Module, ModuleFiles, Refusal, Status, answer::answer,
+        self as discord_module, Declared, DiscordApp, Module, ModuleFiles, Refusal, Registration,
+        Status, answer::answer,
     },
 };
 #[cfg(test)]
@@ -41,7 +41,7 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -119,6 +119,15 @@ struct Connection {
 impl DiscordState {
     fn app(&self) -> Option<&DiscordApp> {
         self.connection.as_ref().map(|connection| &*connection.app)
+    }
+
+    /// The one writer of the settings file, serving what it writes.
+    fn writer(&self) -> Writer {
+        Writer::new(
+            self.settings.clone(),
+            Arc::clone(&self.installation),
+            self.health.id.as_str(),
+        )
     }
 }
 
@@ -363,7 +372,12 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
         .route("/health", get(discord_health))
         .route("/v1/operations", post(discord_operation))
         .route("/v1/module", get(module_status))
-        .route("/v1/settings", get(settings_status).post(apply_settings))
+        .route(
+            "/v1/settings",
+            get(settings_status)
+                .post(apply_settings)
+                .put(change_settings),
+        )
         .route("/v1/channels", get(channels::list))
         .route(
             "/v1/channels/{channel_id}/settings",
@@ -529,7 +543,7 @@ async fn apply_settings(
             difference.restart,
         ),
         config::Refusal::Module(failure) => {
-            let (status, error) = module_refusal(failure);
+            let (status, error) = config::module_refusal(failure);
             (status, error, Vec::new())
         }
     };
@@ -544,47 +558,66 @@ async fn apply_settings(
         .into_response())
 }
 
-fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
-    error!(error = %failure, "Discord module change refused");
-    match failure {
-        ChangeError::Busy(installation) => (
-            StatusCode::CONFLICT,
-            format!(
-                "another Carillon maintenance operation is running for {}; nothing was applied. \
-                 Apply again once it finishes",
-                installation.display()
-            ),
+/// Applies a change the CLI asks of the settings file, as its one writer,
+/// and serves the result, the module it declares included. Like an apply,
+/// it runs as its own task. A change to what only a restart applies is
+/// written and not served.
+async fn change_settings(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+    body: Result<Json<FileChange>, JsonRejection>,
+) -> Result<Response, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    let Json(change) = body.map_err(|rejection| InterfaceError {
+        status: StatusCode::BAD_REQUEST,
+        message: rejection.body_text(),
+    })?;
+    let changing = state.clone();
+    let written = tokio::spawn(async move {
+        let state = &changing;
+        state
+            .writer()
+            .declare(
+                |discord| change.apply(discord),
+                |file| {
+                    let source = file.module_source(&state.installation.root);
+                    state.module.apply(source, state.app())
+                },
+            )
+            .await
+    })
+    .await
+    .map_err(|failure| InterfaceError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!(
+            "changing the settings failed unexpectedly ({failure}); check \
+             `carillon discord settings`"
         ),
-        ChangeError::Lock(failure) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not take the maintenance lock: {failure:#}; nothing was applied"),
-        ),
-        ChangeError::Unusable(failure) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("not a usable Discord module: {failure:#}; nothing was applied"),
-        ),
-        ChangeError::Record(failure) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "could not clear the command registration record ({failure}), so Discord was \
-                 not contacted and nothing was applied. Check the provider's state directory, \
-                 then apply again"
-            ),
-        ),
-        ChangeError::Register(failure) if discord_failure_is_terminal(&failure) => (
-            StatusCode::BAD_GATEWAY,
-            format!(
-                "Discord rejected the module's commands: {failure:#}. Nothing was applied; \
-                 correct the module's command definitions and apply again"
-            ),
-        ),
-        ChangeError::Register(failure) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            format!(
-                "Discord did not confirm the module's commands: {failure:#}. It may have \
-                 applied them; nothing else was applied. Apply again once Discord answers"
-            ),
-        ),
+    })?;
+    let serving = state.module.serving();
+    match written {
+        Ok(written) => Ok(Json(config::Applied {
+            changed: written.changed,
+            module: written.module.unwrap_or_else(|| discord_module::Change {
+                previous: serving.clone(),
+                serving,
+                discord: Registration::Unchanged,
+            }),
+            restart: written.restart,
+        })
+        .into_response()),
+        Err(refused) => {
+            let InterfaceError { status, message } = refused.into();
+            Ok((
+                status,
+                Json(Refusal {
+                    error: message,
+                    serving,
+                    restart: Vec::new(),
+                }),
+            )
+                .into_response())
+        }
     }
 }
 

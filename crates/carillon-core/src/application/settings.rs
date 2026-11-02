@@ -279,7 +279,7 @@ impl Owner {
                 .await?;
                 Ok(Page {
                     title: agent_id.clone(),
-                    subject,
+                    subject: Some(subject),
                     interface: Vec::new(),
                     runtime: RuntimePart::Settings(settings),
                 })
@@ -402,8 +402,9 @@ fn summary(pages: &[Page]) -> String {
 /// The ID an operator names a page's subject by.
 fn subject_id(page: &Page) -> &str {
     match &page.subject {
-        Subject::Channel { channel_id, .. } => channel_id,
-        Subject::Agent { agent_id } => agent_id,
+        Some(Subject::Channel { channel_id, .. }) => channel_id,
+        Some(Subject::Agent { agent_id }) => agent_id,
+        None => "",
     }
 }
 

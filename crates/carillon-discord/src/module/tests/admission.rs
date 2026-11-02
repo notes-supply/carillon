@@ -264,20 +264,25 @@ async fn conversation(
     )?;
     let (send, receive) = tokio::sync::mpsc::channel(4);
     let dispatcher = tokio::spawn(crate::inbound::lanes::dispatch(ingress.clone(), receive));
-    let calls =
-        super::super::InteractionCalls::new(core, route(), Some("discord-100-300".to_owned()))
-            .with_submissions(super::super::Submissions {
-                http,
-                reactions: ingress.reactions.clone(),
-                lanes: crate::inbound::lanes::Lanes::new(send.clone()),
-                origin: crate::conversations::InteractionOrigin {
-                    guild_id: "100".to_owned(),
-                    user_id: "200".to_owned(),
-                    channel_id: "300".to_owned(),
-                    route_channel_id: "300".to_owned(),
-                },
-                settings: ingress.reactions.settings().current(),
-            });
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let calls = super::super::InteractionCalls::new(
+        core,
+        writer,
+        crate::channels::Routing::Routed(route()),
+        Some("discord-100-300".to_owned()),
+    )
+    .with_submissions(super::super::Submissions {
+        http,
+        reactions: ingress.reactions.clone(),
+        lanes: crate::inbound::lanes::Lanes::new(send.clone()),
+        origin: crate::conversations::InteractionOrigin {
+            guild_id: "100".to_owned(),
+            user_id: "200".to_owned(),
+            channel_id: "300".to_owned(),
+            route_channel_id: "300".to_owned(),
+        },
+        settings: ingress.reactions.settings().current(),
+    });
     let preparing = Preparing {
         ingress,
         send,
@@ -975,9 +980,11 @@ async fn a_refused_settings_command_makes_no_core_call() -> anyhow::Result<()> {
         };
         match crate::conversations::admit_interaction(&config, source) {
             Ok(admitted) => {
+                let (_installation, writer) = crate::config::tests::writer()?;
                 let calls = super::super::InteractionCalls::new(
                     core.clone(),
-                    admitted.route,
+                    writer,
+                    admitted.routing,
                     admitted.audience_id,
                 );
                 module.invoke(calls, admitted.interaction).await?;

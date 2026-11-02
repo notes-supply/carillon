@@ -1,0 +1,362 @@
+//! The running provider is the only program that changes its settings file:
+//! `/settings`, `carillon settings`, setup and module changes all reach it
+//! here. One change at a time reads the file, refuses it when it differs
+//! from what serves, applies the change, validates the result, writes it
+//! atomically and serves it. Only while the provider is stopped does the
+//! CLI write the file itself, under the installation's maintenance lock.
+
+use std::{path::PathBuf, sync::Arc};
+
+use anyhow::{Context as _, Result, anyhow};
+use axum::http::StatusCode;
+use carillon_installation::{config::LoadedConfig, maintenance::MaintenanceLock};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info};
+
+use super::{Difference, DiscordConfig, DiscordRoute, ModuleSetting, Settings};
+use crate::{
+    InterfaceError,
+    error::discord_failure_is_terminal,
+    module::{Change, ChangeError},
+};
+
+/// A change the CLI asks of the settings file: the running provider applies
+/// it, and a stopped provider's file is changed in place.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "change", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum FileChange {
+    /// Who is admitted where, as setup asks it, keeping everything else.
+    Admission {
+        guild_id: String,
+        bot_user_id: String,
+        /// The bot token's file, when setup wrote a new one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bot_token_file: Option<PathBuf>,
+        allowed_user_ids: Vec<String>,
+        routes: Routes,
+    },
+    Module(ModuleSetting),
+}
+
+/// The routes an admission change brings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "routes", content = "list", rename_all = "snake_case")]
+pub(crate) enum Routes {
+    /// Guided setup's answers, which replace the routes.
+    Answered(Vec<DiscordRoute>),
+    /// Unattended setup's first routes: accepted while the file routes no
+    /// channel or routes exactly these, so a repeated install changes
+    /// nothing, and refused otherwise.
+    First(Vec<DiscordRoute>),
+}
+
+impl FileChange {
+    /// Applies the change to `discord`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses first routes that would replace other routes.
+    pub(crate) fn apply(self, discord: &mut DiscordConfig) -> Result<(), Refused> {
+        match self {
+            Self::Admission {
+                guild_id,
+                bot_user_id,
+                bot_token_file,
+                allowed_user_ids,
+                routes,
+            } => {
+                let routes = match routes {
+                    Routes::Answered(routes) => routes,
+                    Routes::First(routes)
+                        if discord.routes.is_empty() || discord.routes == routes =>
+                    {
+                        routes
+                    }
+                    Routes::First(_) => {
+                        return Err(Refused::Invalid(
+                            "--route only creates the first routes, and the Discord settings \
+                             already route channels; change a channel's route with \
+                             `carillon settings <channel> agent=… listens=… replies=…` or \
+                             /settings in Discord"
+                                .to_owned(),
+                        ));
+                    }
+                };
+                discord.guild_id = guild_id;
+                discord.bot_user_id = bot_user_id;
+                if bot_token_file.is_some() {
+                    discord.bot_token_file = bot_token_file;
+                }
+                discord.allowed_user_ids = allowed_user_ids;
+                discord.routes = routes;
+            }
+            Self::Module(module) => discord.module = module,
+        }
+        Ok(())
+    }
+
+    /// Applies the change to the file of a provider that is not running,
+    /// under the installation's maintenance lock, as the provider would.
+    /// Without a file, setup's admission starts from the defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file is unchanged: another maintenance operation
+    /// holds the lock, the file does not read, the change is refused or the
+    /// result is not valid.
+    pub(crate) fn write(self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
+        let unchanged = "the Discord settings were not changed";
+        let _maintenance = MaintenanceLock::acquire_unless_held(&config.root).context(unchanged)?;
+        let config = &config.reload().context(unchanged)?;
+        let mut discord = file_or_defaults(config, provider_id).context(unchanged)?;
+        self.apply(&mut discord)
+            .map_err(|refused| anyhow!("{}", InterfaceError::from(refused).message))?;
+        discord.write(config, provider_id).context(unchanged)
+    }
+}
+
+/// The provider's settings file, or the defaults before setup wrote one.
+///
+/// # Errors
+///
+/// Returns why an existing file does not read.
+pub(crate) fn file_or_defaults(config: &LoadedConfig, provider_id: &str) -> Result<DiscordConfig> {
+    Ok(if config.provider_config_path(provider_id)?.exists() {
+        DiscordConfig::read(config, provider_id)?
+    } else {
+        DiscordConfig::with_defaults(String::new(), String::new(), Vec::new(), Vec::new())
+    })
+}
+
+/// The settings file of one provider, changed through what it serves.
+#[derive(Clone)]
+pub(crate) struct Writer {
+    settings: Settings,
+    installation: Arc<LoadedConfig>,
+    provider_id: Arc<str>,
+}
+
+/// What a change wrote: the edit's own answer, the fields it changed, those
+/// only a restart serves, and the module's change when it declared another.
+#[derive(Debug)]
+pub(crate) struct Written<T> {
+    pub value: T,
+    pub changed: Vec<String>,
+    /// The file was written and nothing of it served: it changes fields only
+    /// a restart applies.
+    pub restart: Vec<String>,
+    pub module: Option<Change>,
+}
+
+/// Why a change left the file and what serves as they were.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// The file does not read as valid settings.
+    Unreadable(anyhow::Error),
+    /// The file differs from what serves: edits nobody applied.
+    Unapplied(Difference),
+    /// The setting is no longer as the change was drawn.
+    Stale,
+    /// The change is not one the settings accept.
+    Invalid(String),
+    Module(ChangeError),
+    Write(anyhow::Error),
+}
+
+impl From<Refused> for InterfaceError {
+    fn from(refused: Refused) -> Self {
+        let (status, message) = match refused {
+            Refused::Unreadable(error) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("the settings file is not valid: {error:#}; nothing was changed"),
+            ),
+            // Not a conflict with the change itself, which a card shows as
+            // changed meanwhile: the file it would apply to is not served.
+            Refused::Unapplied(difference) => (
+                StatusCode::PRECONDITION_FAILED,
+                format!(
+                    "the settings file has changes that are not served ({}); {} serves them. \
+                     Nothing was changed",
+                    difference
+                        .live
+                        .iter()
+                        .chain(&difference.restart)
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if difference.restart.is_empty() {
+                        "`carillon discord settings apply`"
+                    } else {
+                        "`carillon restart`"
+                    }
+                ),
+            ),
+            Refused::Stale => (
+                StatusCode::CONFLICT,
+                "Changed meanwhile; nothing was changed".to_owned(),
+            ),
+            Refused::Invalid(reason) => (StatusCode::UNPROCESSABLE_ENTITY, reason),
+            Refused::Module(failure) => module_refusal(failure),
+            Refused::Write(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not write the settings file: {error:#}"),
+            ),
+        };
+        Self { status, message }
+    }
+}
+
+impl Writer {
+    pub(crate) fn new(
+        settings: Settings,
+        installation: Arc<LoadedConfig>,
+        provider_id: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            settings,
+            installation,
+            provider_id: provider_id.into(),
+        }
+    }
+
+    pub(crate) fn installation(&self) -> &LoadedConfig {
+        &self.installation
+    }
+
+    pub(crate) fn current(&self) -> Arc<DiscordConfig> {
+        self.settings.current()
+    }
+
+    /// Changes the file with `edit`, which never changes the module, and
+    /// serves the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file and what serves are unchanged.
+    pub(crate) async fn change<T>(
+        &self,
+        edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
+    ) -> Result<Written<T>, Refused> {
+        self.write(edit, None::<fn(&DiscordConfig) -> NoModule>)
+            .await
+    }
+
+    /// Changes the file with `edit` and serves the result, first serving the
+    /// module it declares through `module`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file and what serves are unchanged.
+    pub(crate) async fn declare<T, F>(
+        &self,
+        edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
+        module: impl FnOnce(&DiscordConfig) -> F,
+    ) -> Result<Written<T>, Refused>
+    where
+        F: Future<Output = Result<Change, ChangeError>>,
+    {
+        self.write(edit, Some(module)).await
+    }
+
+    async fn write<T, F>(
+        &self,
+        edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
+        module: Option<impl FnOnce(&DiscordConfig) -> F>,
+    ) -> Result<Written<T>, Refused>
+    where
+        F: Future<Output = Result<Change, ChangeError>>,
+    {
+        let _one = self.settings.0.applying.lock().await;
+        let serving = self.settings.current();
+        let file = DiscordConfig::load(&self.installation, &self.provider_id)
+            .map_err(Refused::Unreadable)?;
+        let unapplied = Difference::between(&serving, &file);
+        if !unapplied.live.is_empty() || !unapplied.restart.is_empty() {
+            return Err(Refused::Unapplied(unapplied));
+        }
+        let mut next = file;
+        let value = edit(&mut next)?;
+        next.validate(&self.installation, &self.provider_id)
+            .map_err(|error| Refused::Invalid(format!("{error:#}; nothing was changed")))?;
+        let mut difference = Difference::between(&serving, &next);
+        // The module's file decides as well as its declaration, so a module
+        // rebuilt at the same path serves too.
+        let module = match module {
+            Some(module) if difference.restart.is_empty() => {
+                let module = module(&next).await.map_err(Refused::Module)?;
+                if module.serving != module.previous
+                    && !difference.live.iter().any(|field| field == "module")
+                {
+                    difference.live.push("module".to_owned());
+                }
+                Some(module)
+            }
+            _ => None,
+        };
+        next.write(&self.installation, &self.provider_id)
+            .map_err(Refused::Write)?;
+        if difference.restart.is_empty() && !difference.live.is_empty() {
+            info!(
+                changed = difference.live.join(", "),
+                "Discord settings changed"
+            );
+            self.settings.0.current.send_replace(Arc::new(next));
+        }
+        Ok(Written {
+            value,
+            changed: if difference.restart.is_empty() {
+                difference.live
+            } else {
+                Vec::new()
+            },
+            restart: difference.restart,
+            module,
+        })
+    }
+}
+
+type NoModule = std::future::Ready<Result<Change, ChangeError>>;
+
+pub(crate) fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
+    error!(error = %failure, "Discord module change refused");
+    match failure {
+        ChangeError::Busy(installation) => (
+            StatusCode::CONFLICT,
+            format!(
+                "another Carillon maintenance operation is running for {}; nothing was applied. \
+                 Apply again once it finishes",
+                installation.display()
+            ),
+        ),
+        ChangeError::Lock(failure) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not take the maintenance lock: {failure:#}; nothing was applied"),
+        ),
+        ChangeError::Unusable(failure) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("not a usable Discord module: {failure:#}; nothing was applied"),
+        ),
+        ChangeError::Record(failure) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "could not clear the command registration record ({failure}), so Discord was \
+                 not contacted and nothing was applied. Check the provider's state directory, \
+                 then apply again"
+            ),
+        ),
+        ChangeError::Register(failure) if discord_failure_is_terminal(&failure) => (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Discord rejected the module's commands: {failure:#}. Nothing was applied; \
+                 correct the module's command definitions and apply again"
+            ),
+        ),
+        ChangeError::Register(failure) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "Discord did not confirm the module's commands: {failure:#}. It may have \
+                 applied them; nothing else was applied. Apply again once Discord answers"
+            ),
+        ),
+    }
+}

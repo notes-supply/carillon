@@ -1,7 +1,8 @@
 //! Message admission, activation, durable participation, and conversation identity.
 use crate::{
     InterfaceError,
-    config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
+    channels::Routing,
+    config::{DiscordActivation, DiscordConfig, DiscordConversation},
 };
 use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
@@ -493,7 +494,7 @@ pub struct InteractionSource {
 /// and where it came from.
 pub struct AdmittedInteraction {
     pub interaction: Interaction,
-    pub(crate) route: DiscordRoute,
+    pub(crate) routing: Routing,
     pub audience_id: Option<String>,
     pub origin: InteractionOrigin,
 }
@@ -505,23 +506,25 @@ pub struct InteractionOrigin {
     pub user_id: String,
     /// The channel or thread the interaction happened in.
     pub channel_id: String,
-    /// The configured route that admitted it.
+    /// The configured route that admitted it, or the unrouted channel.
     pub route_channel_id: String,
 }
 
 /// Fail-closed admission for interactions: the configured guild, an
-/// allowlisted user, and a routed channel or a thread under a thread route.
-/// The conversation is the one messages there would belong to.
+/// allowlisted user, and a routed channel, a thread under a thread route, or
+/// a channel no route names yet, which reaches no runtime. The conversation
+/// is the one messages there would belong to.
 ///
 /// # Errors
-/// Rejects unconfigured guilds/routes and users outside the allowlist.
+/// Rejects unconfigured guilds, users outside the allowlist, and threads
+/// outside a thread route's channel.
 pub fn admit_interaction(
     config: &DiscordConfig,
     source: InteractionSource,
 ) -> Result<AdmittedInteraction, InterfaceError> {
     admit_identity(config, source.guild_id.as_deref(), &source.user_id)?;
     let guild_id = source.guild_id.unwrap_or_default();
-    let (audience_id, route) = if let Some(route) = config
+    let (audience_id, routing) = if let Some(route) = config
         .routes
         .iter()
         .find(|route| route.channel_id == source.channel_id)
@@ -529,22 +532,27 @@ pub fn admit_interaction(
         (
             (route.conversation == DiscordConversation::Channel)
                 .then(|| format!("discord-{guild_id}-{}", source.channel_id)),
-            route,
+            Routing::Routed(route.clone()),
         )
-    } else if let Some(route) = source.parent_channel_id.as_deref().and_then(|parent| {
-        config.routes.iter().find(|route| {
-            route.channel_id == parent && route.conversation == DiscordConversation::Thread
-        })
-    }) {
+    } else if let Some(parent) = source.parent_channel_id.as_deref() {
+        let route = config
+            .routes
+            .iter()
+            .find(|route| {
+                route.channel_id == parent && route.conversation == DiscordConversation::Thread
+            })
+            .ok_or_else(|| InterfaceError {
+                status: StatusCode::FORBIDDEN,
+                message: "thread is not in a Discord route's channel".to_owned(),
+            })?;
         (
             Some(format!("discord-{guild_id}-{}", source.channel_id)),
-            route,
+            Routing::Routed(route.clone()),
         )
     } else {
-        return Err(InterfaceError {
-            status: StatusCode::FORBIDDEN,
-            message: "channel is not configured as a Discord route".to_owned(),
-        });
+        // A channel of the guild no route names: its settings page can
+        // route it, and nothing reaches a runtime until then.
+        (None, Routing::Unrouted(source.channel_id.clone()))
     };
     Ok(AdmittedInteraction {
         interaction: Interaction {
@@ -555,14 +563,14 @@ pub fn admit_interaction(
             conversation: audience_id.is_some(),
             markers: config.activity_markers.clone(),
         },
-        route: route.clone(),
-        audience_id,
         origin: InteractionOrigin {
             guild_id,
             user_id: source.user_id,
             channel_id: source.channel_id,
-            route_channel_id: route.channel_id.clone(),
+            route_channel_id: routing.channel_id().to_owned(),
         },
+        routing,
+        audience_id,
     })
 }
 

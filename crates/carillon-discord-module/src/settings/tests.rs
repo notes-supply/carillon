@@ -158,11 +158,11 @@ fn route() -> Result<Vec<Setting>, String> {
 fn page(runtime: RuntimePart) -> Result<Page, String> {
     Ok(Page {
         title: "<#300>".to_owned(),
-        subject: Subject::Channel {
+        subject: Some(Subject::Channel {
             interface_id: "discord".to_owned(),
             channel_id: "300".to_owned(),
             agent_id: "assistant".to_owned(),
-        },
+        }),
         interface: route()?,
         runtime,
     })

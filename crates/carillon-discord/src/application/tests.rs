@@ -355,7 +355,7 @@ async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> a
             .await
             .err()
             .context("undecodable create should fail")?;
-        assert!(!super::discord_failure_is_terminal(&failure));
+        assert!(!crate::error::discord_failure_is_terminal(&failure));
         assert_eq!(state.participation.created_thread("200"), None);
         let recovered =
             super::prepare_conversation(&state.participation, &http, plan.clone()).await?;
@@ -429,7 +429,7 @@ async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<
         .err()
         .context("lookup should fail")?;
         assert_eq!(
-            super::discord_failure_is_terminal(&failure),
+            crate::error::discord_failure_is_terminal(&failure),
             status == StatusCode::FORBIDDEN
         );
         assert_eq!(creates.load(Ordering::SeqCst), 0);

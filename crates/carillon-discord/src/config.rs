@@ -1,6 +1,6 @@
 //! The Discord provider's own configuration: `providers/<id>.toml` beside
-//! `carillon.toml`. Core never reads it; only the provider and its
-//! `configure` command know the schema.
+//! `carillon.toml`. Core never reads it; only the provider knows the
+//! schema, and while it runs it is the file's only writer.
 
 use std::{
     collections::BTreeSet,
@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{
     LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
 };
-use carillon_installation::{filesystem::atomic_write, maintenance::MaintenanceLock};
+use carillon_installation::filesystem::atomic_write;
 use carillon_protocol::turns::ControlAction;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -775,6 +775,7 @@ impl Settings {
         Ok(Applied {
             changed: difference.live,
             module,
+            restart: Vec::new(),
         })
     }
 }
@@ -801,6 +802,10 @@ pub(crate) enum FileState {
 pub(crate) struct Applied {
     pub changed: Vec<String>,
     pub module: Change,
+    /// Fields a change wrote that only a restart serves; nothing of that
+    /// change serves until then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart: Vec<String>,
 }
 
 /// Why an apply left the serving settings and module in place.
@@ -811,64 +816,6 @@ pub(crate) enum Refusal {
     Restart(Difference),
     /// The module the file declares could not serve.
     Module(ChangeError),
-}
-
-/// Replaces the admission settings of an existing file, or creates the file,
-/// keeping any feedback settings the operator tuned by hand.
-pub(crate) fn configure(
-    config: &LoadedConfig,
-    provider_id: &str,
-    guild_id: &str,
-    bot_user_id: &str,
-    allowed_user_ids: &[String],
-    routes: &[DiscordRoute],
-) -> Result<()> {
-    admitted(
-        config,
-        provider_id,
-        guild_id,
-        bot_user_id,
-        allowed_user_ids,
-        routes,
-    )?
-    .write(config, provider_id)
-}
-
-/// The settings [`configure`] writes, not yet validated: the existing file,
-/// or defaults, with these admission settings.
-pub(crate) fn admitted(
-    config: &LoadedConfig,
-    provider_id: &str,
-    guild_id: &str,
-    bot_user_id: &str,
-    allowed_user_ids: &[String],
-    routes: &[DiscordRoute],
-) -> Result<DiscordConfig> {
-    let mut discord = if config.provider_config_path(provider_id)?.exists() {
-        DiscordConfig::read(config, provider_id)?
-    } else {
-        DiscordConfig::with_defaults(String::new(), String::new(), Vec::new(), Vec::new())
-    };
-    guild_id.clone_into(&mut discord.guild_id);
-    bot_user_id.clone_into(&mut discord.bot_user_id);
-    discord.allowed_user_ids = allowed_user_ids.to_vec();
-    discord.routes = routes.to_vec();
-    Ok(discord)
-}
-
-/// Changes the module an existing settings file declares, keeping the rest,
-/// under the installation's maintenance lock: while another maintenance
-/// operation holds it, the file is left as it is.
-pub(crate) fn declare_module(
-    config: &LoadedConfig,
-    provider_id: &str,
-    change: impl FnOnce(&mut ModuleSetting),
-) -> Result<()> {
-    let _maintenance = MaintenanceLock::acquire_unless_held(&config.root)
-        .context("the settings file was not changed")?;
-    let mut discord = DiscordConfig::read(config, provider_id)?;
-    change(&mut discord.module);
-    discord.write(config, provider_id)
 }
 
 /// The instance's private state: participation, the command registration
@@ -882,6 +829,10 @@ fn valid_snowflake(value: &str) -> bool {
         .parse::<u64>()
         .is_ok_and(|id| id != 0 && id.to_string() == value)
 }
+
+mod mutation;
+
+pub(crate) use mutation::{FileChange, Refused, Routes, Writer, file_or_defaults, module_refusal};
 
 #[cfg(test)]
 pub(crate) mod tests;

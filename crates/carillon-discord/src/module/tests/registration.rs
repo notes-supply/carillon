@@ -335,8 +335,13 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let core = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let calls =
-        super::super::InteractionCalls::new(crate::client::test_client(core)?, route(), None);
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let calls = super::super::InteractionCalls::new(
+        crate::client::test_client(core)?,
+        writer,
+        crate::channels::Routing::Routed(route()),
+        None,
+    );
     let under_way = tokio::spawn({
         let commands = commands.clone();
         async move { commands.invoke(calls, interaction()).await }

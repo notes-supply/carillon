@@ -89,33 +89,14 @@ async fn a_settings_apply_is_sent_once_and_only_an_answer_confirms_it() -> Resul
         operator.apply_settings().await?,
         super::Applying::Unreachable
     ));
-    // A refusal is the provider's answer. A conflict it does not mark as
-    // one a restart resolves, as when maintenance is busy, is not one.
+    // A refusal is the provider's answer, in its words.
     let refusal: &[u8] =
         b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
     let (operator, server) = applying_provider(Some(refusal)).await?;
     let super::Applying::Refused(refused) = operator.apply_settings().await? else {
         anyhow::bail!("a refusal was not reported as one");
     };
-    assert_eq!(refused.reason, "guild changed");
-    assert!(refused.restart.is_empty());
-    assert_eq!(server.await?, 1);
-    let body = json!({
-        "error": "only a restart applies (guild_id)",
-        "serving": {"source": "bundled", "commands": [], "digest": "d"},
-        "restart": ["guild_id"],
-    })
-    .to_string();
-    let answer = format!(
-        "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let (operator, server) =
-        answering_after(Some(answer.into_bytes()), std::time::Duration::ZERO).await?;
-    let super::Applying::Refused(refused) = operator.apply_settings().await? else {
-        anyhow::bail!("a refusal was not reported as one");
-    };
-    assert_eq!(refused.restart, ["guild_id"]);
+    assert_eq!(refused, "guild changed");
     assert_eq!(server.await?, 1);
     // A request the provider received without answering may have been
     // applied: it is reported as unconfirmed and not sent again.
@@ -576,9 +557,8 @@ async fn a_module_declaration_changes_only_outside_other_maintenance() -> Result
     Ok(())
 }
 
-/// After setup or `configure`, a refusal of what only a restart applies
-/// waits for `carillon restart` only when this release would serve the
-/// saved file; any other refusal is an error, the file saved.
+/// After the provider wrote a change only a restart applies, the saved file
+/// waits for `carillon restart` only when this release would serve it.
 #[tokio::test]
 async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Result<()> {
     use crate::module::tests::{definition, describing, module, replying};
@@ -589,17 +569,16 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
         "discord-private",
         46_720,
     )?;
-    let refused = |restart: &[&str]| super::Refused {
-        reason: "the settings file changes what only a restart applies".to_owned(),
-        restart: restart.iter().map(|field| (*field).to_owned()).collect(),
-    };
-    let outcome = |restart: &[&str]| {
+    let outcome = || {
         let config = config.clone();
-        let refused = refused(restart);
         async move {
-            super::saved_but_refused(&config, "discord-private", refused)
-                .await
-                .map_err(|error| format!("{error:#}"))
+            super::writing::written_for_restart(
+                &config,
+                "discord-private",
+                &["guild_id".to_owned()],
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))
         }
     };
     let declare = |path: Option<&Path>| -> Result<()> {
@@ -609,16 +588,16 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
         discord.write(&config, "discord-private")
     };
 
-    // Fields only a restart applies, with the bundled module or a usable
-    // custom one: the saved file waits for `carillon restart`.
-    outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+    // With the bundled module or a usable custom one, the saved file waits
+    // for `carillon restart`.
+    outcome().await.map_err(anyhow::Error::msg)?;
     let custom = directory.path().join("custom.wasm");
     fs::write(
         &custom,
         module(&describing(&[definition("model")]), &replying("ok", &[]))?,
     )?;
     declare(Some(&custom))?;
-    outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+    outcome().await.map_err(anyhow::Error::msg)?;
     // The provider did not try the module: one rebuilt for another
     // contract, or deleted, would keep a restart from starting it.
     for broken in [Some(&b"\0asm old contract"[..]), None] {
@@ -626,7 +605,7 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
             Some(bytes) => fs::write(&custom, bytes)?,
             None => fs::remove_file(&custom)?,
         }
-        let refusal = outcome(&["guild_id"])
+        let refusal = outcome()
             .await
             .err()
             .context("a restart was advised for an unusable module")?;
@@ -638,17 +617,6 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
             "{refusal}"
         );
     }
-    // Any other refusal leaves the file saved but not served.
-    declare(None)?;
-    let refusal = outcome(&[])
-        .await
-        .err()
-        .context("a refusal was reported as served")?;
-    assert_eq!(
-        refusal,
-        "the settings file is saved, but discord-private did not serve it: the settings \
-         file changes what only a restart applies; it keeps serving the settings it has"
-    );
     Ok(())
 }
 

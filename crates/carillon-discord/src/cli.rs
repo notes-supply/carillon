@@ -13,7 +13,6 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
     home, loopback,
-    maintenance::MaintenanceLock,
     prompt::Terminal,
 };
 use clap::{Parser, Subcommand};
@@ -23,7 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     application::{ServeOptions, serve},
-    config::{self, Applied, DiscordConfig, DiscordRoute, FileState, configure, declare_module},
+    config::{self, Applied, DiscordConfig, DiscordRoute, FileChange, FileState, ModuleSetting},
     module::{self, Declared, Refusal, Registration, Source, Status},
     operations::{
         self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
@@ -76,24 +75,25 @@ enum Command {
     },
     /// Ask for the bot token, then the server, channels and people the agent
     /// answers, and write the token and the provider's admission settings.
+    /// Given the guild, bot, people and routes, ask nothing and write those,
+    /// keeping the bot token file and tuned feedback settings.
+    #[command(after_help = "\
+--route only creates the first routes: once the settings route channels, it
+is refused unless it names exactly those routes. Change a channel's route
+with `carillon settings <channel> agent=… listens=… replies=…` or /settings
+in Discord.")]
     Setup {
         /// Registry ID of the Discord instance; inferred when only one is registered.
         #[arg(long)]
         provider: Option<String>,
-    },
-    /// Write the provider's admission settings, keeping tuned feedback
-    /// settings, then have a running provider serve them when they apply live.
-    Configure {
-        /// Registry ID of the Discord instance; inferred when only one is configured.
-        #[arg(long)]
-        provider: Option<String>,
-        #[arg(long)]
-        guild_id: String,
-        #[arg(long)]
-        bot_user_id: String,
-        #[arg(long, required = true)]
+        #[arg(long, requires_all = ["bot_user_id", "user_id", "route"])]
+        guild_id: Option<String>,
+        #[arg(long, requires = "guild_id")]
+        bot_user_id: Option<String>,
+        #[arg(long, requires = "guild_id")]
         user_id: Vec<String>,
-        #[arg(long, required = true)]
+        /// CHANNEL_ID:mention|always:thread|channel:AGENT_ID
+        #[arg(long, requires = "guild_id")]
         route: Vec<DiscordRoute>,
     },
     /// Check, without changing anything, that this program accepts the
@@ -208,8 +208,7 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
-        Command::Setup { provider } => set_up(&installation()?, provider).await?,
-        Command::Configure {
+        Command::Setup {
             provider,
             guild_id,
             bot_user_id,
@@ -217,20 +216,17 @@ pub(crate) async fn run() -> Result<()> {
             route,
         } => {
             let loaded = installation()?;
-            let provider = instance(&loaded, provider)?;
-            let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root)
-                .context("the Discord settings were not changed")?;
-            configure(
-                &loaded,
-                &provider,
-                &guild_id,
-                &bot_user_id,
-                &user_id,
-                &route,
-            )?;
-            drop(maintenance);
-            println!("{}", loaded.provider_config_path(&provider)?.display());
-            serve_configured(&loaded, &provider).await?;
+            let provider = match provider {
+                Some(provider) => provider,
+                None => only_interface(&loaded)?,
+            };
+            match (guild_id, bot_user_id) {
+                (Some(guild_id), Some(bot_user_id)) => {
+                    setup::unattended(&loaded, &provider, guild_id, bot_user_id, user_id, route)
+                        .await?;
+                }
+                _ => setup::setup(&mut Terminal, &loaded, &provider, DiscordHttp::new).await?,
+            }
         }
         Command::Check { provider } => {
             let loaded = installation()?;
@@ -390,51 +386,6 @@ fn release() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-/// `carillon discord setup`, then has a running provider serve the settings
-/// as far as they apply live; a new bot token file is one only a restart
-/// applies.
-async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
-    let provider = match provider {
-        Some(provider) => provider,
-        None => only_interface(loaded)?,
-    };
-    setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?;
-    let operator = Operator::new(loaded, &provider, "settings")?;
-    match operator.apply_settings().await? {
-        Applying::Applied(applied) => report_applied(&provider, &applied),
-        Applying::Refused(refused) => saved_but_refused(loaded, &provider, refused).await?,
-        // A stopped provider reads them when it starts.
-        Applying::Unreachable => {}
-    }
-    Ok(())
-}
-
-/// After setup or `configure` saved the settings file, what a running
-/// provider's refusal to serve it leaves. Fields only a restart applies are
-/// served by `carillon restart` once this release accepts the module the
-/// file declares, which the provider did not try. Any other refusal leaves
-/// the file saved but not served, an error.
-async fn saved_but_refused(loaded: &LoadedConfig, provider: &str, refused: Refused) -> Result<()> {
-    let Refused { reason, restart } = refused;
-    if restart.is_empty() {
-        bail!(
-            "the settings file is saved, but {provider} did not serve it: {reason}; it keeps \
-             serving the settings it has"
-        );
-    }
-    let discord = DiscordConfig::load(loaded, provider)?;
-    check_declared(loaded, provider, &discord, &release()?)
-        .await
-        .with_context(|| {
-            format!("the settings file is saved, but `carillon restart` would not start {provider}")
-        })?;
-    println!(
-        "{provider} keeps serving the settings it has: {reason}. `carillon restart` serves the \
-         saved file."
-    );
-    Ok(())
-}
-
 /// The only interface provider registered, which setup gives its first
 /// settings.
 fn only_interface(config: &LoadedConfig) -> Result<String> {
@@ -488,7 +439,7 @@ fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
 
 /// `carillon discord module …`: a file check needs no installation; status
 /// asks the running provider; enabling and disabling change the settings
-/// file, then ask the running provider to apply it.
+/// file through the running provider, or in place while it is stopped.
 async fn manage_module(
     installation: impl FnOnce() -> Result<LoadedConfig>,
     provider: Option<String>,
@@ -509,7 +460,7 @@ async fn manage_module(
     let loaded = installation()?;
     let provider = instance(&loaded, provider)?;
     let settings = loaded.provider_config_path(&provider)?;
-    match action {
+    let module = match action {
         None | Some(ModuleAction::Check { .. }) => {
             let operator = Operator::new(&loaded, &provider, "module")?;
             print_status(&provider, &operator.request(Method::GET, None).await?);
@@ -525,45 +476,29 @@ async fn manage_module(
             };
             // Checked before the settings change, against this release.
             let commands = check_file(&loaded.root.join(&declared)).await?;
-            declare_module(&loaded, &provider, |module| {
-                module.enabled = true;
-                module.path = Some(declared.clone());
-            })?;
             println!(
-                "{} now declares the custom Discord module {}: {}.",
+                "{} declares the custom Discord module {}: {}.",
                 settings.display(),
                 declared.display(),
                 list(&commands)
             );
+            ModuleSetting {
+                enabled: true,
+                path: Some(declared),
+            }
         }
         Some(ModuleAction::Disable) => {
-            declare_module(&loaded, &provider, |module| module.enabled = false)?;
             println!(
-                "{} now declares the bundled Discord module.",
+                "{} declares the bundled Discord module.",
                 settings.display()
             );
+            ModuleSetting {
+                enabled: false,
+                ..DiscordConfig::read(&loaded, &provider)?.module
+            }
         }
-    }
-    let operator = Operator::new(&loaded, &provider, "settings")?;
-    match operator.apply_settings().await? {
-        Applying::Applied(applied) => {
-            report_applied(&provider, &applied);
-            Ok(())
-        }
-        Applying::Refused(refused) => bail!(
-            "{provider} did not apply the settings file: {}. What it serves is unchanged; \
-             `carillon discord module` shows which module that is",
-            refused.reason
-        ),
-        Applying::Unreachable => {
-            println!(
-                "The Discord provider does not answer at {}, so whether it serves the declared \
-                 module is not confirmed: a stopped provider serves it when it starts.",
-                operator.url
-            );
-            Ok(())
-        }
-    }
+    };
+    deliver(&loaded, &provider, FileChange::Module(module)).await
 }
 
 /// Validates the custom module the settings enable against this program, as
@@ -639,21 +574,12 @@ struct Operator {
 /// What became of asking the running provider to serve its settings file.
 enum Applying {
     Applied(Applied),
-    /// The provider answered and serves what it served before.
-    Refused(Refused),
+    /// The provider answered, saying why, and serves what it served before.
+    Refused(String),
     /// Nothing answers at the provider's address: it may be stopped, or
     /// still serve at an address `carillon.toml` no longer gives, which only
     /// a restart changes. Whether it serves the file is not confirmed.
     Unreachable,
-}
-
-/// Why the provider did not serve its settings file.
-struct Refused {
-    reason: String,
-    /// The fields only a restart applies, when they are why; the rest of the
-    /// file was then not tried. A provider that does not say refused
-    /// otherwise.
-    restart: Vec<String>,
 }
 
 impl Operator {
@@ -680,7 +606,9 @@ impl Operator {
             .bearer_auth(&self.credential)
             .timeout(timeout);
         if let Some(body) = body {
-            request = request.body(body);
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
         }
         request.send().await
     }
@@ -737,6 +665,21 @@ impl Operator {
     /// commands first. Only its answer says what became of that; an apply
     /// is never sent twice.
     async fn apply_settings(&self) -> Result<Applying> {
+        self.settings(None).await
+    }
+
+    /// Asks the provider to apply `change` to its settings file and serve
+    /// it, as [`Self::apply_settings`] serves the file as it is.
+    async fn change_settings(&self, change: &FileChange) -> Result<Applying> {
+        self.settings(Some(serde_json::to_vec(change)?)).await
+    }
+
+    async fn settings(&self, change: Option<Vec<u8>>) -> Result<Applying> {
+        let method = if change.is_some() {
+            Method::PUT
+        } else {
+            Method::POST
+        };
         let unconfirmed = |error: &dyn std::fmt::Display| {
             anyhow!(
                 "the Discord provider at {} did not confirm whether it serves the settings file \
@@ -744,7 +687,7 @@ impl Operator {
                 self.url
             )
         };
-        let response = match self.send(Method::POST, None, CHANGE_TIMEOUT).await {
+        let response = match self.send(method, change, CHANGE_TIMEOUT).await {
             Ok(response) => response,
             Err(error) if error.is_connect() => return Ok(Applying::Unreachable),
             Err(error) => return Err(unconfirmed(&error)),
@@ -761,22 +704,13 @@ impl Operator {
         }
         let message = refusal(&bytes);
         if status == StatusCode::NOT_FOUND {
-            return Ok(Applying::Refused(Refused {
-                reason: format!(
-                    "it does not offer settings operations ({message}) and may be a different \
-                     release than this program"
-                ),
-                restart: Vec::new(),
-            }));
+            return Ok(Applying::Refused(format!(
+                "it does not offer settings operations ({message}) and may be a different release \
+                 than this program"
+            )));
         }
         if status.is_client_error() {
-            let restart = serde_json::from_slice::<Refusal>(&bytes)
-                .map(|refusal| refusal.restart)
-                .unwrap_or_default();
-            return Ok(Applying::Refused(Refused {
-                reason: message,
-                restart,
-            }));
+            return Ok(Applying::Refused(message));
         }
         Err(unconfirmed(&format!("{status}: {message}")))
     }
@@ -838,10 +772,7 @@ async fn manage_settings(
             Ok(())
         }
         Applying::Refused(refused) => {
-            bail!(
-                "{}; {provider} keeps serving the settings it has",
-                refused.reason
-            )
+            bail!("{}; {provider} keeps serving the settings it has", refused)
         }
         Applying::Unreachable => bail!(
             "the Discord provider does not answer at {}, so it did not confirm serving the \
@@ -851,25 +782,10 @@ async fn manage_settings(
     }
 }
 
-/// After `configure` saved the settings file: has a running provider serve
-/// it, and says what became of that.
-async fn serve_configured(loaded: &LoadedConfig, provider: &str) -> Result<()> {
-    let operator = Operator::new(loaded, provider, "settings")?;
-    match operator.apply_settings().await? {
-        Applying::Applied(applied) => report_applied(provider, &applied),
-        Applying::Refused(refused) => saved_but_refused(loaded, provider, refused).await?,
-        Applying::Unreachable => println!(
-            "The Discord provider does not answer at {}, so whether it serves these settings is \
-             not confirmed: a stopped provider reads them when it starts, and \
-             `carillon discord settings` shows what a running one serves.",
-            operator.url
-        ),
-    }
-    Ok(())
-}
-
 fn report_applied(provider: &str, applied: &Applied) {
-    let Applied { changed, module } = applied;
+    let Applied {
+        changed, module, ..
+    } = applied;
     if changed.is_empty() {
         println!("{provider} already serves its settings file.");
     } else {
@@ -976,6 +892,10 @@ fn print_status(provider: &str, status: &Status) {
         );
     }
 }
+
+mod writing;
+
+pub(crate) use writing::deliver;
 
 #[cfg(test)]
 mod tests;

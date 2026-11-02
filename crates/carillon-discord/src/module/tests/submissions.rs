@@ -122,8 +122,13 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
     })?;
 
     // Without a Discord connection there is nowhere to anchor it.
-    let unanchored =
-        super::super::InteractionCalls::new(core.clone(), route(), audience_id.clone());
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let unanchored = super::super::InteractionCalls::new(
+        core.clone(),
+        writer.clone(),
+        crate::channels::Routing::Routed(route()),
+        audience_id.clone(),
+    );
     assert_eq!(
         unanchored
             .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
@@ -149,19 +154,24 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
             .build(),
     );
     let settings = crate::config::Settings::new(config);
-    let calls = super::super::InteractionCalls::new(core.clone(), route(), audience_id)
-        .with_submissions(super::super::Submissions {
-            reactions: crate::delivery::Reactions::new(http.clone(), settings.clone()),
-            lanes: serving_lanes(core, http.clone())?,
-            http,
-            origin: crate::conversations::InteractionOrigin {
-                guild_id: "100".to_owned(),
-                user_id: "200".to_owned(),
-                channel_id: "400".to_owned(),
-                route_channel_id: "300".to_owned(),
-            },
-            settings: settings.current(),
-        });
+    let calls = super::super::InteractionCalls::new(
+        core.clone(),
+        writer,
+        crate::channels::Routing::Routed(route()),
+        audience_id,
+    )
+    .with_submissions(super::super::Submissions {
+        reactions: crate::delivery::Reactions::new(http.clone(), settings.clone()),
+        lanes: serving_lanes(core, http.clone())?,
+        http,
+        origin: crate::conversations::InteractionOrigin {
+            guild_id: "100".to_owned(),
+            user_id: "200".to_owned(),
+            channel_id: "400".to_owned(),
+            route_channel_id: "300".to_owned(),
+        },
+        settings: settings.current(),
+    });
     assert_eq!(
         calls.answer(&submit, calls_until()).await,
         HostReply::Submitted
@@ -200,7 +210,8 @@ async fn interactions_receive_the_module_reply_or_a_failure() -> anyhow::Result<
         &replying("hello", std::slice::from_ref(&button)),
     )?;
     let commands = Module::load(files(directory.path()), Source::Bundled).await?;
-    let reply = commands.invoke(calls()?, interaction()).await?;
+    let (_installation, invoked) = calls()?;
+    let reply = commands.invoke(invoked, interaction()).await?;
     assert_eq!(reply.content, "hello");
     assert_eq!(reply.components, vec![button]);
     for (output, refused) in [
@@ -221,8 +232,9 @@ async fn interactions_receive_the_module_reply_or_a_failure() -> anyhow::Result<
         commands
             .apply(custom(directory.path(), "custom.wasm"), None)
             .await?;
+        let (_installation, invoked) = calls()?;
         let failure = commands
-            .invoke(calls()?, interaction())
+            .invoke(invoked, interaction())
             .await
             .err()
             .with_context(|| format!("accepted {output}"))?;

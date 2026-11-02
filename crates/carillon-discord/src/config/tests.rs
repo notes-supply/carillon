@@ -81,6 +81,29 @@ pub(crate) fn installation(
     Ok(config)
 }
 
+/// The writer of a complete installation's Discord settings, serving them
+/// as written, with a second agent, `other`, to route to; the installation
+/// lives as long as the directory returned.
+pub(crate) fn writer() -> anyhow::Result<(tempfile::TempDir, super::Writer)> {
+    let directory = tempfile::tempdir()?;
+    let mut config = installation(directory.path(), "discord-private", 46_950)?;
+    let other = AgentConfig {
+        id: "other".to_owned(),
+        name: "Other agent".to_owned(),
+        ..config.value.agents[0].clone()
+    };
+    config.value.agents.push(other);
+    let discord = DiscordConfig::load(&config, "discord-private")?;
+    Ok((
+        directory,
+        super::Writer::new(
+            super::Settings::new(discord),
+            std::sync::Arc::new(config),
+            "discord-private",
+        ),
+    ))
+}
+
 #[test]
 fn discord_feedback_defaults_leave_admission_unconfigured() -> anyhow::Result<()> {
     let config: DiscordConfig = toml::from_str(
@@ -315,7 +338,8 @@ fn activity_marker_errors_identify_each_field_and_prevent_load_or_write() -> any
 }
 
 #[test]
-fn configure_preserves_tuned_feedback_and_rejects_unknown_providers() -> anyhow::Result<()> {
+fn an_admission_change_preserves_tuned_feedback_and_rejects_unknown_providers() -> anyhow::Result<()>
+{
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = tempfile::tempdir()?;
@@ -338,14 +362,16 @@ stopped = "■"
 "#,
     )?;
     tuned.write(&config, "discord-private")?;
-    super::configure(
-        &config,
-        "discord-private",
-        "110",
-        "111",
-        &["210".to_owned()],
-        &["310:mention:thread:default".parse()?],
-    )?;
+    let admission = |routes: &str| -> anyhow::Result<super::FileChange> {
+        Ok(super::FileChange::Admission {
+            guild_id: "110".to_owned(),
+            bot_user_id: "111".to_owned(),
+            bot_token_file: None,
+            allowed_user_ids: vec!["210".to_owned()],
+            routes: super::Routes::Answered(vec![routes.parse()?]),
+        })
+    };
+    admission("310:mention:thread:default")?.write(&config, "discord-private")?;
     let reloaded = DiscordConfig::load(&config, "discord-private")?;
     assert_eq!(reloaded.guild_id, "110");
     assert_eq!(reloaded.bot_user_id, "111");
@@ -374,18 +400,11 @@ stopped = "■"
         ),
         ("unregistered", "provider unregistered is not configured"),
     ] {
-        assert_eq!(
-            refusal(super::configure(
-                &config,
-                provider,
-                "110",
-                "111",
-                &["210".to_owned()],
-                &["310:mention:thread:default".parse()?],
-            ))
-            .as_deref(),
-            Some(refused)
-        );
+        let refusal = admission("310:mention:thread:default")?
+            .write(&config, provider)
+            .err()
+            .context("wrote another provider's settings")?;
+        assert!(format!("{refusal:#}").ends_with(refused), "{refusal:#}");
     }
     assert!(!config.provider_config_path("unregistered")?.exists());
     Ok(())

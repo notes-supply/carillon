@@ -168,8 +168,13 @@ async fn invoke(
     config.activity_markers = markers.clone();
     let admitted = crate::conversations::admit_interaction(&config, source)
         .map_err(|refusal| anyhow::anyhow!(refusal.message))?;
-    let calls =
-        super::super::InteractionCalls::new(core.clone(), admitted.route, admitted.audience_id);
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let calls = super::super::InteractionCalls::new(
+        core.clone(),
+        writer,
+        admitted.routing,
+        admitted.audience_id,
+    );
     let reply = release_module()
         .await?
         .invoke(calls, admitted.interaction)
