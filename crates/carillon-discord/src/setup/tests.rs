@@ -650,8 +650,8 @@ async fn setup_during_other_maintenance_changes_neither_token_nor_settings() -> 
     );
     Ok(())
 }
-
 mod routing;
+mod unattended;
 
 #[tokio::test]
 async fn a_new_bot_token_gets_a_file_of_its_own_and_the_same_one_keeps_its_file()

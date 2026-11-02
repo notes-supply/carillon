@@ -764,3 +764,120 @@ fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn configure_is_no_longer_a_command() -> Result<()> {
+    let refused = Cli::try_parse_from([
+        "carillon-discord",
+        "configure",
+        "--guild-id",
+        "100",
+        "--bot-user-id",
+        "201",
+        "--user-id",
+        "200",
+        "--route",
+        "300:always:thread:default",
+    ])
+    .err()
+    .context("configure parsed")?;
+    assert_eq!(refused.kind(), ErrorKind::InvalidSubcommand);
+    // Unattended setup takes its flags, all of them or none.
+    Cli::try_parse_from([
+        "carillon-discord",
+        "setup",
+        "--guild-id",
+        "100",
+        "--bot-user-id",
+        "201",
+        "--user-id",
+        "200",
+        "--route",
+        "300:always:thread:default",
+    ])?;
+    let partial = Cli::try_parse_from(["carillon-discord", "setup", "--guild-id", "100"])
+        .err()
+        .context("setup took a guild alone")?;
+    assert_eq!(partial.kind(), ErrorKind::MissingRequiredArgument);
+    Ok(())
+}
+
+/// The running provider applies a change; the CLI writes the file itself
+/// only once nothing answers at the provider's address.
+#[tokio::test]
+async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_changes_here()
+-> Result<()> {
+    use crate::{
+        config::{Applied, FileChange, ModuleSetting},
+        module::{Change, ModuleSummary, Registration, Source},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let mut config =
+        crate::config::tests::installation(directory.path(), "discord-private", 46_800)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+    let address = listener.local_addr()?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing provider")?
+        .url = format!("http://{address}");
+    let bundled = ModuleSummary {
+        source: Source::Bundled,
+        commands: vec!["settings".to_owned()],
+        digest: "d".to_owned(),
+    };
+    let answer = serde_json::to_vec(&Applied {
+        changed: Vec::new(),
+        module: Change {
+            serving: bundled.clone(),
+            previous: bundled,
+            discord: Registration::Unchanged,
+        },
+        restart: Vec::new(),
+    })?;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let kept = received.clone();
+    let provider = Router::new().route(
+        "/v1/settings",
+        axum::routing::put(move |headers: HeaderMap, body: Bytes| {
+            let kept = kept.clone();
+            let answer = answer.clone();
+            async move {
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push((headers, body));
+                }
+                ([("content-type", "application/json")], answer).into_response()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, provider).await });
+    let settings = config.provider_config_path("discord-private")?;
+    let before = fs::read(&settings)?;
+    let change = FileChange::Module(ModuleSetting {
+        enabled: false,
+        path: Some("modules/custom.wasm".into()),
+    });
+    super::deliver(&config, "discord-private", change.clone()).await?;
+    assert_eq!(
+        fs::read(&settings)?,
+        before,
+        "the CLI wrote a running provider's file"
+    );
+    let sent = received
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["authorization"], "Bearer operator");
+    assert_eq!(serde_json::from_slice::<FileChange>(&sent[0].1)?, change);
+
+    server.abort();
+    let _ = server.await;
+    super::deliver(&config, "discord-private", change).await?;
+    let declared = crate::config::DiscordConfig::read(&config, "discord-private")?.module;
+    assert_eq!(declared.path, Some("modules/custom.wasm".into()));
+    Ok(())
+}

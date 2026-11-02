@@ -2,6 +2,8 @@ use super::*;
 
 use carillon_protocol::settings::{Page, SettingsRequest};
 
+use crate::config::DiscordRoute;
+
 async fn settings_core(
     refusal: Option<(StatusCode, &'static str)>,
 ) -> anyhow::Result<(
@@ -329,6 +331,69 @@ async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edit
             .all(|request| request.change.is_none()),
         "a route change asks the runtime nothing but a read"
     );
+    server.abort();
+    Ok(())
+}
+
+/// Setup's admission reaches the provider's one writer, which serves it,
+/// and refuses routes other than the first.
+#[tokio::test]
+async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let path = state.installation.provider_config_path("discord")?;
+    let served = state.settings.current().routes.clone();
+    let admission = |routes: &[DiscordRoute]| {
+        json!({
+            "change": "admission",
+            "guild_id": "100",
+            "bot_user_id": "201",
+            "allowed_user_ids": ["200", "250"],
+            "routes": {"routes": "first", "list": routes},
+        })
+    };
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(admission(&served)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["changed"], json!(["allowed_user_ids"]));
+    assert_eq!(state.settings.current().allowed_user_ids, ["200", "250"]);
+
+    let before = std::fs::read(&path)?;
+    let mut other = served.clone();
+    other[0].activation = DiscordActivation::Mention;
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(admission(&other)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("`carillon settings <channel>")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(state.settings.current().routes, served);
+    let (status, _) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "discord",
+        Some(admission(&served)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     server.abort();
     Ok(())
 }

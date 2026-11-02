@@ -623,3 +623,127 @@ fn control_emoji_differ_from_each_other_and_from_the_feedback_emoji() -> anyhow:
     }
     Ok(())
 }
+
+fn settings_file(writer: &super::Writer) -> anyhow::Result<Vec<u8>> {
+    Ok(fs::read(
+        writer
+            .installation()
+            .provider_config_path("discord-private")?,
+    )?)
+}
+
+#[tokio::test]
+async fn the_writer_refuses_a_hand_edit_nobody_applied() -> anyhow::Result<()> {
+    let (_installation, writer) = writer()?;
+    let mut edited = DiscordConfig::read(writer.installation(), "discord-private")?;
+    edited.reactions = !edited.reactions;
+    edited.write(writer.installation(), "discord-private")?;
+    let before = settings_file(&writer)?;
+    let refused = writer
+        .change(|discord| {
+            discord.typing = !discord.typing;
+            Ok(())
+        })
+        .await
+        .err()
+        .context("wrote over a hand edit")?;
+    let super::Refused::Unapplied(difference) = &refused else {
+        anyhow::bail!("refused otherwise: {refused:?}");
+    };
+    assert_eq!(difference.live, ["reactions"]);
+    let error = crate::InterfaceError::from(refused);
+    assert_eq!(error.status, axum::http::StatusCode::PRECONDITION_FAILED);
+    assert!(
+        error.message.contains("`carillon discord settings apply`"),
+        "{}",
+        error.message
+    );
+    assert_eq!(settings_file(&writer)?, before);
+    assert_ne!(writer.current().reactions, edited.reactions);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stale_change_writes_nothing_and_is_a_conflict() -> anyhow::Result<()> {
+    let (_installation, writer) = writer()?;
+    let before = settings_file(&writer)?;
+    let refused = writer
+        .change(|discord| {
+            discord.typing = !discord.typing;
+            Err::<(), _>(super::Refused::Stale)
+        })
+        .await
+        .err()
+        .context("a stale change applied")?;
+    assert_eq!(
+        crate::InterfaceError::from(refused).status,
+        axum::http::StatusCode::CONFLICT
+    );
+    assert_eq!(settings_file(&writer)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_valid_change_is_written_privately_and_served() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_installation, writer) = writer()?;
+    let written = writer
+        .change(|discord| {
+            discord.routes[0].activation = DiscordActivation::Mention;
+            Ok(discord.routes[0].clone())
+        })
+        .await
+        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert_eq!(written.changed, ["routes"]);
+    assert_eq!(written.value.activation, DiscordActivation::Mention);
+    let file = DiscordConfig::load(writer.installation(), "discord-private")?;
+    assert_eq!(file.routes, writer.current().routes);
+    assert_eq!(file.routes[0].activation, DiscordActivation::Mention);
+    let path = writer
+        .installation()
+        .provider_config_path("discord-private")?;
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+
+    // A change the settings refuse writes nothing.
+    let before = settings_file(&writer)?;
+    let refused = writer
+        .change(|discord| {
+            discord.routes[0].agent = "nobody".to_owned();
+            Ok(())
+        })
+        .await
+        .err()
+        .context("wrote a route to an unknown agent")?;
+    assert!(matches!(refused, super::Refused::Invalid(_)), "{refused:?}");
+    assert_eq!(settings_file(&writer)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_changes_to_other_routes_both_survive() -> anyhow::Result<()> {
+    let (_installation, writer) = writer()?;
+    let first = writer.clone();
+    let second = writer.clone();
+    let (one, two) = tokio::join!(
+        first.change(|discord| {
+            discord.routes[0].conversation = DiscordConversation::Thread;
+            Ok(())
+        }),
+        second.change(|discord| {
+            discord.routes.push(
+                "301:mention:thread:other"
+                    .parse()
+                    .map_err(|error: anyhow::Error| super::Refused::Invalid(error.to_string()))?,
+            );
+            Ok(())
+        }),
+    );
+    one.map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    two.map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    let file = DiscordConfig::load(writer.installation(), "discord-private")?;
+    assert_eq!(file.routes[0].conversation, DiscordConversation::Thread);
+    assert_eq!(file.routes[1].channel_id, "301");
+    assert_eq!(file.routes, writer.current().routes);
+    Ok(())
+}
