@@ -568,9 +568,9 @@ async function testModuleOperations() {
   assert.equal(
     operate("enable", custom),
     [
-      `${settingsFile} now declares the custom Discord module ${custom}: ${commands}.`,
       "discord-private now serves its settings file: module.",
       `It serves the custom Discord module ${custom}: ${commands}.`,
+      `${settingsFile} now declares the custom Discord module ${custom}: ${commands}.`,
     ].join("\n"),
   );
   assert.equal(
@@ -617,9 +617,9 @@ async function testModuleOperations() {
   assert.equal(
     operate("disable"),
     [
-      `${settingsFile} now declares the bundled Discord module.`,
       "discord-private now serves its settings file: module.",
       `It serves the bundled Discord module: ${commands}.`,
+      `${settingsFile} now declares the bundled Discord module.`,
     ].join("\n"),
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
