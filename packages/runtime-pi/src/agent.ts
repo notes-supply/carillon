@@ -102,6 +102,8 @@ export interface DurableAgent {
   activity(turnId: string, interfaceId: string): TurnActivity | undefined;
   /** Whether one of the agent's tool calls runs now. */
   readonly calling: boolean;
+  /** The built-in extensions its settings may select, by name. */
+  readonly builtIn: readonly string[];
   close(): Promise<void>;
 }
 
@@ -283,6 +285,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     get calling() {
       return [...watched.values()].some((activity) => activity.calling);
     },
+
+    builtIn: extensions.builtIn.map((extension) => extension.name),
 
     async close() {
       closing = true;

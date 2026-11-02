@@ -16,10 +16,24 @@ import { openAgent, type Clock, type DurableAgent } from "./agent.ts";
 import { DEFAULT_INLINE_IMAGES, type InlineImagePolicy } from "./attachments.ts";
 import type { McpServer } from "./mcp.ts";
 import { modelSettings, type PiCatalogue } from "./models.ts";
+import {
+  changeResourceSetting,
+  RESOURCE_SETTINGS,
+  resourceSettings,
+  type ResourceSource,
+} from "./resources.ts";
 
 export interface PiRuntimeOptions {
-  /** The agents the runtime serves, each with the existing directory its tools work in. */
-  readonly agents: readonly { readonly id: string; readonly workspace: string }[];
+  /**
+   * The agents the runtime serves, each with the existing directory its
+   * tools work in and its own resource root, which core captures with each
+   * turn and the agent's settings page edits.
+   */
+  readonly agents: readonly {
+    readonly id: string;
+    readonly workspace: string;
+    readonly resources?: string;
+  }[];
   /** The runtime's private state: agents' storage and Carillon's settings ledger. */
   readonly componentDirectory: string;
   readonly catalogue: PiCatalogue;
@@ -40,10 +54,8 @@ export interface PiRuntimeOptions {
 
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
   await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
-  const models = modelSettings(
-    options.catalogue,
-    await SettingsLedger.open(join(options.componentDirectory, "settings.json")),
-  );
+  const ledger = await SettingsLedger.open(join(options.componentDirectory, "settings.json"));
+  const models = modelSettings(options.catalogue, ledger);
   const storage =
     options.storage ??
     ((agentId: string) =>
@@ -96,8 +108,21 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       return undefined;
     },
     async settings(request) {
-      agentOf(request.subject.agent_id);
-      return models.settings(request);
+      const { subject, change } = request;
+      const agent = agentOf(subject.agent_id);
+      if (subject.kind === "channel") return models.settings(request);
+      const source: ResourceSource = {
+        root: options.agents.find(({ id }) => id === subject.agent_id)?.resources,
+        builtIn: agent.builtIn,
+        defaults: options.defaults,
+      };
+      const ownsChange = change !== undefined && RESOURCE_SETTINGS.includes(change.setting);
+      if (ownsChange)
+        await ledger.exclusive((checkLease) =>
+          changeResourceSetting(source, subject, change, checkLease),
+        );
+      const { settings } = await models.settings(ownsChange ? { subject } : request);
+      return { settings: [...settings, ...(await resourceSettings(source, subject))] };
     },
     // The durable runtime runs no commands of its own yet.
     commands: () => Promise.resolve({ commands: [] }),

@@ -17,11 +17,15 @@ import {
   type AnyTask,
   type Extension,
 } from "@earendil-works/pi-durable";
+import type { Change, Setting, SettingValue, Subject } from "@carillon/protocol";
 import { ExplainedFailure } from "@carillon/runtime/failure";
 import { mismatch } from "@carillon/runtime/mismatch";
-import { readFile } from "node:fs/promises";
+import { publish } from "@carillon/runtime/publish";
+import { settingRevision } from "@carillon/runtime/settings";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { attachmentSection } from "./attachments.ts";
@@ -29,6 +33,8 @@ import { ConversationInfo } from "./documents.ts";
 
 /** What a message does when it arrives while the agent answers in its conversation. */
 type Busy = "queue" | "steer" | "interrupt";
+const BUSY: readonly Busy[] = ["queue", "steer", "interrupt"];
+const DEFAULT_BUSY: Busy = "steer";
 
 /** The runtime's own extension, always selected: the prompt from the agent's resources. */
 const CARILLON = "carillon";
@@ -124,7 +130,7 @@ export async function loadSnapshot(
   extensions: Extensions,
 ): Promise<Snapshot> {
   const settings = await readSettings(join(root, "settings.json"));
-  const selected = selection(settings.extensions, extensions);
+  const selected = selection(settings.extensions, offered(extensions), extensions.defaults);
   const modules = await Promise.all(
     selected.filter(isUserExtension).map((name) => importExtension(root, name)),
   );
@@ -155,7 +161,7 @@ export async function loadSnapshot(
     reader === undefined || skills.length === 0 ? "" : formatSkillsForPrompt(skills, reader).trim();
   return {
     root,
-    busy: settings.busy ?? "steer",
+    busy: settings.busy ?? DEFAULT_BUSY,
     selected,
     modules,
     prompt: {
@@ -219,7 +225,134 @@ export function selectedExtensions(
   });
 }
 
+/** Where an agent's resources are edited, and what its settings may select. */
+export interface ResourceSource {
+  /** The agent's own resource root, which core captures with each turn; none without resources. */
+  readonly root: string | undefined;
+  /** The built-in extensions settings may select, by name. */
+  readonly builtIn: readonly string[];
+  readonly defaults: readonly string[];
+}
+
+/** The agent page's lines its resources' settings own. */
+export const RESOURCE_SETTINGS: readonly string[] = ["busy", "extensions"];
+
+/**
+ * The agent's Busy and Extensions lines, as its resources set them now. An
+ * agent without resources shows what it runs with and offers no choice.
+ */
+export async function resourceSettings(
+  source: ResourceSource,
+  subject: Subject,
+): Promise<Setting[]> {
+  return (await resourceLines(source, subject)).lines;
+}
+
+/**
+ * Applies `change` to the agent's own settings file while its line still
+ * has the revision it expects, keeping everything else the file holds. The
+ * next turn's capture of the resources carries it; turns admitted before
+ * keep theirs. `checkLease` throws once the caller's lease was lost.
+ */
+export async function changeResourceSetting(
+  source: ResourceSource,
+  subject: Subject,
+  change: Change,
+  checkLease: () => void,
+): Promise<void> {
+  const { lines, settings, choices } = await resourceLines(source, subject);
+  const line = lines.find(({ id }) => id === change.setting);
+  if (line === undefined || line.revision !== change.expected)
+    throw new ExplainedFailure(409, "This setting changed meanwhile.");
+  if (source.root === undefined)
+    throw new ExplainedFailure(
+      422,
+      `${subject.agent_id} has no resources, so its ${line.name} cannot change.`,
+    );
+  const next: Settings = { ...settings };
+  if (change.setting === "busy") {
+    if (change.value === null) delete next.busy;
+    else next.busy = busyMode(change.value);
+  } else if (change.value === null) delete next.extensions;
+  else next.extensions = extensionNames(change.value, choices);
+  if (isDeepStrictEqual(next, settings)) return;
+  checkLease();
+  await publish(join(source.root, "settings.json"), `${JSON.stringify(next, null, 2)}\n`);
+  checkLease();
+}
+
+async function resourceLines(source: ResourceSource, subject: Subject) {
+  const settings =
+    source.root === undefined ? {} : await readSettings(join(source.root, "settings.json"));
+  const choices = [...source.builtIn, ...(await userExtensions(source.root))];
+  const editable = source.root !== undefined;
+  const revision = (setting: string, stored: unknown) =>
+    settingRevision(setting, subject, [editable, stored ?? null]);
+  const lines: Setting[] = [
+    {
+      id: "busy",
+      name: "Busy",
+      choices: editable ? BUSY.map((mode) => ({ id: mode, name: mode })) : [],
+      value: { kind: "one", id: settings.busy ?? DEFAULT_BUSY },
+      inherited: settings.busy === undefined,
+      revision: revision("busy", settings.busy),
+    },
+    {
+      id: "extensions",
+      name: "Extensions",
+      choices: editable ? choices.map((name) => ({ id: name, name })) : [],
+      value: {
+        kind: "many",
+        ids: selection(settings.extensions, choices, source.defaults),
+      },
+      inherited: settings.extensions === undefined,
+      revision: revision("extensions", settings.extensions),
+    },
+  ];
+  return { lines, settings, choices };
+}
+
+/** The user extensions the resources hold, as settings select them. */
+async function userExtensions(root: string | undefined): Promise<string[]> {
+  if (root === undefined) return [];
+  const files = await readdir(join(root, "extensions")).catch((failure: unknown) => {
+    if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return [];
+    throw failure;
+  });
+  return files
+    .map((file) => `extensions/${file}`)
+    .filter(isUserExtension)
+    .toSorted();
+}
+
+function busyMode(value: SettingValue): Busy {
+  const mode = BUSY.find((candidate) => value.kind === "one" && candidate === value.id);
+  if (mode === undefined)
+    throw new ExplainedFailure(
+      422,
+      `Busy takes one of ${BUSY.join(", ")}${value.kind === "one" ? `, not ${value.id}` : ""}.`,
+    );
+  return mode;
+}
+
+function extensionNames(value: SettingValue, offered: readonly string[]): string[] {
+  if (value.kind !== "many")
+    throw new ExplainedFailure(422, "Extensions takes a list of extensions.");
+  const unknown = value.ids.filter((name) => !offered.includes(name));
+  if (unknown.length > 0)
+    throw new ExplainedFailure(
+      422,
+      `${unknown.join(", ")} ${unknown.length === 1 ? "is not an extension" : "are not extensions"} here. The extensions are ${offered.join(", ")}.`,
+    );
+  return [...new Set(value.ids)];
+}
+
 async function readSettings(path: string): Promise<Settings> {
+  return checkedSettings(await readJson(path));
+}
+
+/** The settings file as JSON, `{}` when there is none. */
+async function readJson(path: string): Promise<unknown> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -227,12 +360,14 @@ async function readSettings(path: string): Promise<Settings> {
     if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return {};
     throw failure;
   }
-  let settings: unknown;
   try {
-    settings = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     throw new ExplainedFailure(422, "The agent's settings.json is not valid JSON.");
   }
+}
+
+function checkedSettings(settings: unknown): Settings {
   if (!Check(SettingsSchema, settings)) {
     const first = mismatch(SettingsSchema, settings);
     throw new ExplainedFailure(
@@ -245,14 +380,21 @@ async function readSettings(path: string): Promise<Settings> {
   return settings;
 }
 
-function selection(setting: Settings["extensions"], extensions: Extensions): string[] {
+function offered(extensions: Extensions): string[] {
+  return extensions.builtIn.map((extension) => extension.name);
+}
+
+function selection(
+  setting: Settings["extensions"],
+  builtIn: readonly string[],
+  defaults: readonly string[],
+): string[] {
   const names = Array.isArray(setting)
     ? setting
     : [
-        ...extensions.defaults.filter((name) => setting?.remove?.includes(name) !== true),
+        ...defaults.filter((name) => setting?.remove?.includes(name) !== true),
         ...(setting?.add ?? []).filter((name) => setting?.remove?.includes(name) !== true),
       ];
-  const builtIn = extensions.builtIn.map((extension) => extension.name);
   for (const name of names) {
     if (builtIn.includes(name) || isUserExtension(name)) continue;
     if (name.startsWith("mcp:"))

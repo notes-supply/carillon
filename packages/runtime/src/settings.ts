@@ -160,13 +160,31 @@ export class SettingsLedger {
    * as it was.
    */
   async change(catalogue: Catalogue, subject: Subject, change: Change): Promise<Setting[]> {
+    return this.exclusive(async (checkLease) => {
+      await this.refresh();
+      const line = this.lines(catalogue, subject).find(({ id }) => id === change.setting);
+      if (line === undefined || line.revision !== change.expected)
+        throw new ExplainedFailure(409, "This setting changed meanwhile.");
+      const units = this.units(subject);
+      const unit = changed(catalogue, units, change);
+      if (!isDeepStrictEqual(unit, units.own)) {
+        checkLease();
+        await this.write(this.stored(subject, unit));
+        checkLease();
+      }
+      return this.lines(catalogue, subject);
+    });
+  }
+
+  /**
+   * Runs `work` alone, in order with every change, under a short lease on
+   * the ledger across processes. `work` calls its argument before and after
+   * each write, which throws once the lease was lost. A runtime's other
+   * settings files change under the same lease.
+   */
+  async exclusive<T>(work: (checkLease: () => void) => Promise<T>): Promise<T> {
     return this.#writes.run(async () => {
-      // The file is the authority. A short lease covers refresh, revision
-      // check, replacement and fsync, across processes.
       let compromised: Error | undefined;
-      const checkLease = () => {
-        if (compromised) throw compromised;
-      };
       const release = await lockfile.lock(this.#path, {
         realpath: false,
         retries: { retries: 8, minTimeout: 10, maxTimeout: 100 },
@@ -175,18 +193,9 @@ export class SettingsLedger {
         },
       });
       try {
-        await this.refresh();
-        const line = this.lines(catalogue, subject).find(({ id }) => id === change.setting);
-        if (line === undefined || line.revision !== change.expected)
-          throw new ExplainedFailure(409, "This setting changed meanwhile.");
-        const units = this.units(subject);
-        const unit = changed(catalogue, units, change);
-        if (!isDeepStrictEqual(unit, units.own)) {
-          checkLease();
-          await this.write(this.stored(subject, unit));
-          checkLease();
-        }
-        return this.lines(catalogue, subject);
+        return await work(() => {
+          if (compromised) throw compromised;
+        });
       } finally {
         await release();
       }
@@ -233,7 +242,7 @@ export class SettingsLedger {
     const running = unit === null ? null : resolved(catalogue, unit, agent?.options);
     const entry = running === null ? undefined : offeredModel(catalogue, running);
     const revision = (setting: string) =>
-      digest([setting, subjectKey(subject), own, agent, entry ?? null]);
+      settingRevision(setting, subject, [own, agent, entry ?? null]);
     const groups = new Map(catalogue.providers.map(({ id, name }) => [id, name]));
     const model: Setting = {
       id: MODEL,
@@ -337,6 +346,14 @@ function one(id: string): SettingValue {
 
 function offers(option: ModelOption, choice: string): boolean {
   return option.choices.some((candidate) => candidate.id === choice);
+}
+
+/**
+ * A setting's revision at `subject`, from `state`: everything else that
+ * decides what the setting means there.
+ */
+export function settingRevision(setting: string, subject: Subject, state: unknown): string {
+  return digest([setting, subjectKey(subject), state]);
 }
 
 function subjectKey(subject: Subject): readonly string[] {
