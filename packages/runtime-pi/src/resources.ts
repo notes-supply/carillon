@@ -130,7 +130,11 @@ export async function loadSnapshot(
   extensions: Extensions,
 ): Promise<Snapshot> {
   const settings = await readSettings(join(root, "settings.json"));
-  const selected = selection(settings.extensions, offered(extensions), extensions.defaults);
+  const selected = selection(
+    settings.extensions,
+    extensions.builtIn.map((extension) => extension.name),
+    extensions.defaults,
+  );
   const modules = await Promise.all(
     selected.filter(isUserExtension).map((name) => importExtension(root, name)),
   );
@@ -348,11 +352,6 @@ function extensionNames(value: SettingValue, offered: readonly string[]): string
 }
 
 async function readSettings(path: string): Promise<Settings> {
-  return checkedSettings(await readJson(path));
-}
-
-/** The settings file as JSON, `{}` when there is none. */
-async function readJson(path: string): Promise<unknown> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -360,14 +359,12 @@ async function readJson(path: string): Promise<unknown> {
     if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return {};
     throw failure;
   }
+  let settings: unknown;
   try {
-    return JSON.parse(text);
+    settings = JSON.parse(text);
   } catch {
     throw new ExplainedFailure(422, "The agent's settings.json is not valid JSON.");
   }
-}
-
-function checkedSettings(settings: unknown): Settings {
   if (!Check(SettingsSchema, settings)) {
     const first = mismatch(SettingsSchema, settings);
     throw new ExplainedFailure(
@@ -378,10 +375,6 @@ function checkedSettings(settings: unknown): Settings {
     );
   }
   return settings;
-}
-
-function offered(extensions: Extensions): string[] {
-  return extensions.builtIn.map((extension) => extension.name);
 }
 
 function selection(
