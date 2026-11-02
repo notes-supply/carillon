@@ -350,9 +350,12 @@ fn a_line_of_many_values_is_a_comma_list_both_ways() -> Result<()> {
         refusal(change(&page, &set("extensions", "schedules,nope")))
             .starts_with("nope is not a choice of Extensions."),
     );
-    assert!(
-        refusal(change(&page, &set("busy", "queue"))).starts_with("queue is not a choice of Busy."),
-        "a line without choices takes no change"
+    assert_eq!(
+        change(&page, &set("busy", "queue"))?.value,
+        Some(Value::One {
+            id: "queue".to_owned()
+        }),
+        "a line without choices leaves the refusal to its owner"
     );
     Ok(())
 }

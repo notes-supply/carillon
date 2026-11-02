@@ -129,7 +129,8 @@ fn stopped(failure: anyhow::Error, applied: &[Edit]) -> anyhow::Error {
 
 /// The change `edit` asks of `page`, refused before it is sent when its key
 /// names no line of the page, or none the runtime could show, or its value
-/// no choice of the line. A line of many values takes a comma list.
+/// no choice of a line that offers some. A line of many values takes a
+/// comma list.
 fn change(page: &Page, edit: &Edit) -> Result<Change> {
     let key = edit.key();
     let setting = line(page, key).ok_or_else(|| match &page.runtime {
@@ -147,11 +148,11 @@ fn change(page: &Page, edit: &Edit) -> Result<Change> {
                     .split(',')
                     .map(str::trim)
                     .filter(|item| !item.is_empty())
-                    .map(|item| Ok(choice(setting, item)?.id.clone()))
+                    .map(|item| chosen(setting, item))
                     .collect::<Result<_>>()?,
             },
             _ => Value::One {
-                id: choice(setting, value)?.id.clone(),
+                id: chosen(setting, value)?,
             },
         }),
         Edit::Reset { .. } => None,
@@ -161,6 +162,15 @@ fn change(page: &Page, edit: &Edit) -> Result<Change> {
         value,
         expected: setting.revision.clone(),
     })
+}
+
+/// The ID of the choice `value` names. A line that offers no choice takes
+/// the value as written, so its owner says why it cannot change.
+fn chosen(setting: &Setting, value: &str) -> Result<String> {
+    if setting.choices.is_empty() {
+        return Ok(value.to_owned());
+    }
+    Ok(choice(setting, value)?.id.clone())
 }
 
 /// The line whose ID is `key`, or else the one line whose ID ends in
