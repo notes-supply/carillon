@@ -25,8 +25,8 @@ export async function testSettings(services) {
   assert.deepEqual(rest, [], "Reset is offered only for a line the channel sets");
   assert.deepEqual(
     options(root, pick).map(({ label }) => label),
-    ["Model"],
-    "the route lines are read-only",
+    ["Listens", "Replies", "Model"],
+    "the route lines are editable, and Agent with one agent offers nothing else",
   );
   assert.deepEqual(
     options(root, set).map(({ label, description, default: held }) => [label, description, held]),
@@ -126,7 +126,11 @@ export async function testSettings(services) {
   try {
     const outage = await interact("305", null, "command", "settings");
     assert.equal(outage.content, card("305", CHANNEL, unreachable));
-    assert.deepEqual(outage.components, []);
+    assert.deepEqual(
+      options(outage, customIds(outage)[0]).map(({ label }) => label),
+      ["Listens", "Replies"],
+      "the route stays editable while its runtime is out",
+    );
     const control = customIds(drawn)[1];
     const clicked = await interact("305", null, "component", control, [
       value(drawn, control, "Local reasoner"),
@@ -140,7 +144,79 @@ export async function testSettings(services) {
     await services.start("runtime");
   }
 
+  await testRoutes(services);
   await testRefusals(services);
+}
+
+/** Route lines change through the provider, and `/settings` routes a new channel. */
+async function testRoutes(services) {
+  const { interact, settings, simulateRoute, configPath } = services;
+  const file = join(dirname(configPath), "providers/discord-private.toml");
+  const saved = await readFile(file);
+  const lines = (listens, replies) => [
+    "Agent    assistant",
+    `Listens  ${listens}`,
+    `Replies  ${replies}`,
+    "Model    Local echo · default",
+  ];
+  assert.equal(
+    settings("302", "listens=mention"),
+    ["#302", ...lines("mentions", "threads")].join("\n"),
+  );
+  const mentioning = await interact("302", null, "command", "settings");
+  assert.equal(mentioning.content, card("302", lines("mentions", "threads")));
+  const quiet = await unanswered(services, "routes-quiet", "302", "no mention");
+  assert.equal(quiet.status, 204, "an unmentioned message starts no turn");
+  const mentioned = await simulateRoute("routes-mention", "302", null, "<@201> which model");
+  assert.match(mentioned.delivery.content, /model local\/echo\.$/u, "a mention starts a turn");
+  settings("302", "listens=always");
+  assert.deepEqual(await readFile(file), saved, "the restored route is the saved file");
+
+  const drawn = await interact("302", null, "command", "settings");
+  const [pick] = customIds(drawn);
+  const replies = await interact("302", null, "component", pick, [value(drawn, pick, "Replies")]);
+  const set = customIds(replies)[1];
+  const inChannel = await interact("302", null, "component", set, [value(replies, set, "channel")]);
+  assert.equal(inChannel.content, card("302", lines("always", "channel")));
+  const first = await simulateRoute("routes-channel-1", "302", null, "first");
+  const second = await simulateRoute("routes-channel-2", "302", null, "second");
+  assert.equal(first.conversation_id, second.conversation_id, "the channel is one conversation");
+  const stale = await interact("302", null, "component", set, [value(replies, set, "threads")]);
+  assert.equal(stale.content, card("302", lines("always", "channel"), "Changed meanwhile"));
+  settings("302", "replies=thread");
+  assert.deepEqual(await readFile(file), saved, "the restored route is the saved file");
+
+  const unrouted = await interact("399", null, "command", "settings");
+  assert.equal(unrouted.content, card("399", ["Agent"]));
+  const agents = customIds(unrouted)[1];
+  const routed = await interact("399", null, "component", agents, [
+    value(unrouted, agents, "assistant"),
+  ]);
+  assert.equal(routed.content, card("399", lines("mentions", "threads")));
+  assert.match(settings(), /^399 {2}#399 {2}assistant, mentions, threads, Local echo$/mu);
+  await writeFile(file, saved);
+  await services.restart("discord");
+  assert.doesNotMatch(settings(), /^399 /mu, "the test route is removed");
+}
+
+/** A message the provider may leave unanswered, so its status is the outcome. */
+async function unanswered({ corePort, configPath }, eventId, channelId, content) {
+  const token = await readFile(join(dirname(configPath), "credentials/discord-private.token"));
+  return fetch(`http://127.0.0.1:${String(corePort + 1)}/v1/simulate`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token.toString().trim()}`,
+    },
+    body: JSON.stringify({
+      event_id: eventId,
+      guild_id: "100",
+      user_id: "200",
+      channel_id: channelId,
+      parent_channel_id: null,
+      content,
+    }),
+  });
 }
 
 async function testAgentResources({ settings, configPath }) {
@@ -215,7 +291,7 @@ async function testRefusals(services) {
       [{ guild_id: "999" }, "other guilds must fail closed"],
       [{ guild_id: null }, "direct messages must fail closed"],
       [{ user_id: "999" }, "users outside the allowlist must fail closed"],
-      [{ channel_id: "399" }, "unconfigured channels must fail closed"],
+      [{ channel_id: "499", parent_channel_id: "399" }, "threads outside a route must fail closed"],
     ]) {
       const response = await requestInteraction({
         ...interaction("305", null, "command", "settings", []),
@@ -229,6 +305,9 @@ async function testRefusals(services) {
     );
     assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
     assert.deepEqual(calls, ["POST"], "a refused interaction reaches no settings");
+    const unrouted = await interact("399", null, "command", "settings");
+    assert.equal(unrouted.content, card("399", ["Agent"]));
+    assert.deepEqual(calls, ["POST"], "an unrouted channel's page asks no runtime");
   } finally {
     await services.stop("discord");
     await services.start("discord");
