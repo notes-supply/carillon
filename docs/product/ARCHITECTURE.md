@@ -264,6 +264,10 @@ what the owners return and defines no setting of its own.
   agent's choice while the channel runs the agent's model, else the
   model's default. Choosing a model replaces the unit with that model
   alone, so an option value never outlives its model.
+- The Pi runtime also owns an agent's busy mode and extensions, which only
+  the agent's page shows. They stay in the `settings.json` of the agent's
+  own resource root, which a change rewrites under the model ledger's lease;
+  the next turn's captured copy carries it.
 
 A revision digests everything that decides a setting's meaning at its
 subject: the subject's interface, channel and agent, its own unit, its
@@ -331,7 +335,8 @@ or special files are refused. An agent without resources captures none.
 A runtime decides which captured copy a turn uses. The Pi runtime uses the
 latest one it admitted for the agent: an edit applies to the agent's next
 model request, including those for messages already waiting, and its
-`settings.json` selects the agent's extensions and busy mode. T3 takes no
+`settings.json` selects the agent's extensions and busy mode, which
+`carillon settings --agent` also changes. T3 takes no
 resources, and refuses an agent that has them. Model sign-in and engine settings are not
 resources: Pi keeps them in `CARILLON_HOME/pi`. A runtime
 works in its agent's workspace (your home by default for Pi) with your
