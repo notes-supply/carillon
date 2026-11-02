@@ -58,7 +58,8 @@ async fn refused_menu_emoji_is_retried_once_without_changing_the_reply() -> anyh
         connect(&mut state, app(&address.to_string(), 2, 100));
         let mut interactions = tokio::task::JoinSet::new();
         assert!(
-            super::super::take_event(&state, model_command()?, None, &mut interactions).is_none()
+            super::super::take_event(&state, settings_command()?, None, &mut interactions)
+                .is_none()
         );
         tokio::time::timeout(
             Duration::from_secs(10),

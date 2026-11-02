@@ -43,12 +43,13 @@ fn answer(id: i64, turn_state: TurnState) -> Delivery {
 }
 
 /// Message `message` in channel 300, as admission hands it to core.
-fn event(message: &str) -> ExternalEvent {
+pub(crate) fn event(message: &str) -> ExternalEvent {
     ExternalEvent {
         event_id: message.to_owned(),
         agent_id: "default".to_owned(),
         user_id: "200".to_owned(),
         audience_id: "discord-100-300".to_owned(),
+        channel_id: "300".to_owned(),
         delivery_target_id: "300".to_owned(),
         feedback_target_id: format!("300:{message}"),
         content: "hello".to_owned(),

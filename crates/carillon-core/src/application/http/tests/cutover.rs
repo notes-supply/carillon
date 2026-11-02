@@ -177,6 +177,7 @@ async fn stranded_conversation_accepts_http_input_without_its_former_runtime() -
                         agent_id: "test-agent".to_owned(),
                         user_id: "test-user".to_owned(),
                         audience_id: format!("pinned-{id}"),
+                        channel_id: "test-channel".to_owned(),
                         delivery_target_id: "target".to_owned(),
                         feedback_target_id: "feedback".to_owned(),
                         content: "new input".to_owned(),

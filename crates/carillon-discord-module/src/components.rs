@@ -10,6 +10,8 @@ pub const TEXT_LIMIT: usize = 100;
 const PLACEHOLDER_LIMIT: usize = 150;
 pub const PRIMARY: u8 = 1;
 pub const SECONDARY: u8 = 2;
+pub const PREVIOUS: &str = "previous";
+pub const NEXT: &str = "next";
 
 /// FNV-1a over the length-prefixed parts, as 16 hex digits.
 pub fn fingerprint(parts: &[&str]) -> String {
@@ -33,6 +35,32 @@ pub fn select(custom_id: &str, placeholder: &str, options: impl Iterator<Item = 
             "options": options.take(PAGE).collect::<Vec<_>>(),
         }],
     })
+}
+
+/// Two fewer than fit once options overflow, leaving room for [`paged`]'s turns.
+const fn page_size(count: usize) -> usize {
+    if count > PAGE { PAGE - 2 } else { PAGE }
+}
+
+pub const fn page_holding(index: usize, count: usize) -> usize {
+    index / page_size(count)
+}
+
+/// One page of `options`, clamped to the last, with options valued
+/// [`PREVIOUS`] and [`NEXT`] that turn to the pages beside it, so a select
+/// never lists more than [`PAGE`]. Returns the page shown.
+pub fn paged(options: Vec<Value>, page: usize) -> (usize, Vec<Value>) {
+    let size = page_size(options.len());
+    let pages = options.len().div_ceil(size).max(1);
+    let page = page.min(pages - 1);
+    let mut shown: Vec<Value> = options.into_iter().skip(page * size).take(size).collect();
+    if page > 0 {
+        shown.push(choice("◀ Previous", PREVIOUS, None, false));
+    }
+    if page + 1 < pages {
+        shown.push(choice("Next ▶", NEXT, None, false));
+    }
+    (page, shown)
 }
 
 pub fn choice(label: &str, value: &str, description: Option<&str>, default: bool) -> Value {

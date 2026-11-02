@@ -12,7 +12,7 @@ use carillon_installation::config::ProviderRole;
 use carillon_protocol::turns::{RuntimeTurnControl, TurnControl};
 use reqwest::Url;
 
-use super::{ApiError, AppState, interface_provider, relay_model_call, runtime_token};
+use super::{ApiError, AppState, interface_provider, relay_runtime_call, runtime_token};
 
 /// Relays a control of the running turn the interface's event became to its
 /// runtime, answering as the runtime does: 404 for an event the interface
@@ -38,5 +38,5 @@ pub(super) async fn control(
         interface_id: interface.id.clone(),
         action: control.action,
     };
-    relay_model_call(state.client.post(url).bearer_auth(token).json(&relayed)).await
+    relay_runtime_call(state.client.post(url).bearer_auth(token).json(&relayed)).await
 }

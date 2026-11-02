@@ -3,14 +3,14 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Check, Parse } from "typebox/value";
 import {
-  ModelQuerySchema,
-  ModelUpdateSchema,
+  ConversationQuerySchema,
   ProviderIdentitySchema,
   RuntimeTurnControlSchema,
   RuntimeTurnRequestSchema,
-  type ModelQuery,
-  type ModelUpdate,
+  SettingsRequestSchema,
+  type ConversationQuery,
   type RuntimeTurnControl,
+  type SettingsRequest,
 } from "@carillon/protocol";
 import { diagnostic, displayableExplanation, ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
@@ -130,33 +130,21 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       else writeJson(response, 200, activity);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/v1/model") {
-      let query: ModelQuery;
+    if (request.method === "POST" && url.pathname === "/v1/settings") {
+      let settings: SettingsRequest;
       try {
-        query = Parse(ModelQuerySchema, Object.fromEntries(url.searchParams));
+        settings = Parse(SettingsRequestSchema, await readJson(request));
       } catch {
-        writeJson(response, 400, { error: "invalid model query" });
+        writeJson(response, 400, { error: "invalid settings request" });
         return;
       }
-      writeJson(response, 200, await options.runtime.modelState(query));
-      return;
-    }
-    if (request.method === "PUT" && url.pathname === "/v1/model") {
-      let update: ModelUpdate;
-      try {
-        update = Parse(ModelUpdateSchema, await readJson(request));
-      } catch {
-        writeJson(response, 400, { error: "invalid model update" });
-        return;
-      }
-      // The runtime decides how a change relates to the turns it runs.
-      writeJson(response, 200, await options.runtime.setModel(update));
+      writeJson(response, 200, await options.runtime.settings(settings));
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/commands") {
-      let query: ModelQuery;
+      let query: ConversationQuery;
       try {
-        query = Parse(ModelQuerySchema, Object.fromEntries(url.searchParams));
+        query = Parse(ConversationQuerySchema, Object.fromEntries(url.searchParams));
       } catch {
         writeJson(response, 400, { error: "invalid command query" });
         return;

@@ -30,6 +30,7 @@
 //!   is never referenced.
 
 mod admission;
+mod conversations;
 mod dispatch;
 mod jobs;
 mod opening;
@@ -285,7 +286,14 @@ impl Database {
                 PRIMARY KEY(turn_id, ordinal)
             );
             CREATE INDEX IF NOT EXISTS turn_attachments_capture
-                ON turn_attachments(capture_id);",
+                ON turn_attachments(capture_id);
+            CREATE TABLE IF NOT EXISTS conversations (
+                interface_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                audience_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                PRIMARY KEY(interface_id, agent_id, audience_id)
+            );",
         )?;
         Ok(())
     }
@@ -718,6 +726,7 @@ mod tests {
             agent_id: "agent".to_owned(),
             user_id: "user".to_owned(),
             audience_id: audience.to_owned(),
+            channel_id: "channel".to_owned(),
             delivery_target_id: "channel".to_owned(),
             feedback_target_id: "message".to_owned(),
             content: "hello".to_owned(),
@@ -760,32 +769,6 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_missing_empty_and_obsolete_databases_without_repair() -> Result<()> {
-        let directory = tempdir()?;
-        let path = directory.path().join("state.sqlite3");
-        for (contents, reason) in [
-            (None, "unable to open database file"),
-            (Some(Vec::new()), "not the current Carillon format"),
-            (Some(b"not SQLite".to_vec()), "file is not a database"),
-        ] {
-            if let Some(bytes) = &contents {
-                std::fs::write(&path, bytes)?;
-            }
-            crate::assert_refused(Database::open(&path), reason)?;
-            assert_eq!(std::fs::read(&path).ok(), contents);
-        }
-        std::fs::remove_file(&path)?;
-        rusqlite::Connection::open(&path)?.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
-        let before = std::fs::read(&path)?;
-        crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
-        assert_eq!(std::fs::read(&path)?, before);
-        std::fs::remove_file(&path)?;
-        Database::create(&path)?;
-        Database::open(&path)?;
-        Ok(())
-    }
-
-    #[test]
     fn established_database_handles_do_not_recreate_a_lost_file() -> Result<()> {
         let directory = tempdir()?;
         let path = directory.path().join("state.sqlite3");
@@ -797,6 +780,7 @@ mod tests {
         Ok(())
     }
 
+    mod format;
     mod ownership;
 
     #[test]
@@ -854,7 +838,7 @@ mod tests {
             Some(held.turn_id)
         );
         assert_eq!(state(&queued.turn_id)?, TurnState::Queued);
-        assert_eq!(state(&opened.turn_id)?, TurnState::Running);
+        assert_eq!(state(&opened.receipt.turn_id)?, TurnState::Running);
         // A runtime no longer configured can settle nothing: its conversation is told.
         assert_eq!(state(&gone.turn_id)?, TurnState::Interrupted);
         let notice = database
@@ -1016,26 +1000,6 @@ mod tests {
             .map(|(_, job)| job.origin.turn_id)
             .collect::<Vec<_>>();
         assert_eq!(listed, accepted);
-        Ok(())
-    }
-
-    #[test]
-    fn a_database_missing_a_current_index_is_refused_without_repair() -> Result<()> {
-        let directory = tempdir()?;
-        let path = directory.path().join("state.sqlite3");
-        let database = Database::create(&path)?;
-        accept(&database, "one", "conversation")?;
-        drop(database);
-        // An index is part of the format: a database an earlier release wrote
-        // without it is refused, and nothing adds it.
-        rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_queued")?;
-        crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
-        let indexes: u32 = rusqlite::Connection::open(&path)?.query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'turns_queued'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(indexes, 0, "a refused database was repaired");
         Ok(())
     }
 

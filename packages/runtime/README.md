@@ -8,13 +8,13 @@ depend on it; it imports neither. Import modules by path
 
 - [`operations.ts`](src/operations.ts): `RuntimeOperations`, the interface a
   runtime implements: hold turns, describe their activity, read and change
-  the model selection, list commands, say whether a restart loses anything,
+  its settings, list commands, say whether a restart loses anything,
   close. Its `turns` `submit` keeps a turn for the runtime to settle later
   through core, and `control` acts on one a person controls.
 - [`http.ts`](src/http.ts): the authenticated HTTP adapter over those
   operations (`/health`, `POST /v1/inbox`, answering 202 once kept, `POST
-  /v1/turns/{id}/control`, `GET /v1/turns/{id}/activity`, `GET`/`PUT
-  /v1/model`, `GET /v1/commands` and `GET /v1/restart`). Callers get only
+  /v1/turns/{id}/control`, `GET /v1/turns/{id}/activity`, `POST
+  /v1/settings`, `GET /v1/commands` and `GET /v1/restart`). Callers get only
   the displayable part of an explanation; other failures are logged,
   redacted.
 - [`core.ts`](src/core.ts): a runtime's client of core, with its own
@@ -32,5 +32,8 @@ depend on it; it imports neither. Import modules by path
   [`serial.ts`](src/serial.ts): registry and credential loading, including
   core's loopback address; loopback address checks; and one-at-a-time
   execution, which a waiter can leave.
+- [`settings.ts`](src/settings.ts): `SettingsLedger`, the model unit each
+  agent and channel stores in the runtime's `settings.json`, their revisions,
+  and what a turn in a channel runs.
 - [`publish.ts`](src/publish.ts): durable replacement of a file a runtime
-  owns, such as its model selections.
+  owns, such as its settings ledger.

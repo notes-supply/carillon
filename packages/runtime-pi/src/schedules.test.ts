@@ -1,7 +1,7 @@
 import {
   fauxAssistantMessage,
   fauxToolCall,
-  type FauxResponseStep,
+  type FauxResponseFactory,
   type JsonObject,
 } from "@earendil-works/pi-ai";
 import { defineExtension, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
@@ -38,7 +38,7 @@ function tool(name: string, args: JsonObject): string {
  * Calls the tool a message asks for, says what a tool answered, and answers
  * anything else, such as a scheduled run's prompt, with its last text.
  */
-const model: FauxResponseStep = (context) => {
+const model: FauxResponseFactory = (context) => {
   const last = context.messages.findLast((message) => message.role !== "system");
   const texts = textsOf(last);
   if (last?.role === "toolResult") return fauxAssistantMessage(`Tool: ${texts.join("")}`);
@@ -105,6 +105,32 @@ it("runs a schedule when it is due, in a turn it opens and settles with the answ
       label: "Scheduled: plants",
     },
   ]);
+});
+
+it("runs a schedule on the model of the channel core opens its run in, not the one it was made in", async () => {
+  const clock = fakeClock("2026-10-24T08:00:00Z");
+  const ranOn: FauxResponseFactory = (context, options, state, chosen) =>
+    textsOf(context.messages.at(-1)).includes("Which model?")
+      ? fauxAssistantMessage(`Ran on ${chosen.id}`)
+      : model(context, options, state, chosen);
+  const agent = await fixture({
+    clock,
+    defaults: ["schedules"],
+    answers: Array.from({ length: 10 }, () => ranOn),
+  });
+  await schedule(
+    agent,
+    "turn-1",
+    { prompt: "Which model?", at: "2026-10-24T09:00:00Z" },
+    { channel_id: "301" },
+  );
+  await agent.set(
+    { kind: "channel", interface_id: "discord-private", channel_id: "300", agent_id: "default" },
+    "model",
+    `${agent.model.provider.id}/reasoner`,
+  );
+  clock.advance(60 * 60_000);
+  expect(await agent.outcome("opened-1")).toMatchObject({ output: "Ran on reasoner" });
 });
 
 it("runs a recurring schedule each time it is due, in its time zone", async () => {

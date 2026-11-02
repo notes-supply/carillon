@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use carillon_protocol::{
-    model::{EventReceipt, TurnState},
+    model::{OpenedTurn, TurnState},
     turns::{RunningTurn, Silence, TurnOpening, TurnOutcome},
 };
 
@@ -48,7 +48,8 @@ impl Core {
 
     /// Returns the receipt of the turn the same key opened in the same
     /// conversation, or else opens a running turn `runtime_id` will settle,
-    /// in an existing conversation of its own whose agent runs there now.
+    /// in an existing conversation of its own whose agent runs there now;
+    /// either with the conversation's channel.
     /// # Errors
     /// Returns a conversation that is not the runtime's, or a key another
     /// conversation used, as a conflict, or storage errors.
@@ -56,7 +57,7 @@ impl Core {
         &self,
         runtime_id: &str,
         opening: &TurnOpening,
-    ) -> Result<EventReceipt, CoreError> {
+    ) -> Result<OpenedTurn, CoreError> {
         let agent_runtime = self
             .agent(&opening.agent_id)
             .ok()
@@ -65,7 +66,7 @@ impl Core {
             .database
             .open_turn(runtime_id, agent_runtime, opening)?
         {
-            Opened::Receipt(receipt) => Ok(receipt),
+            Opened::Receipt(opened) => Ok(opened),
             Opened::Elsewhere => Err(CoreError::Conflict(format!(
                 "the key {} opened a turn in another conversation",
                 opening.key

@@ -12,6 +12,8 @@ pub(crate) struct QueuedTurn {
     pub interface_id: String,
     pub agent_id: String,
     pub audience_id: String,
+    /// The channel recorded for the turn's conversation.
+    pub channel_id: String,
     pub runtime_id: String,
     pub input: String,
     pub resource_snapshot_id: String,
@@ -19,9 +21,12 @@ pub(crate) struct QueuedTurn {
     pub attachments: Vec<CapturedFile>,
 }
 
-/// The columns [`queued_turn`] reads, in its order.
-const TURN: &str =
-    "id, interface_id, agent_id, audience_id, runtime_id, input, resource_snapshot_id, native_json";
+/// The columns [`queued_turn`] reads, in its order, from [`TURNS`].
+const TURN: &str = "id, interface_id, agent_id, audience_id, channel_id, runtime_id, input,
+    resource_snapshot_id, native_json";
+
+/// Turns with their conversations' channels.
+const TURNS: &str = "turns JOIN conversations USING (interface_id, agent_id, audience_id)";
 
 /// A turn as [`TURN`] selects it, without its files.
 fn queued_turn(row: &Row<'_>) -> rusqlite::Result<QueuedTurn> {
@@ -30,10 +35,11 @@ fn queued_turn(row: &Row<'_>) -> rusqlite::Result<QueuedTurn> {
         interface_id: row.get(1)?,
         agent_id: row.get(2)?,
         audience_id: row.get(3)?,
-        runtime_id: row.get(4)?,
-        input: row.get(5)?,
-        resource_snapshot_id: row.get(6)?,
-        native: json_column(row, 7)?,
+        channel_id: row.get(4)?,
+        runtime_id: row.get(5)?,
+        input: row.get(6)?,
+        resource_snapshot_id: row.get(7)?,
+        native: json_column(row, 8)?,
         attachments: Vec::new(),
     })
 }
@@ -47,7 +53,7 @@ impl Database {
         let turn = connection
             .query_row(
                 &format!(
-                    "SELECT {TURN} FROM turns WHERE runtime_id = ?1 AND state = 'queued'
+                    "SELECT {TURN} FROM {TURNS} WHERE runtime_id = ?1 AND state = 'queued'
                      ORDER BY acceptance_sequence LIMIT 1"
                 ),
                 [runtime_id],
@@ -68,10 +74,10 @@ impl Database {
         let transaction = connection.transaction()?;
         let running = transaction
             .prepare(&format!(
-                "SELECT {TURN}, event_id FROM turns WHERE runtime_id = ?1 AND state = 'running'
+                "SELECT {TURN}, event_id FROM {TURNS} WHERE runtime_id = ?1 AND state = 'running'
                  ORDER BY acceptance_sequence"
             ))?
-            .query_map([runtime_id], |row| Ok((queued_turn(row)?, row.get(8)?)))?
+            .query_map([runtime_id], |row| Ok((queued_turn(row)?, row.get(9)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         running
             .into_iter()

@@ -32,8 +32,7 @@ impl Fixture {
         std::fs::write(
             home.join("providers/runtime-t3.toml"),
             "url = 'http://127.0.0.1:3773'\ntoken_file = 'credentials/t3.token'\n\
-             [agents.t3-notes]\nproject_id = 'p1'\n[agents.t3-notes.model]\n\
-             instance_id = 'codex'\nmodel = 'gpt'\n",
+             [agents.t3-notes]\nproject_id = 'p1'\n",
         )?;
         std::fs::write(home.join("credentials/t3.token"), "token")?;
         fake_t3(
@@ -46,7 +45,8 @@ impl Fixture {
         for (name, script) in [
             (
                 "runtime-pi",
-                "echo \"$*\" >>\"$CARILLON_HOME/pi-calls\"\nexit 0",
+                "echo \"$*\" >>\"$CARILLON_HOME/pi-calls\"\n\
+                 case \"$*\" in *--models*) echo '{\"models\": [], \"value\": \"openai-codex/gpt-6.1-sol\"}' ;; esac",
             ),
             (
                 "discord",
@@ -93,7 +93,7 @@ fn setup_added_pi_child() -> anyhow::Result<()> {
     };
     let mut questions = Shown::default();
     setup(Path::new(&home), &options, &mut questions)?;
-    println!("{}", questions.shown.join("\n"));
+    println!("{}", questions.transcript.join("\n"));
     Ok(())
 }
 
@@ -117,7 +117,10 @@ fn keeping_t3_while_adding_pi_plans_its_assistant_and_honours_workspace() -> any
         assert_eq!(config.value.agent("t3-notes")?.runtime, "runtime-t3");
         assert_eq!(config.value.agents.len(), 2);
         assert_eq!(std::fs::read(&settings)?, before);
-        assert!(std::fs::read_to_string(fixture.home.join("pi-calls"))?.contains("--check"));
+        let pi = std::fs::read_to_string(fixture.home.join("pi-calls"))?;
+        assert!(pi.contains("--check"), "{pi}");
+        assert!(pi.contains("--models --agent assistant"), "{pi}");
+        assert!(!pi.contains("--configure"), "{pi}");
         assert_eq!(
             std::fs::read_to_string(fixture.home.join("discord-calls"))?,
             "setup\n"

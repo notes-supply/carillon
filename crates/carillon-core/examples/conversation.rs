@@ -48,6 +48,7 @@ async fn conversation() -> Result<()> {
         agent_id: "example".to_owned(),
         user_id: "reader".to_owned(),
         audience_id: "conversation-1".to_owned(),
+        channel_id: "channel-1".to_owned(),
         delivery_target_id: "conversation-1".to_owned(),
         feedback_target_id: "message-1".to_owned(),
         content: "Hello building blocks".to_owned(),

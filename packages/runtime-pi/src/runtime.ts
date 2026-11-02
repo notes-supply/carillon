@@ -9,20 +9,20 @@ import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import type { CoreClient } from "@carillon/runtime/core";
 import { ExplainedFailure } from "@carillon/runtime/failure";
 import type { RuntimeOperations } from "@carillon/runtime/operations";
-import { ModelSelections } from "@carillon/runtime/selections";
+import { SettingsLedger } from "@carillon/runtime/settings";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { openAgent, type Clock, type DurableAgent } from "./agent.ts";
 import { DEFAULT_INLINE_IMAGES, type InlineImagePolicy } from "./attachments.ts";
 import type { McpServer } from "./mcp.ts";
-import { checkDefault, modelChoices, type Catalogue } from "./models.ts";
+import { modelSettings, type PiCatalogue } from "./models.ts";
 
 export interface PiRuntimeOptions {
   /** The agents the runtime serves, each with the existing directory its tools work in. */
   readonly agents: readonly { readonly id: string; readonly workspace: string }[];
-  /** The runtime's private state: agents' storage and Carillon's model selections. */
+  /** The runtime's private state: agents' storage and Carillon's settings ledger. */
   readonly componentDirectory: string;
-  readonly catalogue: Catalogue;
+  readonly catalogue: PiCatalogue;
   readonly core: CoreClient;
   readonly images: ImageProcessor;
   /** The built-in extensions, named as agents' settings select them. */
@@ -38,14 +38,12 @@ export interface PiRuntimeOptions {
   readonly clock?: Clock;
 }
 
-/** Refuses to start, before any storage opens, unless the runtime default model can run. */
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
   await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
-  const selections = await ModelSelections.open(
-    join(options.componentDirectory, "model-selection.json"),
+  const models = modelSettings(
+    options.catalogue,
+    await SettingsLedger.open(join(options.componentDirectory, "settings.json")),
   );
-  await checkDefault(options.catalogue);
-  const choices = modelChoices(options.catalogue, selections);
   const storage =
     options.storage ??
     ((agentId: string) =>
@@ -60,7 +58,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           workspace: agent.workspace,
           storage: await storage(agent.id),
           catalogue: options.catalogue,
-          choices,
+          models,
           core: options.core,
           images: options.images,
           inlineImages: options.inlineImages ?? DEFAULT_INLINE_IMAGES,
@@ -77,8 +75,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
 
   function agentOf(id: string): DurableAgent {
     const agent = agents.get(id);
-    if (agent === undefined)
-      throw new ExplainedFailure(422, "This conversation's agent does not run on Pi here.");
+    if (agent === undefined) throw new ExplainedFailure(422, `${id} does not run on Pi here.`);
     return agent;
   }
 
@@ -98,8 +95,10 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       }
       return undefined;
     },
-    modelState: (query) => choices.state(query),
-    setModel: (update) => choices.update(update),
+    async settings(request) {
+      agentOf(request.subject.agent_id);
+      return models.settings(request);
+    },
     // The durable runtime runs no commands of its own yet.
     commands: () => Promise.resolve({ commands: [] }),
     restartReadiness() {

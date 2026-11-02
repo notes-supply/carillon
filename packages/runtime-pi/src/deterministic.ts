@@ -15,12 +15,12 @@ import {
   type Message,
 } from "@earendil-works/pi-ai";
 import { access } from "node:fs/promises";
-import type { Catalogue } from "./models.ts";
+import type { PiCatalogue } from "./models.ts";
 
 const HOLD = /^hold (\S+)$/u;
 const ATTACHMENT = /name: ("(?:[^"\\]|\\.)*"); size: ([^;]+);/gu;
 
-export function deterministicCatalogue(): Catalogue {
+export function deterministicCatalogue(): PiCatalogue {
   const models = createModels();
   for (const [id, name, definitions] of [
     [
@@ -58,11 +58,7 @@ export function deterministicCatalogue(): Catalogue {
       }),
     );
   }
-  return {
-    models,
-    runtimeDefault: () => ({ provider: "local", model: "echo", options: {} }),
-    defaultThinking: () => "medium",
-  };
+  return { models, defaultThinking: () => "medium" };
 }
 
 const answer: FauxResponseFactory = async (context, options, _state, model) => {

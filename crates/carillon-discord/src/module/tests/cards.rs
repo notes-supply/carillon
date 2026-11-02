@@ -294,7 +294,7 @@ async fn the_release_module_draws_what_the_native_renderer_drew() -> anyhow::Res
     }
     assert_eq!(
         super::super::check(&release_module_bytes()?).await?,
-        ["model", "command"]
+        ["settings", "command"]
     );
     Ok(())
 }
@@ -312,7 +312,7 @@ async fn the_example_module_colours_the_bundled_cards_through_the_host() -> anyh
     assert_eq!(bundled.color, None);
 
     let change = module.apply(custom(root, "custom.wasm"), None).await?;
-    assert_eq!(change.serving.commands, ["model", "command"]);
+    assert_eq!(change.serving.commands, ["settings", "command"]);
     let coloured = module
         .render_card(&working_card("Working"))
         .await?

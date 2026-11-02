@@ -14,6 +14,7 @@ import {
   type TaskRuntime,
   type UserInput,
 } from "@earendil-works/pi-durable";
+import type { OpenedTurn } from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
 import { diagnostic } from "@carillon/runtime/failure";
 import { backoff, over, refusedForGood, type DeliveryInput, type Needs } from "./delivery.ts";
@@ -44,7 +45,7 @@ export interface OpeningHost {
   /** The input placed in the conversation under the request ID, once it is. */
   placed(conversation: ConversationId, requestId: string): Promise<SubmissionId | undefined>;
   /** Places the opened turn's input in the conversation, its key as its request ID. */
-  place(conversation: ConversationId, turn: string, opening: Opening): Promise<SubmissionId>;
+  place(conversation: ConversationId, turn: OpenedTurn, opening: Opening): Promise<SubmissionId>;
   /** Holds the turn until its delivery task settles it like any turn. */
   track(input: DeliveryInput): Promise<void>;
   /** Stops the placed input as a person's stop does, so its turn settles stopped. */
@@ -77,18 +78,19 @@ export function openingTask(host: OpeningHost) {
     if (info === undefined)
       throw new Error(`conversation ${String(conversation)} serves no Carillon conversation`);
     const { interface_id, agent_id, audience_id } = info;
-    const { turn_id: turn, state } = await host.core.open(
+    const opened = await host.core.open(
       { interface_id, agent_id, audience_id, key: host.key(opening.key), label: opening.label },
       runtime.signal,
     );
-    if (state !== "running") return;
+    if (opened.state !== "running") return;
+    const turn = opened.turn_id;
     let submission = await host.placed(conversation, opening.key);
     if (submission === undefined) {
       if (!(await runs(opening, runtime, context))) {
         await host.core.settle(turn, { outcome: "stopped" });
         return;
       }
-      submission = await host.place(conversation, turn, opening);
+      submission = await host.place(conversation, opened, opening);
     }
     await host.track({
       turn,

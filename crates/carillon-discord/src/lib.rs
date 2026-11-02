@@ -2,6 +2,7 @@
 mod activity;
 pub mod application;
 mod attachments;
+mod channels;
 mod cli;
 mod client;
 pub mod config;

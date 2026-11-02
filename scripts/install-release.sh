@@ -334,8 +334,9 @@ cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
 2. Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
-   In Pi, run /login, then /model and press Ctrl+S on the agent's model to save it.
+   In Pi, run /login, then leave with Ctrl+D.
 3. Start deliberately with: $CARILLON start
+   Then choose the assistant's model: $CARILLON settings --agent assistant model=PROVIDER/MODEL
 4. Inspect with: $CARILLON status   and   $CARILLON logs
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER

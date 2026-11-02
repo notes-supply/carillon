@@ -49,7 +49,7 @@ export async function resolveThread(
   };
   if ((await readThread(connection, scoped, timeoutMs, signal)) !== undefined) return scoped;
   if (options.start !== undefined)
-    await ensureThread(connection, scoped, await options.start(), timeoutMs, signal);
+    await ensureThread(connection, scoped, options.start, timeoutMs, signal);
   throw projectChanged();
 }
 
@@ -144,18 +144,19 @@ function readProjection(
   });
 }
 
-/** Opens a resolved conversation thread on its default model unless T3 already has it. */
+/** Opens a resolved conversation thread on the turn's selection unless T3 already has it. */
 export async function ensureThread(
   connection: T3Connection,
   binding: ThreadBinding,
-  selection: NativeSelection,
+  selection: () => Promise<NativeSelection>,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<void> {
   if ((await readThread(connection, binding, timeoutMs, signal)) !== undefined) return;
+  const command = threadCreate(binding, await selection());
   signal?.throwIfAborted();
   try {
-    await connection.call(RPC.dispatchCommand, threadCreate(binding, selection));
+    await connection.call(RPC.dispatchCommand, command);
   } catch (failure) {
     if (failure instanceof T3Failure && failure.kind === "rejected")
       throw new ExplainedFailure(

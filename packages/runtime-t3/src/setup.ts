@@ -1,19 +1,20 @@
 /**
  * Setting the runtime up on an existing T3 server: what the server offers,
- * and the runtime's settings for an agent's project and model. The T3 token
- * is given as a value, never as an argument, and written only to a private
- * credential file the runtime's settings name.
+ * the runtime's settings for an agent's project, and the agent's model in
+ * the settings ledger. The T3 token is given as a value, never as an
+ * argument, and written only to a private credential file the runtime's
+ * settings name.
  */
-import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
-import type { AvailableModel } from "@carillon/protocol";
+import { mkdir, readFile, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { publish, Unsynced } from "@carillon/runtime/publish";
+import { modelChoiceId, SettingsLedger, type CatalogueModel } from "@carillon/runtime/settings";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { ORCHESTRATION_PROTOCOL, RPC } from "./contracts.ts";
-import { catalog } from "./models.ts";
+import { ORCHESTRATION_PROTOCOL } from "./contracts.ts";
+import { offered, type Catalog } from "./models.ts";
 import { parseSettings, readSettings, type SettingsFile } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
 
@@ -27,7 +28,7 @@ export interface Project {
 /** A T3 server's projects and usable models. */
 export interface Offer {
   readonly projects: readonly Project[];
-  readonly models: readonly AvailableModel[];
+  readonly models: readonly CatalogueModel[];
 }
 
 /** An agent's project and default model, the model as T3 names its provider instance and slug. */
@@ -61,13 +62,27 @@ export async function discover(
 ): Promise<Offer> {
   const { connect = connectT3, scope } = options;
   if (scope !== undefined) plain(agentOf(scope.installation, scope.agentId));
+  const { projects, catalogue } = await serverOffer(endpoint, connect);
+  return { projects, models: catalogue.models };
+}
+
+async function serverOffer(
+  endpoint: T3Endpoint,
+  connect: Connect,
+): Promise<{ projects: Project[]; catalogue: Catalog }> {
   const connection = await connect(endpoint);
   try {
-    const { available } = catalog(await connection.call(RPC.getConfig, {}));
-    return { projects: await projects(endpoint), models: available };
+    const catalogue = await offered(connection);
+    return { projects: await projects(endpoint), catalogue };
   } finally {
     connection.close();
   }
+}
+
+/** The runtime's settings ledger in its component directory, which is made when missing. */
+export async function openLedger(installation: Installation): Promise<SettingsLedger> {
+  await mkdir(installation.componentDirectory, { recursive: true, mode: 0o700 });
+  return SettingsLedger.open(join(installation.componentDirectory, "settings.json"));
 }
 
 /** T3's projects, from its authenticated shell snapshot. */
@@ -126,12 +141,15 @@ export function plain(agent: Agent): Agent {
 }
 
 /**
- * Writes the runtime's settings for `choice` on the server at `endpoint`,
- * naming the token's file. The server must offer the project, rooted at the
- * agent's workspace, and the model. The settings of the other agents this
- * runtime serves are kept, as are the agent's model options while its model
- * stays the same; settings that do not read as valid are refused before
- * anything is written.
+ * Makes the model the agent's in the settings ledger, then writes the
+ * runtime's settings for `choice` on the server at `endpoint`, naming the
+ * token's file. Settings written last mean a setup cut off between the two
+ * is asked again, as `check` refuses settings without the agent. The
+ * server must offer the project, rooted at the agent's
+ * workspace, and the model. The settings of the other agents this runtime
+ * serves are kept, as are the agent's model options while its model stays
+ * the same; settings that do not read as valid are refused before anything
+ * is written.
  *
  * The new settings are checked as the runtime reads them first. A token
  * other than the one they name goes to a new private file, and the settings
@@ -146,7 +164,7 @@ export async function configure(
 ): Promise<Project> {
   const existing = await readExisting(installation);
   const agent = plain(agentOf(installation, choice.agentId));
-  const offer = await discover(endpoint, { connect });
+  const offer = await serverOffer(endpoint, connect);
   const project = offer.projects.find(({ id }) => id === choice.projectId);
   if (project === undefined) throw new Error(`T3 has no project ${choice.projectId}`);
   const rooted = await realpath(project.workspace).catch(() => undefined);
@@ -155,29 +173,25 @@ export async function configure(
       `T3 project ${project.title} works in ${project.workspace}, but ${agent.name} works in ` +
         `${agent.workspace}; choose a project rooted there`,
     );
-  if (
-    !offer.models.some(
-      ({ provider, model }) => provider === choice.instanceId && model === choice.model,
-    )
-  )
-    throw new Error(`T3 offers ${agent.name} no usable model ${choice.instanceId}/${choice.model}`);
-  const before = existing?.agents?.[choice.agentId];
-  return publishSettings(installation, endpoint, existing, {
+  const model = modelChoiceId({ provider: choice.instanceId, model: choice.model });
+  if (!offer.catalogue.models.some((candidate) => modelChoiceId(candidate) === model))
+    throw new Error(`T3 offers ${agent.name} no usable model ${model}`);
+  const ledger = await openLedger(installation);
+  const subject = { kind: "agent", agent_id: choice.agentId } as const;
+  const line = (await ledger.settings(offer.catalogue, subject)).find(({ id }) => id === "model");
+  if (line === undefined) throw new Error("the settings ledger shows no model line");
+  // Choosing the model again keeps the options chosen for it.
+  if (line.value?.kind !== "one" || line.value.id !== model)
+    await ledger.change(offer.catalogue, subject, {
+      setting: "model",
+      value: { kind: "one", id: model },
+      expected: line.revision,
+    });
+  await publishSettings(installation, endpoint, existing, {
     ...existing?.agents,
-    [choice.agentId]: {
-      project_id: project.id,
-      model: {
-        instance_id: choice.instanceId,
-        model: choice.model,
-        // Options are the model's own; another model starts from its defaults.
-        ...(before?.model.instance_id === choice.instanceId &&
-        before.model.model === choice.model &&
-        before.model.options !== undefined
-          ? { options: before.model.options }
-          : {}),
-      },
-    },
-  }).then(() => project);
+    [choice.agentId]: { project_id: project.id },
+  });
+  return project;
 }
 
 async function readExisting(installation: Installation): Promise<SettingsFile | undefined> {

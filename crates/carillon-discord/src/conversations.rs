@@ -1,7 +1,7 @@
 //! Message admission, activation, durable participation, and conversation identity.
 use crate::{
     InterfaceError,
-    config::{DiscordActivation, DiscordConfig, DiscordConversation},
+    config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
 };
 use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
@@ -372,6 +372,7 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
             agent_id: plan.agent_id,
             user_id: plan.user_id,
             audience_id: conversation_id.clone(),
+            channel_id: plan.route_channel_id.clone(),
             delivery_target_id: target,
             feedback_target_id: format!("{}:{}", plan.channel_id, plan.message_id),
             content: plan.content,
@@ -487,12 +488,12 @@ pub struct InteractionSource {
     pub options: Value,
 }
 
-/// An admitted interaction: what the module sees, the conversation it
-/// happened in when the agent participates there, and where it came from.
+/// An admitted interaction: what the module sees, the route that admitted
+/// it, the conversation it happened in when the agent participates there,
+/// and where it came from.
 pub struct AdmittedInteraction {
     pub interaction: Interaction,
-    /// The agent of the route that admitted it.
-    pub(crate) agent_id: String,
+    pub(crate) route: DiscordRoute,
     pub audience_id: Option<String>,
     pub origin: InteractionOrigin,
 }
@@ -554,7 +555,7 @@ pub fn admit_interaction(
             conversation: audience_id.is_some(),
             markers: config.activity_markers.clone(),
         },
-        agent_id: route.agent.clone(),
+        route: route.clone(),
         audience_id,
         origin: InteractionOrigin {
             guild_id,
@@ -583,6 +584,7 @@ pub(crate) fn submitted_event(
         agent_id: agent_id.to_owned(),
         user_id: origin.user_id.clone(),
         audience_id: audience_id.to_owned(),
+        channel_id: origin.route_channel_id.clone(),
         delivery_target_id: origin.channel_id.clone(),
         feedback_target_id: format!("{}:{marker_id}", origin.channel_id),
         content: text.to_owned(),

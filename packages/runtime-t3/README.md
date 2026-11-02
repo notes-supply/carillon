@@ -3,9 +3,9 @@
 Runs Carillon turns on a [T3 Code](https://github.com/pingdotgg/t3code) server
 instead of Pi, as another client of the threads T3's own UI shows. It serves
 the same runtime boundary as Pi through [`@carillon/runtime`](../runtime/README.md).
-T3 keeps the conversations; the runtime keeps only the agent defaults
-`/model` chose, in `model-selection.json` in its component directory, and
-the stops core has not recorded yet, in `stops.json` there. Core keeps the
+T3 keeps the conversations; the runtime keeps only the models its agents
+and channels chose, in the settings ledger `settings.json` in its component
+directory, and the stops core has not recorded yet, in `stops.json` there. Core keeps the
 turns: the runtime holds each one core hands it and settles it through
 core, which lists the ones it holds to a runtime that restarted.
 
@@ -49,7 +49,8 @@ It then writes `providers/runtime-t3.toml` under the installation's
 maintenance lock, refusing while an update or backup runs. A token other
 than the one the settings name goes to a new private file in
 `credentials/` first, which the new settings then name; until they replace
-the old ones, those keep their token.
+the old ones, those keep their token. Last, it makes the model the agent's
+own in the settings ledger, the only place an agent's default lives.
 
 `carillon runtime-t3 check` reads the saved settings and token as startup
 reads them, without reaching T3. Setup offers to keep them only when it
@@ -63,24 +64,18 @@ token_file = "credentials/t3.token"
 
 [agents.t3-notes]                  # by its ID in carillon.toml
 project_id = "…"
-
-[agents.t3-notes.model]            # the agent default until /model changes it
-instance_id = "codex"
-model = "gpt-6.1-sol"
-
-[agents.t3-notes.model.options]    # optional
-reasoningEffort = "high"
 ```
 
 Every agent of this runtime in `carillon.toml` needs its section, and there
-is no section for any other. Rerunning `configure` keeps the other agents of
-this runtime, and keeps an agent's `[model.options]` while its model stays
-the same. `configure` drops the section of an agent `carillon.toml` no
-longer gives this runtime.
+is no section for any other. A section that names a `model`, as earlier
+releases wrote, is refused. Rerunning `configure` keeps the other agents of
+this runtime, and keeps the options chosen for an agent's model while its
+model stays the same. `configure` drops the section of an agent
+`carillon.toml` no longer gives this runtime.
 
 Then `carillon start`. The runtime reads these files only when it starts,
 so after `configure` or a setup rerun changes them, a running Carillon needs
-`carillon restart`.
+`carillon restart`. It reads the settings ledger for every turn.
 
 Startup fails closed:
 
@@ -97,7 +92,7 @@ the agent's runtime. After an agent's T3 project
 changes and the runtime restarts, the first message in an existing conversation
 opens an empty thread in the current project and is refused with an explanation.
 That message never runs. The next message starts work in the new thread, including
-in a channel that always uses the same conversation. Model requests and commands
+in a channel that always uses the same conversation. Command requests
 are refused without creating anything until that thread exists; then they use it. Returning to the original project resumes the original
 thread. Native work already running in another project is left alone, and a
 report of it is refused.
@@ -153,18 +148,19 @@ report of it is refused.
 - **The person's text as written**, with a note only of files T3 could not
   take. T3 titles a thread from its first message.
 - **Models.**
-  - A conversation's model is its T3 thread's own selection, which T3's UI
-    can change too; the last change wins. Each message names it as the
-    selection its run takes.
-  - The agent default is what the agent's new conversations start with, in
-    every channel routed to it. `/model` outside a thread changes it. The
-    runtime keeps that choice in `model-selection.json` in its component
-    directory, and the agent's `model` in the settings above applies until
-    then.
-  - A change is refused while the conversation is busy.
+  - A turn runs its channel's model, else its agent's, as `/settings` and
+    `carillon settings` chose them; T3's boolean options are two choices,
+    Off and On. The runtime resolves it once, before the turn's first
+    dispatch, and every reconnection sends the same selection.
+  - A channel change governs the next turn in every thread of the channel.
+    T3 makes each message's selection its thread's own, so a model picked in
+    T3's own UI lasts until Carillon's next turn there.
+  - With no model for the channel or its agent, a turn fails naming
+    `carillon settings --agent <id> model=<provider>/<model>`.
 - **Commands.** `/command` lists what T3's composer offers in the agent's
-  workspace and sends an invocation verbatim; its answer names the files
-  T3 did not take.
+  workspace, for the instance of the conversation's thread, else of its
+  agent's model, and sends an invocation verbatim; its answer names the
+  files T3 did not take.
 - **Images.** PNG, JPEG, WebP and GIF files up to 10 MiB each (80 MiB per
   message) are uploaded to T3, after checking them against core's digest.
   The message names the files T3 doesn't receive.
@@ -173,22 +169,13 @@ report of it is refused.
 
 ```ts
 import { createCoreClient } from "@carillon/runtime/core";
-import { ModelSelections } from "@carillon/runtime/selections";
+import { SettingsLedger } from "@carillon/runtime/settings";
 import { createT3Runtime, readStops } from "@carillon/runtime-t3";
 
 const runtime = createT3Runtime({
   endpoint: { url: "http://127.0.0.1:3773", token },
-  agents: new Map([
-    [
-      "t3-notes",
-      {
-        projectId: "…",
-        workspace: "/path/to/workspace",
-        selection: { instanceId: "codex", model: "gpt-6.1-sol", options: [] },
-      },
-    ],
-  ]),
-  selections: await ModelSelections.open("/path/to/model-selection.json"),
+  agents: new Map([["t3-notes", { projectId: "…", workspace: "/path/to/workspace" }]]),
+  ledger: await SettingsLedger.open("/path/to/settings.json"),
   stops: await readStops("/path/to/stops.json"),
   core: createCoreClient({ url: "http://127.0.0.1:43800", providerId: "runtime-t3", token }),
 });
@@ -207,4 +194,4 @@ answers, ignored interrupts, disconnections, stalled discovery and more).
 second run, stops, background and delegated work, commands and images
 against it and a fake core, [`runtime/held.test.ts`](src/runtime/held.test.ts)
 the turns it holds for core, and [`runtime/models.test.ts`](src/runtime/models.test.ts)
-models.
+each turn's model and the settings over T3's catalogue.

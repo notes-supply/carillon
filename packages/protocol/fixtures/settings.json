@@ -1,0 +1,505 @@
+{
+  "subjects": [
+    {
+      "kind": "agent",
+      "agent_id": "assistant"
+    },
+    {
+      "kind": "channel",
+      "interface_id": "discord-private",
+      "channel_id": "300",
+      "agent_id": "assistant"
+    }
+  ],
+  "invalid_subjects": [
+    {
+      "kind": "agent",
+      "agent_id": "assistant",
+      "channel_id": "300"
+    },
+    {
+      "kind": "channel",
+      "interface_id": "discord-private",
+      "channel_id": "300",
+      "agent_id": "assistant",
+      "audience_id": "discord-100-300"
+    },
+    {
+      "kind": "agent",
+      "agent_id": ""
+    },
+    {
+      "kind": "channel",
+      "interface_id": "discord-private",
+      "agent_id": "assistant"
+    },
+    {
+      "kind": "conversation",
+      "agent_id": "assistant"
+    },
+    {
+      "kind": "channel",
+      "interface_id": "discord/private",
+      "channel_id": "300",
+      "agent_id": "assistant"
+    },
+    {
+      "kind": "channel",
+      "interface_id": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "channel_id": "300",
+      "agent_id": "assistant"
+    }
+  ],
+  "values": [
+    {
+      "kind": "one",
+      "id": "high"
+    },
+    {
+      "kind": "many",
+      "ids": ["schedules", "subagents"]
+    },
+    {
+      "kind": "many",
+      "ids": []
+    }
+  ],
+  "invalid_values": [
+    {
+      "kind": "one",
+      "id": ""
+    },
+    {
+      "kind": "one",
+      "ids": ["x"]
+    },
+    {
+      "kind": "one",
+      "id": "high",
+      "also": 1
+    },
+    {
+      "id": "high"
+    }
+  ],
+  "requests": [
+    {
+      "subject": {
+        "kind": "agent",
+        "agent_id": "assistant"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "model.thinking",
+        "value": {
+          "kind": "one",
+          "id": "high"
+        },
+        "expected": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+      }
+    },
+    {
+      "subject": {
+        "kind": "agent",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "model",
+        "value": null,
+        "expected": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+      }
+    }
+  ],
+  "invalid_requests": [
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "model",
+        "value": null,
+        "expected": "abc"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "model",
+        "value": null,
+        "expected": "6B86B273FF34FCE19D6B804EFF5A3F5747ADA4EAA22F1D49C01E52DDB7875B4B"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "model",
+        "expected": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": {
+        "setting": "",
+        "value": null,
+        "expected": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+      }
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "also": 1
+    },
+    {
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "change": null
+    }
+  ],
+  "settings": [
+    {
+      "settings": [
+        {
+          "id": "model",
+          "name": "Model",
+          "choices": [
+            {
+              "id": "openai-codex/gpt-6.1-sol",
+              "name": "GPT-6.1 Sol",
+              "group": "OpenAI Codex"
+            },
+            {
+              "id": "openai-codex/gpt-6.1-mini",
+              "name": "GPT-6.1 Mini",
+              "group": "OpenAI Codex"
+            }
+          ],
+          "value": {
+            "kind": "one",
+            "id": "openai-codex/gpt-6.1-sol"
+          },
+          "inherited": true,
+          "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+        },
+        {
+          "id": "model.thinking",
+          "name": "Thinking",
+          "choices": [
+            {
+              "id": "low",
+              "name": "Low"
+            },
+            {
+              "id": "medium",
+              "name": "Medium"
+            },
+            {
+              "id": "high",
+              "name": "High"
+            }
+          ],
+          "value": {
+            "kind": "one",
+            "id": "medium"
+          },
+          "inherited": true,
+          "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+        }
+      ]
+    },
+    {
+      "settings": [
+        {
+          "id": "model",
+          "name": "Model",
+          "choices": [],
+          "value": null,
+          "inherited": false,
+          "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+        }
+      ]
+    },
+    {
+      "settings": [
+        {
+          "id": "extensions",
+          "name": "Extensions",
+          "choices": [
+            {
+              "id": "schedules",
+              "name": "schedules"
+            }
+          ],
+          "value": {
+            "kind": "many",
+            "ids": ["schedules"]
+          },
+          "inherited": false,
+          "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+        }
+      ]
+    }
+  ],
+  "invalid_settings": [
+    {
+      "settings": [
+        {
+          "id": "model",
+          "name": "Model",
+          "choices": [
+            {
+              "id": "openai-codex/gpt-6.1-sol",
+              "name": "GPT-6.1 Sol",
+              "group": "OpenAI Codex"
+            },
+            {
+              "id": "openai-codex/gpt-6.1-mini",
+              "name": "GPT-6.1 Mini",
+              "group": "OpenAI Codex"
+            }
+          ],
+          "value": {
+            "kind": "one",
+            "id": "openai-codex/gpt-6.1-sol"
+          },
+          "inherited": true,
+          "revision": "short"
+        }
+      ]
+    },
+    {
+      "settings": [
+        {
+          "id": "model",
+          "name": "Model",
+          "choices": [
+            {
+              "id": "openai-codex/gpt-6.1-sol",
+              "name": "GPT-6.1 Sol",
+              "group": "OpenAI Codex"
+            },
+            {
+              "id": "openai-codex/gpt-6.1-mini",
+              "name": "GPT-6.1 Mini",
+              "group": "OpenAI Codex"
+            }
+          ],
+          "inherited": true,
+          "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+        }
+      ]
+    },
+    {
+      "settings": [
+        {
+          "id": "model",
+          "name": "Model",
+          "choices": [
+            {
+              "id": "openai-codex/gpt-6.1-sol",
+              "name": "GPT-6.1 Sol",
+              "group": null
+            },
+            {
+              "id": "openai-codex/gpt-6.1-mini",
+              "name": "GPT-6.1 Mini",
+              "group": "OpenAI Codex"
+            }
+          ],
+          "value": {
+            "kind": "one",
+            "id": "openai-codex/gpt-6.1-sol"
+          },
+          "inherited": true,
+          "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+        },
+        {
+          "id": "model.thinking",
+          "name": "Thinking",
+          "choices": [
+            {
+              "id": "low",
+              "name": "Low"
+            },
+            {
+              "id": "medium",
+              "name": "Medium"
+            },
+            {
+              "id": "high",
+              "name": "High"
+            }
+          ],
+          "value": {
+            "kind": "one",
+            "id": "medium"
+          },
+          "inherited": true,
+          "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "title": "#home",
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "interface": [
+        {
+          "id": "agent",
+          "name": "Agent",
+          "choices": [],
+          "value": {
+            "kind": "one",
+            "id": "assistant"
+          },
+          "inherited": false,
+          "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+        }
+      ],
+      "runtime": {
+        "state": "settings",
+        "settings": [
+          {
+            "id": "model",
+            "name": "Model",
+            "choices": [
+              {
+                "id": "openai-codex/gpt-6.1-sol",
+                "name": "GPT-6.1 Sol",
+                "group": "OpenAI Codex"
+              },
+              {
+                "id": "openai-codex/gpt-6.1-mini",
+                "name": "GPT-6.1 Mini",
+                "group": "OpenAI Codex"
+              }
+            ],
+            "value": {
+              "kind": "one",
+              "id": "openai-codex/gpt-6.1-sol"
+            },
+            "inherited": true,
+            "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+          },
+          {
+            "id": "model.thinking",
+            "name": "Thinking",
+            "choices": [
+              {
+                "id": "low",
+                "name": "Low"
+              },
+              {
+                "id": "medium",
+                "name": "Medium"
+              },
+              {
+                "id": "high",
+                "name": "High"
+              }
+            ],
+            "value": {
+              "kind": "one",
+              "id": "medium"
+            },
+            "inherited": true,
+            "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+          }
+        ]
+      }
+    },
+    {
+      "title": "#home",
+      "subject": {
+        "kind": "channel",
+        "interface_id": "discord-private",
+        "channel_id": "300",
+        "agent_id": "assistant"
+      },
+      "interface": [
+        {
+          "id": "agent",
+          "name": "Agent",
+          "choices": [],
+          "value": {
+            "kind": "one",
+            "id": "assistant"
+          },
+          "inherited": false,
+          "revision": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f86ba1e2b8f2b0f1d1e"
+        }
+      ],
+      "runtime": {
+        "state": "unavailable",
+        "reason": "The runtime is not reachable right now."
+      }
+    },
+    {
+      "title": "assistant",
+      "subject": {
+        "kind": "agent",
+        "agent_id": "assistant"
+      },
+      "interface": [],
+      "runtime": {
+        "state": "settings",
+        "settings": [
+          {
+            "id": "model",
+            "name": "Model",
+            "choices": [],
+            "value": null,
+            "inherited": false,
+            "revision": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -140,6 +140,86 @@ it("refuses to start with an mcp.json it cannot use", async () => {
   expect(result.stderr).toContain(`${join(home, "pi", "mcp.json")}: server notes must be`);
 });
 
+it("passes its check once Pi offers a model, though Pi's settings choose none", async () => {
+  const { home, args } = await installation({ default: "resources" });
+  await mkdir(join(home, "resources"));
+  await mkdir(join(home, "pi"));
+  await writeFile(join(home, "pi", "settings.json"), JSON.stringify({}));
+  const live = args.filter((arg) => arg !== "--deterministic");
+  const unready = await run([...live, "--check"]);
+  expect(unready.status, unready.stderr).toBe(1);
+  expect(unready.stderr).toContain("Pi is not ready: Pi offers no model");
+  await writeFile(
+    join(home, "pi", "models.json"),
+    JSON.stringify({
+      providers: {
+        local: {
+          baseUrl: "http://127.0.0.1:1/v1",
+          api: "openai-completions",
+          apiKey: "local",
+          models: [{ id: "local-model" }],
+        },
+      },
+    }),
+  );
+  const ready = await run([...live, "--check"]);
+  expect(ready.status, ready.stderr).toBe(0);
+  expect(ready.stdout).toBe("Pi is signed in and offers a model.\n");
+});
+
+it("sets an agent's model, which it then lists with the models Pi offers", async () => {
+  const { home, args } = await installation({ default: "resources", other: "resources" });
+  await mkdir(join(home, "resources"));
+  const models = async (agent: string) => {
+    const listed = await run([...args, "--models", "--agent", agent]);
+    expect(listed.status, listed.stderr).toBe(0);
+    return JSON.parse(listed.stdout) as unknown;
+  };
+  expect(await models("default")).toEqual({
+    models: [
+      { provider: "local", model: "echo", name: "Local echo" },
+      { provider: "local", model: "reasoner", name: "Local reasoner" },
+      { provider: "substitute", model: "fixed", name: "Substitute fixed" },
+    ],
+    value: null,
+  });
+  const configured = await run([
+    ...args,
+    "--configure",
+    "--agent",
+    "default",
+    "--model",
+    "local/reasoner",
+  ]);
+  expect(configured.status, configured.stderr).toBe(0);
+  expect(configured.stdout).toBe("default runs Local reasoner (local/reasoner).\n");
+  expect(await models("default")).toMatchObject({ value: "local/reasoner" });
+  expect(await models("other")).toMatchObject({ value: null });
+  const refused = await run([
+    ...args,
+    "--configure",
+    "--agent",
+    "default",
+    "--model",
+    "local/gone",
+  ]);
+  expect(refused.status).toBe(1);
+  expect(refused.stderr).toContain("local/gone is not a model offered here.");
+  expect(await models("default")).toMatchObject({ value: "local/reasoner" });
+}, 30_000);
+
+async function configure(args: readonly string[]) {
+  const configured = await run([
+    ...args,
+    "--configure",
+    "--agent",
+    "default",
+    "--model",
+    "local/echo",
+  ]);
+  expect(configured.status, configured.stderr).toBe(0);
+}
+
 async function inbox(url: string, home: string, input: string) {
   const response = await fetch(`${url}/v1/inbox`, {
     method: "POST",
@@ -149,6 +229,7 @@ async function inbox(url: string, home: string, input: string) {
       interface_id: "discord-private",
       agent_id: "default",
       audience_id: "conversation",
+      channel_id: "300",
       input,
       resource_root: join(home, "resources"),
       attachment_root: join(home, "attachments"),
@@ -193,6 +274,7 @@ it("gives up a message whose answer keeps killing the runtime, and fails its tur
     core.url.replace("http://", ""),
   );
   await mkdir(join(home, "resources"));
+  await configure(args);
   for (let run = 0; run < 5; run += 1) {
     const started = start(args);
     await started.ready;
@@ -218,6 +300,7 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
     core.url.replace("http://", ""),
   );
   await mkdir(join(home, "resources"));
+  await configure(args);
   const marker = join(home, "release");
   const first = start(args);
   await first.ready;
@@ -233,4 +316,4 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
   expect(settled.outcome === "answered" && settled.output).toMatch(
     /^Local provider response 1: hold /u,
   );
-});
+}, 30_000);

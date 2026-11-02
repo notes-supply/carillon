@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { catalog, modelState } from "./models.ts";
+import { catalog } from "./models.ts";
 
 it("names each usable instance as T3 displays it, or by its ID when T3 gives no name", () => {
   const usable = { enabled: true, installed: true, status: "ready" };
@@ -15,9 +15,7 @@ it("names each usable instance as T3 displays it, or by its ID when T3 gives no 
       { ...usable, instanceId: "cursor", displayName: "Cursor", enabled: false, models: [] },
     ],
   });
-  const settings = { provider: "codex", model: "gpt-6-astra", options: {} };
-  const models = { offered, agent: { selection: settings, overridden: false } };
-  expect(modelState(models, undefined).providers).toEqual([
+  expect(offered.providers).toEqual([
     { id: "carillon_claude", name: "Claude · Carillon" },
     { id: "codex", name: "codex" },
   ]);
@@ -54,7 +52,7 @@ it("names every choice of a setting as T3 labels it, and a boolean's as off or o
         ],
       },
     ],
-  }).available;
+  }).models;
   expect(codex?.options).toEqual([
     {
       id: "serviceTier",

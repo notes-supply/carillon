@@ -5,15 +5,15 @@
 use std::collections::BTreeMap;
 
 use carillon_protocol::{
-    model::{CommandCatalog, Job, ModelScope as Scope, TurnActivity},
-    models::{ModelState, Selection},
+    model::{CommandCatalog, Job, TurnActivity},
+    settings::{Change, Page},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Contract version the module speaks; the provider refuses others.
-pub const CONTRACT: u32 = 5;
+pub const CONTRACT: u32 = 6;
 
 /// Provider to module: the invocation payload.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -39,7 +39,7 @@ pub struct Interaction {
     #[serde(default)]
     pub options: Value,
     /// Whether the interaction happened inside a conversation the agent
-    /// participates in, so a conversation scope exists.
+    /// participates in, where its commands run.
     pub conversation: bool,
     /// The provider's markers, as cards are drawn with them.
     pub markers: ActivityMarkers,
@@ -86,24 +86,17 @@ pub struct Reply {
 /// [`HostReply`].
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum HostRequest {
-    ModelState,
-    SetModel {
-        scope: Scope,
-        /// `None` returns the scope to its default.
-        selection: Option<Selection>,
-        /// Apply only if the scope still resolves to this selection.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected: Option<Selection>,
-    },
+    /// The settings page of the routed channel the interaction happened in,
+    /// also when it happened in one of the channel's threads.
+    Settings,
+    /// Apply a change to a line of that page, then read the page again.
+    ChangeSetting(Change),
     /// The runtime's own commands for the conversation.
     Commands,
     /// Send `text` to the agent as the person's message in the conversation
     /// where the interaction happened, marked with its intent. The answer
     /// arrives in the conversation like any other.
-    Submit {
-        text: String,
-        intent: Intent,
-    },
+    Submit { text: String, intent: Intent },
 }
 
 /// Why the person submitted text through an interaction rather than writing
@@ -117,11 +110,28 @@ pub enum Intent {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum HostReply {
-    ModelState(ModelState),
+    /// The page as just read, and what became of a change.
+    Page {
+        page: Page,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<Notice>,
+    },
     Commands(CommandCatalog),
     /// Core accepted the submission.
     Submitted,
     Error(String),
+}
+
+/// A change that did not apply as asked.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Notice {
+    /// The line changed since it was drawn; nothing was written.
+    Stale,
+    /// The owner did not answer in time, so whether it applied is unknown.
+    /// The change is never retried.
+    Unconfirmed,
+    /// The owner refused it, saying why.
+    Refused(String),
 }
 
 /// A job as its card shows it: what core recorded of it, the latest

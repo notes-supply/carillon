@@ -1,7 +1,7 @@
 // Packaged executables: Pi's command line and the durable runtime, each with
 // real QuickJS and tools, against controlled local inference.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -76,9 +76,9 @@ try {
     const resources = join(work, "resources");
     await mkdir(state, { recursive: true });
     await mkdir(resources);
+    // Pi's own command line runs Pi's default model; the runtime runs its agent's.
     const settings = {
-      defaultProvider: "code-fixture",
-      defaultModel: "code-model",
+      ...(kind === "cli" ? { defaultProvider: "code-fixture", defaultModel: "code-model" } : {}),
       defaultTools: ["+codemode"],
       codemode: { mode: "only" },
     };
@@ -135,20 +135,22 @@ try {
         config,
         `data_dir = "state"\n[core]\nlisten = "${core.url.replace("http://", "")}"\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(work)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
       );
-      active = spawn(
+      const runtime = [
+        "--config",
+        config,
+        "--provider",
+        "runtime-pi",
+        "--token-file",
+        tokenFile,
+        "--state-dir",
+        state,
+      ];
+      execFileSync(
         join(release, "bin/carillon-runtime-pi"),
-        [
-          "--config",
-          config,
-          "--provider",
-          "runtime-pi",
-          "--token-file",
-          tokenFile,
-          "--state-dir",
-          state,
-        ],
+        [...runtime, "--configure", "--agent", "default", "--model", "code-fixture/code-model"],
         { cwd: work, env },
       );
+      active = spawn(join(release, "bin/carillon-runtime-pi"), runtime, { cwd: work, env });
       active.stdout.on("data", (part) => {
         logs += part;
       });
@@ -172,6 +174,7 @@ try {
           interface_id: "fixture",
           agent_id: "default",
           audience_id: "code-check",
+          channel_id: "code-check",
           input: "Run the verification.",
           resource_root: resources,
           attachment_root: join(work, "attachments"),

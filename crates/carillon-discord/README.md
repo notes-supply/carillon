@@ -1,16 +1,17 @@
 # Discord interface
 
-[The gateway-free example](examples/model_picker.rs) admits a message and a
-`/model` interaction and runs the real command handler against a read-only
-model state, with no gateway, credentials or inference:
+[The gateway-free example](examples/settings.rs) admits a message and a
+`/settings` interaction in a thread and runs the real command handler
+against a read-only settings page, with no gateway, credentials or
+inference:
 
 ```sh
 mise run example:discord
 ```
 
-It prints the reply JSON for a conversation and for a thread route's main
-channel. The replies include the scope summaries, configured brand emotes
-and controls with provider and choice display names.
+It prints the routed channel's page as Discord shows it, then the
+components JSON: the line picker, the picked line's choices with the
+configured model badges, and their custom IDs.
 
 ## Components
 
@@ -27,6 +28,12 @@ and controls with provider and choice display names.
   adopts threads; one provider process owns the participation file.
 - [`client`](src/client.rs): authenticated requests to core, with bounded
   waits.
+- [`channels`](src/channels.rs): a routed channel's settings page. It joins
+  the route's own lines, read-only for now, with the runtime's lines read
+  and changed through core for a channel subject the provider builds from
+  the route. `/settings` draws it titled `<#channel>`, and the operator reads
+  and changes it on `GET /v1/channels` and `GET|PUT
+  /v1/channels/{channel_id}/settings`, titled `#name`.
 - [`inbound`](src/inbound.rs): settles each admitted message. It asks core
   whether it already holds the message, downloads files
   ([`attachments`](src/attachments.rs)), shows feedback and submits with

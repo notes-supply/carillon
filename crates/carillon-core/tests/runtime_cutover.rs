@@ -33,6 +33,7 @@ fn event() -> ExternalEvent {
         agent_id: "agent".to_owned(),
         user_id: "user".to_owned(),
         audience_id: "existing".to_owned(),
+        channel_id: "channel".to_owned(),
         delivery_target_id: "conversation".to_owned(),
         feedback_target_id: "message".to_owned(),
         content: "hello".to_owned(),

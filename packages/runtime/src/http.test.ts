@@ -6,7 +6,6 @@ import type { RuntimeOperations } from "./operations.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
 
-/** A runtime that refuses each turn with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {
   const runtime: RuntimeOperations = {
     turns: {
@@ -24,13 +23,11 @@ async function serve() {
       correlationId === "turn/1" && interfaceId === "discord-private"
         ? { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 }
         : undefined,
-    modelState: () => Promise.reject(new Error("model catalogue file is corrupt")),
-    setModel: (update) =>
+    settings: ({ change }) =>
       Promise.reject(
-        new ExplainedFailure(
-          422,
-          `Local reasoner has no ${Object.keys(update.selection?.options ?? {}).join(", ")} setting.`,
-        ),
+        change?.value?.kind === "one"
+          ? new ExplainedFailure(422, `${change.value.id} is not a Thinking choice here.`)
+          : new Error("settings file is corrupt"),
       ),
     commands: (query) =>
       Promise.resolve({
@@ -73,16 +70,20 @@ const turn = (input: string) => ({
   interface_id: "discord-private",
   agent_id: "default",
   audience_id: "conversation",
+  channel_id: "300",
   input,
   resource_root: "/unused",
   attachment_root: "/unused",
 });
 
-const option = (id: string) => ({
-  interface_id: "discord-private",
-  agent_id: "default",
-  scope: "agent",
-  selection: { provider: "local", model: "reasoner", options: { [id]: "high" } },
+const subject = { kind: "agent", agent_id: "default" };
+const choose = (id: string) => ({
+  subject,
+  change: {
+    setting: "model.thinking",
+    value: { kind: "one", id },
+    expected: "0".repeat(64),
+  },
 });
 
 it("sends callers only the displayable part of explanations and logs redacted diagnostics", async () => {
@@ -107,24 +108,26 @@ it("sends callers only the displayable part of explanations and logs redacted di
     expect(await call("POST", "/v1/inbox", turn("internal"))).toEqual({ status: 500, body: {} });
     // A runtime that closes under a request gives no answer, which is not a failure.
     expect(await call("POST", "/v1/inbox", turn("closing"))).toEqual({ status: 503, body: {} });
-    expect(
-      await call(
-        "GET",
-        "/v1/model?interface_id=discord-private&agent_id=default&token=short-secret",
-      ),
-    ).toEqual({ status: 500, body: {} });
-    // Refusals quote the request, and pass the same boundary.
-    expect(await call("PUT", "/v1/model", option("speed"))).toEqual({
-      status: 422,
-      body: { error: "Local reasoner has no speed setting." },
+    expect(await call("POST", "/v1/settings", { subject })).toEqual({ status: 500, body: {} });
+    expect(await call("POST", "/v1/settings", { subject, change: null })).toEqual({
+      status: 400,
+      body: { error: "invalid settings request" },
     });
-    expect(await call("PUT", "/v1/model", option("password=short-secret"))).toEqual({
+    // Refusals quote the request, and pass the same boundary.
+    expect(await call("POST", "/v1/settings", choose("extreme"))).toEqual({
+      status: 422,
+      body: { error: "extreme is not a Thinking choice here." },
+    });
+    expect(await call("POST", "/v1/settings", choose("password=short-secret"))).toEqual({
       status: 422,
       body: {},
     });
     // The command catalogue is the runtime's, for the queried conversation.
     expect(
-      await call("GET", "/v1/commands?interface_id=discord-private&agent_id=default&audience_id=c"),
+      await call(
+        "GET",
+        "/v1/commands?interface_id=discord-private&agent_id=default&channel_id=300&audience_id=c",
+      ),
     ).toEqual({ status: 200, body: { commands: [{ name: "compact", hint: "<instructions>" }] } });
     expect(await call("GET", "/v1/commands?agent_id=default")).toEqual({
       status: 400,
@@ -143,7 +146,7 @@ it("sends callers only the displayable part of explanations and logs redacted di
   expect(logged[5]).toMatch(
     /^POST \/v1\/inbox failed: Error: extension state at \/private\/state rejected \[redacted\]\n\s+at /u,
   );
-  expect(logged[6]).toMatch(/^GET \/v1\/model failed: Error: model catalogue file is corrupt\n/u);
+  expect(logged[6]).toMatch(/^POST \/v1\/settings failed: Error: settings file is corrupt\n/u);
   for (const secret of [key, "short-secret"]) expect(logged.join("\n")).not.toContain(secret);
 });
 

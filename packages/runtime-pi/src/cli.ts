@@ -6,8 +6,9 @@ import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createDiscordExtension, DISCORD_SKILL } from "@carillon/discord-pi";
+import type { Setting } from "@carillon/protocol";
 import { once } from "node:events";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -20,16 +21,18 @@ import {
 import { deterministicCatalogue } from "./deterministic.ts";
 import { ConversationInfo } from "./documents.ts";
 import { createMcpServer, loadMcpConfig, mcpTransport } from "./mcp.ts";
-import { checkDefault, openPiCatalogue } from "./models.ts";
+import { modelSettings, openPiCatalogue, type PiCatalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 import { createCoreClient } from "@carillon/runtime/core";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import { mismatch } from "@carillon/runtime/mismatch";
+import { SettingsLedger } from "@carillon/runtime/settings";
 import packageInfo from "../package.json" with { type: "json" };
 import { providerAddress } from "@carillon/runtime/endpoint";
 import {
   loadInstallation,
   loadRuntimeCredential,
+  type Installation,
   notServing,
   parseArguments,
   requiredArgument,
@@ -58,10 +61,11 @@ interface Embedded {
 }
 
 export async function main(values: readonly string[], embedded?: Embedded): Promise<void> {
-  const args = parseArguments(values, ["deterministic", "check"]);
+  const args = parseArguments(values, ["deterministic", "check", "models", "configure"]);
   const providerId = requiredArgument(args, "provider");
   const config = await loadInstallation(requiredArgument(args, "config"), providerId);
-  if (args.has("check") && typeof config === "string")
+  const setup = args.has("models") || args.has("configure");
+  if ((args.has("check") || setup) && typeof config === "string")
     throw new Error(`runtime provider ${providerId} is ${notServing(config)}`);
   // Disabled on purpose, or not the runtime this installation chose, it ends
   // successfully, so its service is not restarted, before it reads its
@@ -90,11 +94,10 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   if (!deterministic) registerBunOAuthFlows();
   const openCatalogue = () =>
     deterministic ? Promise.resolve(deterministicCatalogue()) : openPiCatalogue(stateDirectory);
-  // The check is the runtime's own startup check: Pi is signed in and its
-  // default model is available. Nothing listens.
   if (args.has("check")) {
     try {
-      await checkDefault(await openCatalogue());
+      const offered = await (await openCatalogue()).models.getAvailable();
+      if (offered.length === 0) throw new Error("Pi offers no model; sign in with /login");
     } catch (failure) {
       process.stderr.write(
         `Pi is not ready: ${failure instanceof Error ? failure.message : String(failure)}\n`,
@@ -102,7 +105,11 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
       process.exitCode = 1;
       return;
     }
-    process.stdout.write("Pi is signed in and has a default model.\n");
+    process.stdout.write("Pi is signed in and offers a model.\n");
+    return;
+  }
+  if (setup) {
+    await agentModel(args, config, await openCatalogue());
     return;
   }
   const listenAddress = providerAddress(config.runtime.url);
@@ -190,6 +197,51 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     server.closeAllConnections();
     await stopped;
   }
+}
+
+/**
+ * `--models` prints the models Pi offers and the agent's model, and
+ * `--configure` sets the agent's model, as setup reads and writes them.
+ */
+async function agentModel(
+  args: ReadonlyMap<string, string>,
+  config: Installation,
+  catalogue: PiCatalogue,
+): Promise<void> {
+  const agentId = requiredArgument(args, "agent");
+  if (!config.agents.some(({ id }) => id === agentId))
+    throw new Error(`agent ${agentId} does not run on ${config.runtime.id}`);
+  await mkdir(config.componentDirectory, { recursive: true, mode: 0o700 });
+  const models = modelSettings(
+    catalogue,
+    await SettingsLedger.open(join(config.componentDirectory, "settings.json")),
+  );
+  const subject = { kind: "agent", agent_id: agentId } as const;
+  const { settings } = await models.settings({ subject });
+  if (args.has("configure")) {
+    const id = requiredArgument(args, "model");
+    const value = { kind: "one", id } as const;
+    const change = { setting: "model", value, expected: modelLine(settings).revision };
+    const changed = modelLine((await models.settings({ subject, change })).settings);
+    const name = changed.choices.find((choice) => choice.id === id)?.name ?? id;
+    process.stdout.write(`${agentId} runs ${name} (${id}).\n`);
+    return;
+  }
+  const offered = (await models.catalogue()).models.map(({ provider, model, name }) => ({
+    provider,
+    model,
+    name,
+  }));
+  const { value } = modelLine(settings);
+  process.stdout.write(
+    `${JSON.stringify({ models: offered, value: value?.kind === "one" ? value.id : null })}\n`,
+  );
+}
+
+function modelLine(settings: readonly Setting[]): Setting {
+  const line = settings.find(({ id }) => id === "model");
+  if (line === undefined) throw new Error("the runtime shows no model setting");
+  return line;
 }
 
 /** Inline-image limits from the provider's own file, when it sets any. */

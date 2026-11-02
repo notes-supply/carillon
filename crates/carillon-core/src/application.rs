@@ -4,6 +4,7 @@ mod cli;
 mod drain;
 mod http;
 mod operations;
+mod settings;
 mod setup;
 mod update;
 

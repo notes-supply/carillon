@@ -508,10 +508,7 @@ export interface NativeImage {
 export interface MessageContent {
   readonly text: string;
   readonly images: readonly NativeImage[];
-  /**
-   * The selection the message's run takes, which T3 records with the run
-   * and makes the thread's own: the conversation's agent offers it.
-   */
+  /** The selection the message's run takes, which T3 records with the run and makes the thread's own. */
   readonly selection: NativeSelection;
   /** The person's words T3 titles a thread's first message from, as its own composer does. */
   readonly titleSeed?: string;
@@ -546,16 +543,6 @@ export function messageDispatch(
     modelSelection: nativeSelection(content.selection),
     ...(content.titleSeed === undefined ? {} : { titleSeed: content.titleSeed }),
     dispatchMode: { type: queued ? "queue_after_active" : "start_immediately" },
-  } as const;
-}
-
-/** Sets the thread's model selection, which every later run of the thread uses. */
-export function modelSelectionSet(threadId: string, selection: NativeSelection) {
-  return {
-    type: "thread.model-selection.set",
-    commandId: crypto.randomUUID(),
-    threadId,
-    modelSelection: nativeSelection(selection),
   } as const;
 }
 

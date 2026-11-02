@@ -1159,9 +1159,8 @@ mod tests {
 
     #[test]
     fn archives_validate_captured_resources_before_publication() -> Result<()> {
-        use carillon_protocol::model::{ExternalEvent, TurnState};
-
         use crate::{db::Database, resources};
+        use carillon_protocol::model::{ExternalEvent, TurnState};
 
         const ALTERED: &str = "backup has missing or altered captured resources";
         for uncertain in [false, true] {
@@ -1182,6 +1181,7 @@ mod tests {
                         event_id: "captured".to_owned(),
                         agent_id: super::ASSISTANT.to_owned(),
                         audience_id: "audience".to_owned(),
+                        channel_id: "channel".to_owned(),
                         user_id: "user".to_owned(),
                         delivery_target_id: "target".to_owned(),
                         feedback_target_id: "feedback".to_owned(),
@@ -1255,7 +1255,6 @@ mod tests {
 
     fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
         use carillon_installation::config::AttachmentLimits;
-
         crate::Core::open(crate::CoreOptions {
             data_directory: config.value.data_dir.clone(),
             agents: vec![crate::AgentOptions {
@@ -1319,6 +1318,7 @@ mod tests {
                         agent_id: super::ASSISTANT.to_owned(),
                         user_id: "user".to_owned(),
                         audience_id: event_id.to_owned(),
+                        channel_id: "channel".to_owned(),
                         delivery_target_id: "target".to_owned(),
                         feedback_target_id: "feedback".to_owned(),
                         content: String::new(),

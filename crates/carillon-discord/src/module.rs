@@ -29,7 +29,7 @@ use carillon_installation::{
     filesystem::{PublishError, atomic_write, remove, sync_ancestors},
     maintenance::MaintenanceLock,
 };
-use carillon_protocol::model::{ModelQuery, ModelScope, ModelUpdate};
+use carillon_protocol::model::ConversationQuery;
 use carillon_wasm::{Host, Module as Compiled, Native};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,8 +46,9 @@ use twilight_model::{
 };
 
 use crate::{
+    channels,
     client::{CoreClient, RUNTIME_LATE},
-    config::DiscordConfig,
+    config::{DiscordConfig, DiscordRoute},
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},
     inbound::lanes::Lanes,
@@ -73,13 +74,17 @@ pub(crate) struct DiscordApp {
     pub guild_id: Id<GuildMarker>,
 }
 
-/// The native operations one interaction may perform: model state and
-/// selection for the agent and, inside a conversation, for that audience;
-/// the runtime's commands there; and, with a Discord connection, submitting
-/// text to the conversation as the person who invoked it.
+/// The native operations one interaction may perform: the settings page of
+/// the routed channel it happened in and changes to it; inside a
+/// conversation, the runtime's commands there; and, with a Discord
+/// connection, submitting text to the conversation as the person who
+/// invoked it.
 pub(crate) struct InteractionCalls {
     core: CoreClient,
-    query: ModelQuery,
+    /// The route that admitted the interaction, also in one of its threads.
+    route: DiscordRoute,
+    /// The conversation it happened in, when the agent participates there.
+    audience_id: Option<String>,
     submissions: Option<Submissions>,
 }
 
@@ -96,10 +101,15 @@ pub(crate) struct Submissions {
 }
 
 impl InteractionCalls {
-    pub(crate) const fn new(core: CoreClient, query: ModelQuery) -> Self {
+    pub(crate) const fn new(
+        core: CoreClient,
+        route: DiscordRoute,
+        audience_id: Option<String>,
+    ) -> Self {
         Self {
             core,
-            query,
+            route,
+            audience_id,
             submissions: None,
         }
     }
@@ -145,20 +155,35 @@ async fn within<T>(
 impl InteractionCalls {
     /// Answers one of the interaction's native requests by `until`.
     async fn answer(&self, request: &[u8], until: Instant) -> HostReply {
-        let outcome = match serde_json::from_slice::<HostRequest>(request) {
+        let title = format!("<#{}>", self.route.channel_id);
+        match serde_json::from_slice::<HostRequest>(request) {
+            Ok(HostRequest::Settings) => HostReply::Page {
+                page: channels::page(&self.core, &self.route, title, until).await,
+                notice: None,
+            },
+            Ok(HostRequest::ChangeSetting(change)) => {
+                let (page, notice) =
+                    channels::settled(&self.core, &self.route, title, change, until).await;
+                HostReply::Page { page, notice }
+            }
             Ok(HostRequest::Commands) => {
-                return match within(until, self.core.commands(&self.query)).await {
+                let query = ConversationQuery {
+                    agent_id: self.route.agent.clone(),
+                    channel_id: self.route.channel_id.clone(),
+                    audience_id: self.audience_id.clone(),
+                };
+                match within(until, self.core.commands(&query)).await {
                     Ok(catalog) => HostReply::Commands(catalog),
                     Err(message) => HostReply::Error(message),
-                };
+                }
             }
             Ok(HostRequest::Submit { text, intent }) => {
-                return match (&self.submissions, &self.query.audience_id) {
+                match (&self.submissions, &self.audience_id) {
                     (Some(submissions), Some(audience_id)) => {
                         match submit(
                             &self.core,
                             submissions,
-                            &self.query.agent_id,
+                            &self.route.agent,
                             audience_id,
                             &text,
                             intent,
@@ -176,36 +201,9 @@ impl InteractionCalls {
                     (None, Some(_)) => HostReply::Error(
                         "Sending to the conversation needs the Discord connection.".to_owned(),
                     ),
-                };
-            }
-            Ok(HostRequest::ModelState) => within(until, self.core.model_state(&self.query)).await,
-            Ok(HostRequest::SetModel {
-                scope,
-                selection,
-                expected,
-            }) => {
-                if scope == ModelScope::Conversation && self.query.audience_id.is_none() {
-                    return HostReply::Error(
-                        "There is no conversation here to set a model for.".to_owned(),
-                    );
                 }
-                within(
-                    until,
-                    self.core.set_model(&ModelUpdate {
-                        agent_id: self.query.agent_id.clone(),
-                        audience_id: self.query.audience_id.clone(),
-                        scope,
-                        selection,
-                        expected,
-                    }),
-                )
-                .await
             }
-            Err(error) => Err(format!("invalid host request: {error}")),
-        };
-        match outcome {
-            Ok(state) => HostReply::ModelState(state),
-            Err(message) => HostReply::Error(message),
+            Err(error) => HostReply::Error(format!("invalid host request: {error}")),
         }
     }
 }

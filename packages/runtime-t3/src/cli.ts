@@ -11,13 +11,12 @@ import {
   requiredArgument,
   type Installation,
 } from "@carillon/runtime/installation";
-import { ModelSelections } from "@carillon/runtime/selections";
 import { readStops } from "./held.ts";
 import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
-import { configure, discover, plain } from "./setup.ts";
+import { configure, discover, openLedger, plain } from "./setup.ts";
 import { loadSettings, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -51,9 +50,7 @@ async function serve(values: readonly string[]): Promise<void> {
   const runtime = createT3Runtime({
     endpoint,
     agents,
-    selections: await ModelSelections.open(
-      join(installation.componentDirectory, "model-selection.json"),
-    ),
+    ledger: await openLedger(installation),
     stops: await readStops(join(installation.componentDirectory, "stops.json")),
     core: createCoreClient({
       url: installation.coreUrl,
@@ -195,7 +192,7 @@ async function configureCommand(values: readonly string[]): Promise<void> {
     },
   );
   process.stdout.write(
-    `Saved ${providerId}'s settings for ${agentId}: project ${project.title} (${project.workspace}) on ${url}, with ${instanceId}/${model}. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
+    `Saved ${providerId}'s settings for ${agentId}: project ${project.title} (${project.workspace}) on ${url}, which it reads when it starts, so a running Carillon needs \`carillon restart\`. ${agentId}'s model is ${instanceId}/${model}.\n`,
   );
 }
 

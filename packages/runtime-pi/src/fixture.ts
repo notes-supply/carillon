@@ -19,7 +19,12 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
-import { TurnOutcomeSchema, type TurnOutcome } from "@carillon/protocol";
+import {
+  TurnOutcomeSchema,
+  type Setting,
+  type Subject,
+  type TurnOutcome,
+} from "@carillon/protocol";
 import { createCoreClient } from "@carillon/runtime/core";
 import type { RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
@@ -29,7 +34,7 @@ import { dirname, join } from "node:path";
 import { Parse } from "typebox/value";
 import type { Clock } from "./agent.ts";
 import type { McpServer } from "./mcp.ts";
-import type { Catalogue } from "./models.ts";
+import type { PiCatalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 
 /** Passes images through as they are. */
@@ -46,8 +51,8 @@ export interface Fixture {
   readonly models: MutableModels;
   readonly workspace: string;
   readonly componentDirectory: string;
-  /** A turn on the agent's conversation with these resources. */
   turn(id: string, input: string, overrides?: Partial<TurnRequest>): TurnRequest;
+  set(subject: Subject, setting: string, choice: string | null): Promise<Setting[]>;
   /** A resource snapshot holding these files. */
   snapshot(files: Record<string, string>): Promise<string>;
   /** The outcome core received for the turn, once it did. */
@@ -74,6 +79,7 @@ interface FixtureOptions {
   readonly durable?: boolean;
   /** The agents' IDs; `default` alone without them. */
   readonly agents?: readonly string[];
+  readonly agentModel?: string | null;
   readonly builtIns?: readonly Extension[];
   readonly defaults?: readonly string[];
   readonly answers?: FauxResponseStep[];
@@ -87,15 +93,16 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
   const componentDirectory = join(directory, "component");
   await mkdir(workspace);
   const core = await startFakeCore();
-  const model = fauxProvider({ models: [{ id: "scripted", name: "Scripted" }] });
+  const model = fauxProvider({
+    models: [
+      { id: "scripted", name: "Scripted" },
+      { id: "reasoner", name: "Reasoner", reasoning: true },
+    ],
+  });
   model.setResponses(options.answers ?? []);
   const models = createModels();
   models.setProvider(model.provider);
-  const catalogue: Catalogue = {
-    models,
-    runtimeDefault: () => ({ provider: model.provider.id, model: "scripted", options: {} }),
-    defaultThinking: () => "medium",
-  };
+  const catalogue: PiCatalogue = { models, defaultThinking: () => "medium" };
   const memories = new Map<string, MemoryStorage>();
   function storage(agentId: string): Promise<Storage> {
     if (options.durable === true)
@@ -131,11 +138,21 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         interface_id: "discord-private",
         agent_id: "default",
         audience_id: "conversation",
+        channel_id: "300",
         input,
         resource_root: join(directory, "empty"),
         attachment_root: join(directory, "attachments"),
         ...overrides,
       }),
+      async set(subject, setting, choice) {
+        const { settings } = await runtime.settings({ subject });
+        const line = settings.find(({ id }) => id === setting);
+        if (line === undefined) throw new Error(`${subject.agent_id} shows no ${setting} line`);
+        const value = choice === null ? null : { kind: "one" as const, id: choice };
+        return (
+          await runtime.settings({ subject, change: { setting, value, expected: line.revision } })
+        ).settings;
+      },
       async snapshot(files) {
         snapshots += 1;
         const root = join(directory, "snapshots", String(snapshots));
@@ -181,7 +198,12 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     };
     return fixture;
   }
-  return open();
+  const started = await open();
+  const { agentModel = "scripted" } = options;
+  if (agentModel !== null)
+    for (const agent_id of options.agents ?? ["default"])
+      await started.set({ kind: "agent", agent_id }, "model", `${model.provider.id}/${agentModel}`);
+  return started;
 }
 
 /** The texts of a person's message or a tool's result. */

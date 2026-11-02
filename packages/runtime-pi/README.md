@@ -24,15 +24,17 @@ with `pi` as its first argument, the same executable is Pi's own command line
   added when the model's output limit cut it off. Messages steered into one
   run settle with its answer: the newest carries it, and the others are
   `steered`. A run the person stopped is `stopped`. A failed run gives the
-  provider's explanation where it may be shown; no available model says to
-  choose one with `/model`.
+  provider's explanation where it may be shown. A turn with no model names
+  `carillon settings --agent <id> model=<provider>/<model>`, and one whose
+  model is gone says to choose another with `/settings`.
 - **Opened turns.** Output no message prompted, such as a schedule's run
   or a subagent's report, comes in a turn the runtime opens with core
   (`POST /v1/runtime/turns`). A background task of the conversation opens
   it under a key holding the agent's ID and a nonce of its store, so no
   other agent, and no store recreated in its place, shares it. The key
   opens and places the turn once across restarts; its input waits as a
-  follow-up on the model its conversation chose, and the turn settles like
+  follow-up on the model of the channel core names in its reply, and the
+  turn settles like
   any other, with its cards, typing and stop. Work that has ended, such as
   a cancelled schedule's run, opens no turn, unless core was asked already
   and may have opened one. A turn core has settled already is left alone,
@@ -60,10 +62,18 @@ with `pi` as its first argument, the same executable is Pi's own command line
   notes, commentary, model, context use and tool calls. `/v1/restart` is
   unready only while a tool call runs.
 - **Models.** Pi's own `ModelRuntime` holds the catalogue and sign-in from the
-  state directory (`auth.json`, `models.json`, `settings.json`), whose default
-  model is the runtime default. Carillon's agent and conversation choices live
-  in `<component>/model-selection.json` and apply to each conversation as its
-  turns are admitted.
+  state directory (`auth.json`, `models.json`, `settings.json`); Pi's default
+  model is not read. `POST /v1/settings` shows and changes the model of an
+  agent and of each of its channels, kept in `<component>/settings.json`. A
+  turn runs its channel's model, else its agent's, with thinking clamped to
+  the levels the model supports, resolved as it is admitted, or as it opens
+  for a schedule's run or a subagent's report. pi-durable keeps one model
+  per conversation, so that resolution moves the whole conversation,
+  including turns still running or waiting there.
+- **Setup.** `--check` passes once Pi is signed in and offers a model.
+  `--models --agent <id>` prints the models Pi offers and the agent's model
+  as JSON, and `--configure --agent <id> --model <provider>/<model>` sets the
+  agent's model.
 - **Files.** Files arrive by path below `attachment_root`, listed in a note
   with the message. PNG, JPEG, WebP and GIF images within the
   `inline_images` limits go along inline, prepared with Photon for the model

@@ -1,6 +1,7 @@
 //! Transport-neutral wire vocabulary shared by core and providers.
 //! No installation discovery, credentials, filesystem operations or startup.
 
+mod fields;
 pub mod model;
-pub mod models;
+pub mod settings;
 pub mod turns;

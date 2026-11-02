@@ -49,6 +49,7 @@ fn event(id: &str, content: &str, attachments: StagedAttachments) -> ExternalEve
         agent_id: "test-agent".to_owned(),
         user_id: "test-user".to_owned(),
         audience_id: "files".to_owned(),
+        channel_id: "test-channel".to_owned(),
         delivery_target_id: "test-destination".to_owned(),
         feedback_target_id: "test-feedback".to_owned(),
         content: content.to_owned(),

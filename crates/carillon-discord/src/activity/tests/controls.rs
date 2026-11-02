@@ -430,6 +430,7 @@ async fn admitted(discord: &Substitute, settings: &Settings) -> Reactions {
         agent_id: "default".to_owned(),
         user_id: "200".to_owned(),
         audience_id: "discord-100-300".to_owned(),
+        channel_id: "300".to_owned(),
         delivery_target_id: "300".to_owned(),
         feedback_target_id: "300:400".to_owned(),
         content: "hello".to_owned(),

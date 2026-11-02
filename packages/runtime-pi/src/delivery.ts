@@ -6,6 +6,7 @@
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import {
+  AgentDoc,
   AssistantEntry,
   defineTask,
   type ConversationId,
@@ -21,9 +22,10 @@ import type { TurnActivity, TurnOutcome } from "@carillon/protocol";
 import { finalReport } from "@carillon/runtime/activity";
 import { CoreRefusal, type Settled } from "@carillon/runtime/core";
 import { diagnostic, displayableExplanation, redactCredentials } from "@carillon/runtime/failure";
+import { noModel } from "@carillon/runtime/settings";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { MESSAGE } from "./documents.ts";
+import { ConversationInfo, MESSAGE } from "./documents.ts";
 
 /**
  * What a turn the runtime opened runs for: it is over once `task` is
@@ -176,11 +178,7 @@ async function decide(
       case "reset":
         return { outcome: "stopped" };
       case "no_model":
-        return {
-          outcome: "failed",
-          explanation: "No model is available. Choose one with /model.",
-          ...activity,
-        };
+        return { outcome: "failed", explanation: await modelMissing(tx, input), ...activity };
       case CRASHED:
         return {
           outcome: "failed",
@@ -266,6 +264,13 @@ export function refusedForGood(failure: unknown): boolean {
     failure.status < 500 &&
     ![401, 403, 408, 429].includes(failure.status)
   );
+}
+
+async function modelMissing(tx: Tx, input: DeliveryInput): Promise<string> {
+  const { model } = await tx.doc(AgentDoc, input.conversation);
+  if (model !== undefined)
+    return `${model.provider}/${model.modelId} is not available. Choose another model with /settings.`;
+  return noModel((await tx.doc(ConversationInfo, input.conversation)).agent_id);
 }
 
 function textOf(detail: JsonValue): string {

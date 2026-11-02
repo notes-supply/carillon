@@ -3,12 +3,12 @@ import { Type } from "typebox";
 import { Check, Parse } from "typebox/value";
 import {
   PROVIDER_HEADER,
+  OpenedTurnSchema,
   RunningTurnSchema,
-  TurnReceiptSchema,
+  type OpenedTurn,
   type RunningTurn,
   type TurnOpening,
   type TurnOutcome,
-  type TurnReceipt,
 } from "@carillon/protocol";
 
 /**
@@ -46,7 +46,7 @@ export interface CoreClient {
    * Opens a running turn in one of this runtime's conversations, or finds
    * the one its key opened. `signal` ends the wait for core's answer.
    */
-  readonly open: (opening: TurnOpening, signal?: AbortSignal) => Promise<TurnReceipt>;
+  readonly open: (opening: TurnOpening, signal?: AbortSignal) => Promise<OpenedTurn>;
   /**
    * The turns core records running on this runtime, for a process that
    * forgot them to take up again. An entry it cannot read is set apart, so
@@ -118,7 +118,7 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
       const response = await call("/v1/runtime/turns", opening, signal);
       if (!response.ok)
         throw new CoreRefusal(response.status, `core opened no turn: ${await refusal(response)}`);
-      return Parse(TurnReceiptSchema, await response.json());
+      return Parse(OpenedTurnSchema, await response.json());
     },
     running: async () => {
       const response = await call("/v1/runtime/turns");

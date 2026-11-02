@@ -661,7 +661,6 @@ async function testModuleDirectory() {
 }
 
 async function testResources() {
-  // Discover syscall ordinals from the real publication, not a source-shape assertion.
   const baseline = await resourceAttempt("baseline", null);
   const worker = baseline
     .find((line) => line.includes("fsync(") && line.includes("/resource-snapshots/"))
@@ -766,6 +765,7 @@ async function resourceAttempt(name, fault) {
           agent_id: "assistant",
           user_id: "200",
           audience_id: "test",
+          channel_id: "300",
           delivery_target_id: "300",
           feedback_target_id: "300:durability",
           content: "keep queued while runtime is absent",
@@ -906,6 +906,7 @@ async function attachmentAttempt(name, fault) {
         agent_id: "assistant",
         user_id: "200",
         audience_id: "test",
+        channel_id: "300",
         delivery_target_id: "300",
         feedback_target_id: "300:attached",
         content: "",
@@ -928,7 +929,6 @@ async function attachmentAttempt(name, fault) {
       throw error;
     }
   };
-  // What core kept: one published directory holding every file.
   const verify = async () => {
     const [turn] = JSON.parse(run("--home", root, "recent"));
     const inspection = JSON.parse(run("--home", root, "inspect", turn.turn_id));

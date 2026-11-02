@@ -1,5 +1,5 @@
 //! Embeds as Discord's JSON names their parts, and the text that work cards
-//! and `/model` share in them.
+//! and commands share.
 
 use serde::Serialize;
 
@@ -11,8 +11,6 @@ pub struct Embed {
     pub description: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<Field>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub footer: Option<Footer>,
 }
 
 #[derive(Debug, Serialize)]
@@ -20,11 +18,6 @@ pub struct Field {
     pub inline: bool,
     pub name: String,
     pub value: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Footer {
-    pub text: String,
 }
 
 /// A model and what it runs with, as one line: its brand, then each part
