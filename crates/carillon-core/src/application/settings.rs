@@ -129,7 +129,7 @@ fn stopped(failure: anyhow::Error, applied: &[Edit]) -> anyhow::Error {
 
 /// The change `edit` asks of `page`, refused before it is sent when its key
 /// names no line of the page, or none the runtime could show, or its value
-/// no choice of the line.
+/// no choice of the line. A line of many values takes a comma list.
 fn change(page: &Page, edit: &Edit) -> Result<Change> {
     let key = edit.key();
     let setting = line(page, key).ok_or_else(|| match &page.runtime {
@@ -141,8 +141,18 @@ fn change(page: &Page, edit: &Edit) -> Result<Change> {
         ),
     })?;
     let value = match edit {
-        Edit::Set { value, .. } => Some(Value::One {
-            id: choice(setting, value)?.id.clone(),
+        Edit::Set { value, .. } => Some(match setting.value {
+            Some(Value::Many { .. }) => Value::Many {
+                ids: value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(|item| Ok(choice(setting, item)?.id.clone()))
+                    .collect::<Result<_>>()?,
+            },
+            _ => Value::One {
+                id: choice(setting, value)?.id.clone(),
+            },
         }),
         Edit::Reset { .. } => None,
     };
