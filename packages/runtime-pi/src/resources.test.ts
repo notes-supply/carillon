@@ -7,7 +7,7 @@ import {
   type SystemMessage,
 } from "@earendil-works/pi-ai";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
@@ -530,10 +530,12 @@ it("writes a busy mode into the agent's resources, keeping every other field", a
     value: { kind: "one", id: "interrupt" },
     inherited: false,
   });
+  await chmod(settingsFile(agent), 0o640);
   await agent.set(agentPage, "busy", null);
   expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({
     extensions: { add: ["echo"] },
   });
+  expect((await stat(settingsFile(agent))).mode & 0o777).toBe(0o640);
 });
 
 it("refuses an extension the agent does not have, writing nothing", async () => {

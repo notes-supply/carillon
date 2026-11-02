@@ -76,8 +76,10 @@ with `pi` as its first argument, the same executable is Pi's own command line
   revision and written to that file under the settings ledger's lease,
   keeping every field it does not name. `extensions` takes the built-in
   extensions and the root's `extensions/<file>` modules and refuses any other
-  name. The next resource capture carries the change. An agent without a
-  resource root shows both lines with no choices and refuses a change.
+  name, and keeps the file's mode. The next resource capture carries the
+  change. An agent without a resource root shows both lines with no choices
+  and refuses a change; settings that cannot be used show both lines empty,
+  and a change to either names why.
 - **Setup.** `--check` passes once Pi is signed in and offers a model.
   `--models --agent <id>` prints the models Pi offers and the agent's model
   as JSON, and `--configure --agent <id> --model <provider>/<model>` sets the

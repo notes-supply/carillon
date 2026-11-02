@@ -6,7 +6,7 @@ import {
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import type { Subject } from "@carillon/protocol";
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
@@ -272,23 +272,20 @@ it("lists the agent's busy mode and extensions after its model, and refuses a st
   });
 });
 
-it("refuses a model change on an agent whose resources cannot be read, before writing it", async () => {
+it("keeps the agent page usable while its resources cannot be read", async () => {
   const agent = await fixture({ resources: { "settings.json": "{}\n" } });
   const subject = { kind: "agent", agent_id: "default" } as const;
-  const { settings } = await agent.runtime.settings({ subject });
-  const model = settings.find(({ id }) => id === "model");
-  const ledger = join(agent.componentDirectory, "settings.json");
-  const before = await readFile(ledger, "utf8");
   await writeFile(join(agent.resources ?? "", "settings.json"), '{"extensions":["nope"]}');
-  await expect(
-    agent.runtime.settings({
-      subject,
-      change: {
-        setting: "model",
-        value: { kind: "one", id: `${agent.model.provider.id}/reasoner` },
-        expected: model?.revision ?? "",
-      },
-    }),
-  ).rejects.toMatchObject({ status: 422 });
-  expect(await readFile(ledger, "utf8")).toBe(before);
+  const reasoner = `${agent.model.provider.id}/reasoner`;
+  const lines = await agent.set(subject, "model", reasoner);
+  expect(lines.map(({ id, value }) => ({ id, value }))).toEqual([
+    { id: "model", value: { kind: "one", id: reasoner } },
+    { id: "model.thinking", value: { kind: "one", id: "medium" } },
+    { id: "busy", value: null },
+    { id: "extensions", value: null },
+  ]);
+  await expect(agent.set(subject, "busy", "queue")).rejects.toMatchObject({
+    status: 422,
+    message: expect.stringContaining("selects nope") as unknown,
+  });
 });

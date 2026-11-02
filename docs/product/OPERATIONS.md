@@ -328,8 +328,11 @@ agent does not have, listing the ones it has. Busy and Extensions are kept
 in the agent's `settings.json` in `CARILLON_HOME/agents/<agent>/`, which a
 change rewrites keeping everything else it holds; you can also edit that
 file by hand, such as `{ "extensions": { "add": ["schedules"] } }`. Either
-way the next message Pi receives uses it. An agent without resources shows
-both lines and cannot change them. `/settings` in Discord shows the
+way the next message Pi receives brings the change, and from then on the
+agent's extensions apply to every request it makes, also for an answer
+already in progress. An agent without resources shows both lines and cannot
+change them, and one whose `settings.json` cannot be used shows them empty
+and names the problem when you change one. `/settings` in Discord shows the
 channel's page, which has neither line.
 
 - `schedules` lets the assistant run a prompt later in the same

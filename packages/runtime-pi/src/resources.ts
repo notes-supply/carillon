@@ -22,7 +22,7 @@ import { ExplainedFailure } from "@carillon/runtime/failure";
 import { mismatch } from "@carillon/runtime/mismatch";
 import { publish } from "@carillon/runtime/publish";
 import { settingRevision } from "@carillon/runtime/settings";
-import { readdir, readFile } from "node:fs/promises";
+import { chmod, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -244,19 +244,34 @@ export const RESOURCE_SETTINGS: readonly string[] = ["busy", "extensions"];
 /**
  * The agent's Busy and Extensions lines, as its resources set them now. An
  * agent without resources shows what it runs with and offers no choice.
+ * Settings that cannot be used show both lines empty, so the rest of the
+ * page stays usable; changing either names what is wrong.
  */
 export async function resourceSettings(
   source: ResourceSource,
   subject: Subject,
 ): Promise<Setting[]> {
-  return (await resourceLines(source, subject)).lines;
+  try {
+    return (await resourceLines(source, subject)).lines;
+  } catch (failure) {
+    if (!(failure instanceof ExplainedFailure)) throw failure;
+    const unusable = (id: string, name: string): Setting => ({
+      id,
+      name,
+      choices: [],
+      value: null,
+      inherited: false,
+      revision: settingRevision(id, subject, failure.message),
+    });
+    return [unusable("busy", "Busy"), unusable("extensions", "Extensions")];
+  }
 }
 
 /**
  * Applies `change` to the agent's own settings file while its line still
- * has the revision it expects, keeping everything else the file holds. The
- * next turn's capture of the resources carries it; turns admitted before
- * keep theirs. `checkLease` throws once the caller's lease was lost.
+ * has the revision it expects, keeping everything else the file holds, its
+ * mode included. The next turn's capture of the resources carries it.
+ * `checkLease` throws once the caller's lease was lost.
  */
 export async function changeResourceSetting(
   source: ResourceSource,
@@ -280,8 +295,14 @@ export async function changeResourceSetting(
   } else if (change.value === null) delete next.extensions;
   else next.extensions = extensionNames(change.value, choices);
   if (isDeepStrictEqual(next, settings)) return;
+  const path = join(source.root, "settings.json");
+  const mode = await stat(path).then(
+    (file) => file.mode & 0o777,
+    () => undefined,
+  );
   checkLease();
-  await publish(join(source.root, "settings.json"), `${JSON.stringify(next, null, 2)}\n`);
+  await publish(path, `${JSON.stringify(next, null, 2)}\n`);
+  if (mode !== undefined) await chmod(path, mode);
   checkLease();
 }
 
