@@ -164,8 +164,11 @@ async fn an_operator_change_answers_the_page_or_the_refusal_as_it_came() -> anyh
         Some(route_line),
     )
     .await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body, json!({"error": "Listens is read-only."}));
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        json!({"error": "Changed meanwhile; nothing was changed"})
+    );
     let (status, body) = operator(
         &state,
         Method::PUT,
@@ -241,5 +244,91 @@ async fn a_connected_provider_titles_pages_with_the_channels_name() -> anyhow::R
     assert_eq!(body["title"], "#home");
     discord_server.abort();
     core_server.abort();
+    Ok(())
+}
+
+/// A route line changes through the provider's one writer: written, served
+/// and answered with the page, while a hand edit nobody applied blocks it.
+#[tokio::test]
+async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edited()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, requests, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let path = state.installation.provider_config_path("discord")?;
+    let listens = |page: &Value| -> anyhow::Result<(Value, String)> {
+        let line = page["interface"]
+            .as_array()
+            .and_then(|lines| lines.iter().find(|line| line["id"] == "listens"))
+            .context("no listens line")?;
+        Ok((
+            line["value"]["id"].clone(),
+            line["revision"].as_str().unwrap_or_default().to_owned(),
+        ))
+    };
+    let (_, page) = operator(
+        &state,
+        Method::GET,
+        "/v1/channels/300/settings",
+        "operator",
+        None,
+    )
+    .await?;
+    let (_, revision) = listens(&page)?;
+
+    // A hand edit nobody applied: the change is refused, the file as it was.
+    let mut edited = DiscordConfig::read(&state.installation, "discord")?;
+    edited.typing = !edited.typing;
+    edited.write(&state.installation, "discord")?;
+    let before = std::fs::read(&path)?;
+    let change = json!({"setting": "listens", "value": {"kind": "one", "id": "mention"}, "expected": revision});
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/300/settings",
+        "operator",
+        Some(change.clone()),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("(typing)")
+                && error.contains("`carillon discord settings apply`")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+
+    // Once applied, the same change is written and served.
+    let (status, _) = operator(&state, Method::POST, "/v1/settings", "operator", None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, page) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/300/settings",
+        "operator",
+        Some(change),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(listens(&page)?.0, json!("mention"));
+    assert_eq!(
+        DiscordConfig::read(&state.installation, "discord")?.routes[0].activation,
+        DiscordActivation::Mention
+    );
+    assert_eq!(
+        state.settings.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
+    assert!(
+        requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .iter()
+            .all(|request| request.change.is_none()),
+        "a route change asks the runtime nothing but a read"
+    );
+    server.abort();
     Ok(())
 }

@@ -560,12 +560,9 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
 
     let (status, _) = interact(&state, None, &interaction("300", None)).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, body) = interact(&state, Some("token"), &interaction("301", None)).await?;
+    let (status, body) = interact(&state, Some("token"), &interaction("400", Some("301"))).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        body["error"],
-        "channel is not configured as a Discord route"
-    );
+    assert_eq!(body["error"], "thread is not in a Discord route's channel");
 
     // Replies Discord would refuse are reported instead of sent.
     let option =

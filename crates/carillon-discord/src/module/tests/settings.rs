@@ -337,6 +337,7 @@ async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyh
     let (core, server) = core(&runtime).await?;
     let lock = || runtime.lock().map_err(|_| anyhow::anyhow!("poisoned"));
     let drawn = invoke(&core, source("401", None), &ActivityMarkers::default()).await?;
+    let drawn = click(&core, &drawn, "pick", "Model").await?;
     lock()?.refusal = Some((
         StatusCode::GATEWAY_TIMEOUT,
         "The runtime did not answer in time.",
@@ -353,7 +354,7 @@ async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyh
             .iter()
             .map(|request| request.change.is_some())
             .collect::<Vec<_>>(),
-        [false, false, true, false],
+        [false, false, false, true, false],
         "the click reads, changes once, and reads again"
     );
 
@@ -385,7 +386,18 @@ async fn route_lines_draw_while_core_is_unreachable() -> anyhow::Result<()> {
          Replies  threads\n\
          ```"
     );
-    assert!(reply.components.is_empty());
+    let lines = control(&reply, "pick")?;
+    let offered: Vec<_> = controls(&reply)
+        .filter(|component| component["custom_id"] == lines.as_str())
+        .filter_map(|component| component["options"].as_array())
+        .flatten()
+        .filter_map(|option| option["label"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        ["Agent", "Listens", "Replies"],
+        "the route stays editable, so the channel can move off the runtime"
+    );
     Ok(())
 }
 
@@ -402,6 +414,9 @@ async fn model_badges_can_be_dropped_for_discord() -> anyhow::Result<()> {
     };
     let reply = invoke(&core, source("300", None), &markers).await?;
     assert_eq!(reply.content, HOME);
+    let lines = control(&reply, "pick")?;
+    let model = option(&reply, &lines, "Model")?;
+    let reply = invoke(&core, source("300", Some((&lines, &[&model]))), &markers).await?;
     let models = control(&reply, "set")?;
     let badges = controls(&reply)
         .filter(|component| component["custom_id"] == models.as_str())
@@ -438,6 +453,7 @@ async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow:
     let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
+    let drawn = click(&client, &drawn, "pick", "Model").await?;
     let reply = click(&client, &drawn, "set", "GPT-6.1 Mini").await?;
     let writes: Vec<bool> = runtime
         .lock()
@@ -449,7 +465,7 @@ async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow:
     server.abort();
     assert_eq!(
         writes,
-        [false, false, true, false],
+        [false, false, false, true, false],
         "the click reads, changes once, then reads again"
     );
     assert!(
@@ -500,6 +516,7 @@ async fn a_runtime_that_goes_out_on_the_change_is_named_once() -> anyhow::Result
     let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
+    let drawn = click(&client, &drawn, "pick", "Model").await?;
     let reply = click(&client, &drawn, "set", "GPT-6.1 Mini").await?;
     server.abort();
     assert_eq!(
