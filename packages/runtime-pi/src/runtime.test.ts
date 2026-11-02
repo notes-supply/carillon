@@ -6,7 +6,7 @@ import {
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import type { Subject } from "@carillon/protocol";
-import { writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
@@ -272,10 +272,29 @@ it("lists the agent's busy mode and extensions after its model, and refuses a st
   });
 });
 
-it("keeps the agent page usable while its resources cannot be read", async () => {
+it.each<[string, (resources: string) => Promise<unknown>, string]>([
+  [
+    "settings it cannot use",
+    (resources) => writeFile(join(resources, "settings.json"), '{"extensions":["nope"]}'),
+    "selects nope",
+  ],
+  [
+    "a settings file that is a directory",
+    async (resources) => {
+      await rm(join(resources, "settings.json"));
+      await mkdir(join(resources, "settings.json"));
+    },
+    "cannot be read",
+  ],
+  [
+    "an extensions directory that is a file",
+    (resources) => writeFile(join(resources, "extensions"), ""),
+    "cannot be read",
+  ],
+])("keeps the agent page usable with %s", async (_name, damage, reason) => {
   const agent = await fixture({ resources: { "settings.json": "{}\n" } });
   const subject = { kind: "agent", agent_id: "default" } as const;
-  await writeFile(join(agent.resources ?? "", "settings.json"), '{"extensions":["nope"]}');
+  await damage(agent.resources ?? "");
   const reasoner = `${agent.model.provider.id}/reasoner`;
   const lines = await agent.set(subject, "model", reasoner);
   expect(lines.map(({ id, value }) => ({ id, value }))).toEqual([
@@ -286,6 +305,6 @@ it("keeps the agent page usable while its resources cannot be read", async () =>
   ]);
   await expect(agent.set(subject, "busy", "queue")).rejects.toMatchObject({
     status: 422,
-    message: expect.stringContaining("selects nope") as unknown,
+    message: expect.stringContaining(reason) as unknown,
   });
 });

@@ -307,9 +307,10 @@ export async function changeResourceSetting(
 }
 
 async function resourceLines(source: ResourceSource, subject: Subject) {
+  const root = source.root;
   const settings =
-    source.root === undefined ? {} : await readSettings(join(source.root, "settings.json"));
-  const choices = [...source.builtIn, ...(await userExtensions(source.root))];
+    root === undefined ? {} : await readable(() => readSettings(join(root, "settings.json")));
+  const choices = [...source.builtIn, ...(await readable(() => userExtensions(root)))];
   const editable = source.root !== undefined;
   const busy: SettingValue = { kind: "one", id: settings.busy ?? DEFAULT_BUSY };
   const extensions: SettingValue = {
@@ -337,6 +338,19 @@ async function resourceLines(source: ResourceSource, subject: Subject) {
     },
   ];
   return { lines, settings, choices };
+}
+
+/** What `read` returns, or why the agent's resources could not be read, explained. */
+async function readable<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (failure) {
+    if (failure instanceof ExplainedFailure) throw failure;
+    throw new ExplainedFailure(
+      422,
+      `The agent's resources cannot be read: ${failure instanceof Error ? failure.message : String(failure)}`,
+    );
+  }
 }
 
 /** The user extensions the resources hold, as settings select them. */
