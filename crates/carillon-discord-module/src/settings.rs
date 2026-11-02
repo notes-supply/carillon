@@ -92,7 +92,8 @@ enum Action {
 /// What the pickers show beyond the page.
 #[derive(Default)]
 struct View {
-    /// The picked line's fingerprint; otherwise the first line it can pick.
+    /// The picked line's fingerprint; otherwise the runtime's first line it
+    /// can pick, or the route's.
     line: Option<String>,
     /// The page each picker shows; otherwise the page holding its pick.
     lines_page: Option<usize>,
@@ -290,6 +291,8 @@ fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
         .settings()
         .filter(|setting| editable(setting) || resettable(page, setting))
         .collect();
+    // Without a pick, the runtime's first line, which is what a channel
+    // changes most; the route's lines when the runtime shows none.
     let index = view
         .line
         .as_deref()
@@ -297,6 +300,11 @@ fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
             pickable
                 .iter()
                 .position(|setting| fingerprint(&[&setting.id]) == line)
+        })
+        .or_else(|| {
+            pickable
+                .iter()
+                .position(|setting| page.interface.iter().all(|line| line.id != setting.id))
         })
         .unwrap_or_default();
     let Some(picked) = pickable.get(index) else {

@@ -108,8 +108,10 @@ Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
 the models Pi offers.
 
 Rerunning the installer with options keeps the registry, credentials and
-state, but rewrites the Discord settings from them. Use `carillon update`
-for new releases.
+state, and writes the guild, bot and people from them. `--route` only
+creates the first routes: a rerun must name the routes the settings already
+have, and changes a route only through [Settings](#settings). Use
+`carillon update` for new releases.
 
 ### From the downloaded archive
 
@@ -184,7 +186,10 @@ stopped (`carillon stop` once `carillon status` shows no running turns, edit,
 
 `/settings` in a routed Discord channel, or in one of its threads, shows
 that channel's settings. Only allowlisted people in the configured server
-can run it.
+can run it. In a channel of that server with no route, it shows one line,
+`Agent`; choosing an agent routes the channel to it, answering only when
+mentioned, a thread per conversation. Nothing reaches a runtime there before
+that.
 
 ```text
 #home
@@ -212,9 +217,16 @@ model, an answer still in progress there included.
 If someone changed the line after the page was drawn, nothing changes and
 the page shows `⚠ Changed meanwhile`. If the runtime did not answer in time,
 the page shows `⚠ Not confirmed`, and the change may or may not have
-applied. Look at the redrawn page before you change it again. Agent,
-Listens and Replies come from the Discord settings file and are not
-editable here.
+applied. Look at the redrawn page before you change it again.
+
+Agent, Listens and Replies are the channel's route. Agent moves the channel
+to another agent, whose model lines the page then shows. Listens is
+`mentions` or `always`, and Replies is `threads` or `channel`. A route
+change applies to the next message; a message already admitted keeps the
+place its answer goes. The Discord provider writes the change to its
+settings file and serves it. If the file has changes nobody applied, the
+route is not changed, and the page says to run `carillon discord settings
+apply` first. `/settings` cannot remove a route.
 
 The terminal shows the same pages:
 
@@ -223,12 +235,14 @@ carillon settings                              # one line per routed channel
 carillon settings CHANNEL_ID                   # that channel's page
 carillon settings CHANNEL_ID thinking=high     # change lines, left to right
 carillon settings CHANNEL_ID reset model       # take the agent's model again
+carillon settings CHANNEL_ID agent=t3-carillon-t3-code listens=mention
 carillon settings --agent assistant            # the agent's own values
 carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 ```
 
-A key names a line, such as `model` or `thinking`. A value is a choice's ID
-or name. A value that matches no choice lists the choices. Each change uses
+A key names a line, such as `model`, `thinking` or `agent`. A value is a
+choice's ID or name: `listens=mention` or `listens=always`, `replies=thread`
+or `replies=channel`. A value that matches no choice lists the choices. Each change uses
 the page the one before it returned, and the command stops at the first
 change that is refused, naming its key and the keys already applied.
 
@@ -262,21 +276,28 @@ needs `carillon restart`; an apply that meets such a change refuses the whole
 file and says which fields.
 
 Discord's admission settings apply live too. `carillon discord setup` asks
-for them at the terminal; `configure` takes them as options:
+for them at the terminal, or takes them as options and asks nothing:
 
 ```sh
-carillon discord configure --guild-id GUILD_ID --bot-user-id BOT_ID \
+carillon discord setup --guild-id GUILD_ID --bot-user-id BOT_ID \
   --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread:assistant
 carillon discord settings          # what the provider serves vs. the file
 carillon discord settings apply    # serve the file's live changes
 ```
 
+`--route` only creates the first routes. Once the settings route channels,
+setup refuses other routes and leaves the file as it is; change a route
+with `carillon settings` or `/settings`.
+
 Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
 and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
-settings it was admitted with. Setup and `configure` save the file, then
-have a running provider serve it; if it refuses, they fail, unless only a
-restart applies the file and this release accepts the module it declares.
+settings it was admitted with. While the provider runs, it is the only
+program that writes its settings file: setup, `carillon discord module` and
+route changes send their change to it, and it writes and serves the file.
+It refuses a change while the file has edits nobody applied. A change to
+what only a restart applies is written and served at the next restart.
+While the provider is stopped, these commands change the file themselves.
 
 ### Conversations at once
 
@@ -380,7 +401,8 @@ conversation, exactly as written:
 decisions`. Plain `/command` lists them.
 
 Both commands are admitted like messages: only in the guild, from allowlisted
-users, in a routed channel or a thread under a thread route.
+users, in a routed channel or a thread under a thread route. `/settings`
+also opens in a channel of the guild with no route, to route it.
 
 ### Reactions
 

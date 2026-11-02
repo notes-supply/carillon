@@ -255,7 +255,12 @@ what the owners return and defines no setting of its own.
 
 - The interface owns a channel's route: its agent, whether the agent
   answers every message or only mentions, and whether it replies in threads
-  or in the channel. The Discord provider keeps routes in its settings file.
+  or in the channel. The Discord provider keeps routes in its settings file,
+  and while it runs it is that file's only writer: route changes, setup and
+  module changes reach it, and one at a time it reads the file, refuses it
+  when it differs from what serves, checks the change's revision, validates,
+  writes atomically and serves the result. A stopped provider's file is
+  changed in place under the installation's maintenance lock.
 - The runtime that serves an agent owns its model and the model's options.
   It keeps them in `settings.json` in its component directory: at most one
   model unit per agent and one per channel: the model and the options
@@ -282,7 +287,11 @@ the runtime's lines, which it reads through core's `POST /v1/settings`.
 Core relays only for the interface that owns the channel, or for the
 operator, who may also name an agent. The provider serves the same pages to
 `carillon settings` on its operator API. A runtime that does not answer
-leaves the route lines on the page.
+leaves the route lines on the page, still editable, so a channel can move
+off a broken runtime. A re-route shows the new agent's runtime lines. In a
+channel of the guild with no route, the page has only the Agent line and no
+subject; choosing an agent creates the route, and no runtime is asked
+before it exists.
 
 A turn takes its channel's unit, else its agent's, when the runtime admits
 it. Core records each conversation's channel with its first admitted

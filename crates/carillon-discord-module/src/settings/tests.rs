@@ -731,3 +731,61 @@ fn a_click_while_the_runtime_is_out_shows_only_its_reason() -> Result<(), String
     assert!(host.changes().is_empty(), "nothing is sent");
     Ok(())
 }
+
+#[test]
+fn route_lines_with_choices_are_picked_and_changed_like_any_line() -> Result<(), String> {
+    let mut page = home()?;
+    let listens = page
+        .interface
+        .iter_mut()
+        .find(|line| line.id == "listens")
+        .ok_or("no listens line")?;
+    listens.choices = vec![named("mention", "mentions"), named("always", "always")];
+    let mut host = FakeHost::new(page);
+    let drawn = run(&mut host, &command())?;
+    let lines = control(&drawn, "pick")?;
+    assert_eq!(labels(&drawn, &lines), ["Listens", "Model", "Thinking"]);
+    assert_eq!(
+        selected(&drawn, &lines),
+        ["Model"],
+        "the runtime's first line is picked"
+    );
+    let listens = pick(&mut host, &drawn, "Listens")?;
+    assert!(
+        !offers(&listens, "reset"),
+        "a route line has nothing to return to"
+    );
+    choose(&mut host, &listens, "mentions")?;
+    let changes = host.changes();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].setting, "listens");
+    assert_eq!(changes[0].value, Some(one("mention")));
+    Ok(())
+}
+
+#[test]
+fn an_unrouted_page_offers_its_agent_line_alone() -> Result<(), String> {
+    let page = Page {
+        title: "<#301>".to_owned(),
+        subject: None,
+        interface: vec![line(
+            "agent",
+            "Agent",
+            vec![named("assistant", "assistant"), named("t3", "t3")],
+            None,
+            false,
+            9,
+        )?],
+        runtime: RuntimePart::Settings(RuntimeSettings::default()),
+    };
+    let mut host = FakeHost::new(page);
+    let drawn = run(&mut host, &command())?;
+    assert_eq!(drawn.content, "<#301>\n```\nAgent\n```");
+    assert_eq!(labels(&drawn, &control(&drawn, "pick")?), ["Agent"]);
+    assert_eq!(
+        labels(&drawn, &control(&drawn, "set")?),
+        ["assistant", "t3"]
+    );
+    assert!(!offers(&drawn, "reset"));
+    Ok(())
+}
