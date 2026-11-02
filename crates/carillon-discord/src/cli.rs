@@ -92,7 +92,7 @@ in Discord.")]
         bot_user_id: Option<String>,
         #[arg(long, requires = "guild_id")]
         user_id: Vec<String>,
-        /// CHANNEL_ID:mention|always:thread|channel:AGENT_ID
+        /// `CHANNEL_ID:mention|always:thread|channel:AGENT_ID`
         #[arg(long, requires = "guild_id")]
         route: Vec<DiscordRoute>,
     },
@@ -460,7 +460,7 @@ async fn manage_module(
     let loaded = installation()?;
     let provider = instance(&loaded, provider)?;
     let settings = loaded.provider_config_path(&provider)?;
-    let module = match action {
+    let (module, declares) = match action {
         None | Some(ModuleAction::Check { .. }) => {
             let operator = Operator::new(&loaded, &provider, "module")?;
             print_status(&provider, &operator.request(Method::GET, None).await?);
@@ -476,29 +476,28 @@ async fn manage_module(
             };
             // Checked before the settings change, against this release.
             let commands = check_file(&loaded.root.join(&declared)).await?;
-            println!(
-                "{} declares the custom Discord module {}: {}.",
-                settings.display(),
+            let named = format!(
+                "the custom Discord module {}: {}",
                 declared.display(),
                 list(&commands)
             );
-            ModuleSetting {
+            let module = ModuleSetting {
                 enabled: true,
                 path: Some(declared),
-            }
+            };
+            (module, named)
         }
         Some(ModuleAction::Disable) => {
-            println!(
-                "{} declares the bundled Discord module.",
-                settings.display()
-            );
-            ModuleSetting {
+            let module = ModuleSetting {
                 enabled: false,
                 ..DiscordConfig::read(&loaded, &provider)?.module
-            }
+            };
+            (module, "the bundled Discord module".to_owned())
         }
     };
-    deliver(&loaded, &provider, FileChange::Module(module)).await
+    deliver(&loaded, &provider, FileChange::Module(module)).await?;
+    println!("{} now declares {declares}.", settings.display());
+    Ok(())
 }
 
 /// Validates the custom module the settings enable against this program, as
@@ -772,7 +771,7 @@ async fn manage_settings(
             Ok(())
         }
         Applying::Refused(refused) => {
-            bail!("{}; {provider} keeps serving the settings it has", refused)
+            bail!("{refused}; {provider} keeps serving the settings it has")
         }
         Applying::Unreachable => bail!(
             "the Discord provider does not answer at {}, so it did not confirm serving the \

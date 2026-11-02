@@ -261,7 +261,10 @@ async fn a_re_route_moves_the_page_to_the_new_agent_and_stales_the_old_card() ->
     .await
     .map_err(|refusal| anyhow::anyhow!(refusal.message))?;
     assert_eq!(
-        shown.subject.as_ref().map(|subject| subject.agent_id()),
+        shown
+            .subject
+            .as_ref()
+            .map(carillon_protocol::settings::Subject::agent_id),
         Some("other")
     );
     let read = taken(&requests);

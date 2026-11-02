@@ -2,8 +2,10 @@
 //! `/settings`, `carillon settings`, setup and module changes all reach it
 //! here. One change at a time reads the file, refuses it when it differs
 //! from what serves, applies the change, validates the result, writes it
-//! atomically and serves it. Only while the provider is stopped does the
-//! CLI write the file itself, under the installation's maintenance lock.
+//! atomically and serves it. A change to what only a restart applies is
+//! written without serving, and later changes build on that file. Only
+//! while the provider is stopped does the CLI write the file itself, under
+//! the installation's maintenance lock.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -266,11 +268,11 @@ impl Writer {
     where
         F: Future<Output = Result<Change, ChangeError>>,
     {
-        let _one = self.settings.0.applying.lock().await;
+        let mut written = self.settings.0.applying.lock().await;
         let serving = self.settings.current();
         let file = DiscordConfig::load(&self.installation, &self.provider_id)
             .map_err(Refused::Unreadable)?;
-        let unapplied = Difference::between(&serving, &file);
+        let unapplied = Difference::between(written.as_deref().unwrap_or(&serving), &file);
         if !unapplied.live.is_empty() || !unapplied.restart.is_empty() {
             return Err(Refused::Unapplied(unapplied));
         }
@@ -295,12 +297,17 @@ impl Writer {
         };
         next.write(&self.installation, &self.provider_id)
             .map_err(Refused::Write)?;
-        if difference.restart.is_empty() && !difference.live.is_empty() {
-            info!(
-                changed = difference.live.join(", "),
-                "Discord settings changed"
-            );
-            self.settings.0.current.send_replace(Arc::new(next));
+        if difference.restart.is_empty() {
+            if !difference.live.is_empty() {
+                info!(
+                    changed = difference.live.join(", "),
+                    "Discord settings changed"
+                );
+                self.settings.0.current.send_replace(Arc::new(next));
+            }
+            *written = None;
+        } else {
+            *written = Some(Arc::new(next));
         }
         Ok(Written {
             value,

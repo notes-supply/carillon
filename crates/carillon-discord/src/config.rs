@@ -687,8 +687,11 @@ pub(crate) struct Settings(Arc<Serving>);
 
 struct Serving {
     current: watch::Sender<Arc<DiscordConfig>>,
-    /// One apply at a time, so the file each reads is the one that serves.
-    applying: Mutex<()>,
+    /// One apply or change at a time, so the file each reads is the one
+    /// that serves. It holds the file a change last wrote without serving,
+    /// because it changed what only a restart applies: later changes build
+    /// on that file rather than refuse it.
+    applying: Mutex<Option<Arc<DiscordConfig>>>,
 }
 
 impl Settings {
@@ -696,7 +699,7 @@ impl Settings {
     pub(crate) fn new(config: DiscordConfig) -> Self {
         Self(Arc::new(Serving {
             current: watch::Sender::new(Arc::new(config)),
-            applying: Mutex::new(()),
+            applying: Mutex::new(None),
         }))
     }
 
@@ -757,7 +760,7 @@ impl Settings {
     where
         F: Future<Output = Result<Change, ChangeError>>,
     {
-        let _one = self.0.applying.lock().await;
+        let mut written = self.0.applying.lock().await;
         let file = read().map_err(Refusal::Invalid)?;
         let mut difference = Difference::between(&self.current(), &file);
         if !difference.restart.is_empty() {
@@ -772,6 +775,7 @@ impl Settings {
         if !difference.live.is_empty() {
             self.0.current.send_replace(Arc::new(file));
         }
+        *written = None;
         Ok(Applied {
             changed: difference.live,
             module,

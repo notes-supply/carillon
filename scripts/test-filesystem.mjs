@@ -88,7 +88,7 @@ async function testConfiguration() {
     "--home",
     root,
     "discord",
-    "configure",
+    "setup",
     ...discordOptions,
     "--user-id",
     "200",
@@ -103,12 +103,12 @@ async function testConfiguration() {
     [
       [
         "discord",
-        "configure",
+        "setup",
         ...discordOptions,
         "--user-id",
         "999",
         "--route",
-        "301:mention:thread:assistant",
+        "300:always:channel:assistant",
       ],
       discord,
       0o600,

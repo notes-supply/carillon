@@ -343,14 +343,14 @@ async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::
     let (core, _, server) = settings_core(None).await?;
     let state = discord_state(core, directory.path()).await?;
     let path = state.installation.provider_config_path("discord")?;
-    let served = state.settings.current().routes.clone();
-    let admission = |routes: &[DiscordRoute]| {
+    let routes = state.settings.current().routes.clone();
+    let admission = |first: &[DiscordRoute]| {
         json!({
             "change": "admission",
             "guild_id": "100",
             "bot_user_id": "201",
             "allowed_user_ids": ["200", "250"],
-            "routes": {"routes": "first", "list": routes},
+            "routes": {"routes": "first", "list": first},
         })
     };
     let (status, body) = operator(
@@ -358,7 +358,7 @@ async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::
         Method::PUT,
         "/v1/settings",
         "operator",
-        Some(admission(&served)),
+        Some(admission(&routes)),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -366,7 +366,7 @@ async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::
     assert_eq!(state.settings.current().allowed_user_ids, ["200", "250"]);
 
     let before = std::fs::read(&path)?;
-    let mut other = served.clone();
+    let mut other = routes.clone();
     other[0].activation = DiscordActivation::Mention;
     let (status, body) = operator(
         &state,
@@ -384,13 +384,13 @@ async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::
         "{body}"
     );
     assert_eq!(std::fs::read(&path)?, before);
-    assert_eq!(state.settings.current().routes, served);
+    assert_eq!(state.settings.current().routes, routes);
     let (status, _) = operator(
         &state,
         Method::PUT,
         "/v1/settings",
         "discord",
-        Some(admission(&served)),
+        Some(admission(&routes)),
     )
     .await?;
     assert_eq!(status, StatusCode::FORBIDDEN);

@@ -31,8 +31,8 @@ pub(crate) async fn deliver(
             }
         }
         Applying::Refused(refused) => bail!(
-            "{}; the settings file is unchanged and {provider} keeps serving the settings it has",
-            refused
+            "{refused}; the settings file is unchanged and {provider} keeps serving the settings \
+             it has"
         ),
         Applying::Unreachable => {
             change.write(loaded, provider)?;
