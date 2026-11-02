@@ -116,13 +116,17 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         builtIn: agent.builtIn,
         defaults: options.defaults,
       };
-      const ownsChange = change !== undefined && RESOURCE_SETTINGS.includes(change.setting);
-      if (ownsChange)
+      if (change !== undefined && RESOURCE_SETTINGS.includes(change.setting)) {
         await ledger.exclusive((checkLease) =>
           changeResourceSetting(source, subject, change, checkLease),
         );
-      const { settings } = await models.settings(ownsChange ? { subject } : request);
-      return { settings: [...settings, ...(await resourceSettings(source, subject))] };
+        const { settings } = await models.settings({ subject });
+        return { settings: [...settings, ...(await resourceSettings(source, subject))] };
+      }
+      // Read first: resources that cannot be read refuse a model change before it is written.
+      const resources = await resourceSettings(source, subject);
+      const { settings } = await models.settings(request);
+      return { settings: [...settings, ...resources] };
     },
     // The durable runtime runs no commands of its own yet.
     commands: () => Promise.resolve({ commands: [] }),

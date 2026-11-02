@@ -290,27 +290,29 @@ async function resourceLines(source: ResourceSource, subject: Subject) {
     source.root === undefined ? {} : await readSettings(join(source.root, "settings.json"));
   const choices = [...source.builtIn, ...(await userExtensions(source.root))];
   const editable = source.root !== undefined;
-  const revision = (setting: string, stored: unknown) =>
-    settingRevision(setting, subject, [editable, stored ?? null]);
+  const busy: SettingValue = { kind: "one", id: settings.busy ?? DEFAULT_BUSY };
+  const extensions: SettingValue = {
+    kind: "many",
+    ids: selection(settings.extensions, choices, source.defaults),
+  };
+  const revision = (setting: string, stored: unknown, value: SettingValue) =>
+    settingRevision(setting, subject, [editable, stored ?? null, value]);
   const lines: Setting[] = [
     {
       id: "busy",
       name: "Busy",
       choices: editable ? BUSY.map((mode) => ({ id: mode, name: mode })) : [],
-      value: { kind: "one", id: settings.busy ?? DEFAULT_BUSY },
+      value: busy,
       inherited: settings.busy === undefined,
-      revision: revision("busy", settings.busy),
+      revision: revision("busy", settings.busy, busy),
     },
     {
       id: "extensions",
       name: "Extensions",
       choices: editable ? choices.map((name) => ({ id: name, name })) : [],
-      value: {
-        kind: "many",
-        ids: selection(settings.extensions, choices, source.defaults),
-      },
+      value: extensions,
       inherited: settings.extensions === undefined,
-      revision: revision("extensions", settings.extensions),
+      revision: revision("extensions", settings.extensions, extensions),
     },
   ];
   return { lines, settings, choices };
@@ -319,12 +321,15 @@ async function resourceLines(source: ResourceSource, subject: Subject) {
 /** The user extensions the resources hold, as settings select them. */
 async function userExtensions(root: string | undefined): Promise<string[]> {
   if (root === undefined) return [];
-  const files = await readdir(join(root, "extensions")).catch((failure: unknown) => {
-    if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return [];
-    throw failure;
-  });
-  return files
-    .map((file) => `extensions/${file}`)
+  const entries = await readdir(join(root, "extensions"), { withFileTypes: true }).catch(
+    (failure: unknown) => {
+      if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return [];
+      throw failure;
+    },
+  );
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => `extensions/${entry.name}`)
     .filter(isUserExtension)
     .toSorted();
 }

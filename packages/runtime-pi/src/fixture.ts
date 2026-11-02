@@ -73,12 +73,13 @@ export interface Fixture {
   /**
    * Closes the runtime and opens it again once `meanwhile` is done, over
    * the same storage or, `fresh`, new storage in its place, and with `mcp`
-   * as its MCP servers once given.
+   * as its MCP servers and `defaults` as its default extensions once given.
    */
   restart(changes?: {
     readonly meanwhile?: () => unknown;
     readonly fresh?: true;
     readonly mcp?: readonly McpServer[];
+    readonly defaults?: readonly string[];
   }): Promise<Fixture>;
   close(): Promise<void>;
 }
@@ -132,7 +133,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     }
   }
 
-  async function open(mcp = options.mcp): Promise<Fixture> {
+  async function open(mcp = options.mcp, defaults = options.defaults ?? []): Promise<Fixture> {
     const runtime = await createPiRuntime({
       agents: (options.agents ?? ["default"]).map((id) => ({
         id,
@@ -144,7 +145,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       core: createCoreClient({ url: core.url, providerId: "runtime-pi", token: "test-only" }),
       images,
       builtIns: options.builtIns ?? [],
-      defaults: options.defaults ?? [],
+      defaults,
       storage,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       ...(mcp === undefined ? {} : { mcp }),
@@ -217,14 +218,14 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       },
       openings: () =>
         core.received.filter((call) => call.path === "/v1/runtime/turns").map((call) => call.body),
-      async restart({ meanwhile, fresh, mcp: servers = mcp } = {}) {
+      async restart({ meanwhile, fresh, mcp: servers = mcp, defaults: next = defaults } = {}) {
         await runtime.close();
         await meanwhile?.();
         if (fresh === true) {
           memories.clear();
           await rm(join(componentDirectory, "agents"), { recursive: true, force: true });
         }
-        return open(servers);
+        return open(servers, next);
       },
       async close() {
         await runtime.close();

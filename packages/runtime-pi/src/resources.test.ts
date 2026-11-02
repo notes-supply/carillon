@@ -587,3 +587,46 @@ it("shows an agent without resources what it runs with, offering no change", asy
   ]);
   await expect(agent.set(agentPage, "busy", "queue")).rejects.toMatchObject({ status: 422 });
 });
+
+it("refuses a change drawn before the agent's default extensions changed", async () => {
+  let agent = await fixture({
+    durable: true,
+    defaults: ["schedules"],
+    resources: { "settings.json": "{}\n" },
+  });
+  const { settings } = await agent.runtime.settings({ subject: agentPage });
+  const drawn = settings.find(({ id }) => id === "extensions");
+  agent = await agent.restart({ defaults: ["schedules", "subagents"] });
+  fixtures.splice(0, 1, agent);
+  await expect(
+    agent.runtime.settings({
+      subject: agentPage,
+      change: {
+        setting: "extensions",
+        value: { kind: "many", ids: ["schedules"] },
+        expected: drawn?.revision ?? "",
+      },
+    }),
+  ).rejects.toMatchObject({ status: 409 });
+  expect(await readFile(settingsFile(agent), "utf8")).toBe("{}\n");
+});
+
+it("offers only module files as the agent's own extensions", async () => {
+  const agent = await fixture({
+    resources: {
+      "settings.json": "{}\n",
+      "extensions/notes.js": "export default {};",
+      "extensions/folder.js/index.js": "export default {};",
+    },
+  });
+  const { settings } = await agent.runtime.settings({ subject: agentPage });
+  expect(settings.find(({ id }) => id === "extensions")?.choices.map(({ id }) => id)).toEqual([
+    "schedules",
+    "subagents",
+    "extensions/notes.js",
+  ]);
+  await expect(agent.set(agentPage, "extensions", ["extensions/folder.js"])).rejects.toMatchObject({
+    status: 422,
+  });
+  expect(await readFile(settingsFile(agent), "utf8")).toBe("{}\n");
+});
