@@ -4,7 +4,7 @@ use carillon_protocol::settings::{Page, SettingsRequest};
 
 use crate::config::DiscordRoute;
 
-async fn settings_core(
+pub(super) async fn settings_core(
     refusal: Option<(StatusCode, &'static str)>,
 ) -> anyhow::Result<(
     CoreClient,
@@ -43,7 +43,7 @@ async fn settings_core(
     Ok((core_client(format!("http://{address}"))?, requests, server))
 }
 
-async fn operator(
+pub(super) async fn operator(
     state: &DiscordState,
     method: Method,
     uri: &str,
