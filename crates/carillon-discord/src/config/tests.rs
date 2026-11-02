@@ -747,36 +747,3 @@ async fn concurrent_changes_to_other_routes_both_survive() -> anyhow::Result<()>
     assert_eq!(file.routes, writer.current().routes);
     Ok(())
 }
-
-#[tokio::test]
-async fn changes_after_a_restart_only_change_build_on_the_written_file() -> anyhow::Result<()> {
-    let (_installation, writer) = writer()?;
-    let written = writer
-        .change(|discord| {
-            "110".clone_into(&mut discord.guild_id);
-            Ok(())
-        })
-        .await
-        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
-    assert_eq!(written.restart, ["guild_id"]);
-    assert!(written.changed.is_empty());
-    assert_eq!(
-        writer.current().guild_id,
-        "100",
-        "a restart-only change served"
-    );
-    // The written file is not a hand edit: the next change builds on it, and
-    // what serves still waits for the restart.
-    writer
-        .change(|discord| {
-            "100".clone_into(&mut discord.guild_id);
-            discord.typing = !discord.typing;
-            Ok(())
-        })
-        .await
-        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
-    let file = DiscordConfig::load(writer.installation(), "discord-private")?;
-    assert_eq!(file.guild_id, "100");
-    assert_eq!(writer.current().typing, file.typing);
-    Ok(())
-}

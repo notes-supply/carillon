@@ -69,10 +69,9 @@ impl FileChange {
             } => {
                 let routes = match routes {
                     Routes::Answered(routes) => routes,
-                    Routes::First(routes)
-                        if discord.routes.is_empty() || discord.routes == routes =>
-                    {
-                        routes
+                    Routes::First(routes) if discord.routes.is_empty() => routes,
+                    Routes::First(routes) if same_routes(&discord.routes, &routes) => {
+                        discord.routes.clone()
                     }
                     Routes::First(_) => {
                         return Err(Refused::Invalid(
@@ -117,6 +116,16 @@ impl FileChange {
     }
 }
 
+/// Whether both name the same routes, in any order.
+fn same_routes(left: &[DiscordRoute], right: &[DiscordRoute]) -> bool {
+    fn sorted(routes: &[DiscordRoute]) -> Vec<&DiscordRoute> {
+        let mut sorted: Vec<&DiscordRoute> = routes.iter().collect();
+        sorted.sort_by(|one, other| one.channel_id.cmp(&other.channel_id));
+        sorted
+    }
+    sorted(left) == sorted(right)
+}
+
 /// The provider's settings file, or the defaults before setup wrote one.
 ///
 /// # Errors
@@ -136,6 +145,23 @@ pub(crate) struct Writer {
     settings: Settings,
     installation: Arc<LoadedConfig>,
     provider_id: Arc<str>,
+}
+
+/// Writes a change's settings while the module change it declares holds
+/// the maintenance lock, before that module serves.
+pub(crate) struct Commit {
+    installation: Arc<LoadedConfig>,
+    provider_id: Arc<str>,
+    settings: DiscordConfig,
+}
+
+impl Commit {
+    /// # Errors
+    ///
+    /// Returns why the settings file was not written.
+    pub(crate) fn write(self) -> Result<()> {
+        self.settings.write(&self.installation, &self.provider_id)
+    }
 }
 
 /// What a change wrote: the edit's own answer, the fields it changed, those
@@ -239,12 +265,13 @@ impl Writer {
         &self,
         edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
     ) -> Result<Written<T>, Refused> {
-        self.write(edit, None::<fn(&DiscordConfig) -> NoModule>)
+        self.write(edit, None::<fn(&DiscordConfig, Commit) -> NoModule>)
             .await
     }
 
     /// Changes the file with `edit` and serves the result, first serving the
-    /// module it declares through `module`.
+    /// module it declares through `module`, which writes the file with the
+    /// [`Commit`] it is given before that module serves.
     ///
     /// # Errors
     ///
@@ -252,7 +279,7 @@ impl Writer {
     pub(crate) async fn declare<T, F>(
         &self,
         edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
-        module: impl FnOnce(&DiscordConfig) -> F,
+        module: impl FnOnce(&DiscordConfig, Commit) -> F,
     ) -> Result<Written<T>, Refused>
     where
         F: Future<Output = Result<Change, ChangeError>>,
@@ -263,7 +290,7 @@ impl Writer {
     async fn write<T, F>(
         &self,
         edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
-        module: Option<impl FnOnce(&DiscordConfig) -> F>,
+        module: Option<impl FnOnce(&DiscordConfig, Commit) -> F>,
     ) -> Result<Written<T>, Refused>
     where
         F: Future<Output = Result<Change, ChangeError>>,
@@ -276,16 +303,34 @@ impl Writer {
         if !unapplied.live.is_empty() || !unapplied.restart.is_empty() {
             return Err(Refused::Unapplied(unapplied));
         }
-        let mut next = file;
+        let mut next = file.clone();
         let value = edit(&mut next)?;
         next.validate(&self.installation, &self.provider_id)
             .map_err(|error| Refused::Invalid(format!("{error:#}; nothing was changed")))?;
         let mut difference = Difference::between(&serving, &next);
+        // Only setup's own change waits for a restart; a route or module
+        // change must serve, so it waits until the restart has.
+        if !difference.restart.is_empty() && (module.is_none() || next.module != file.module) {
+            return Err(Refused::Unapplied(Difference {
+                live: Vec::new(),
+                restart: difference.restart,
+            }));
+        }
         // The module's file decides as well as its declaration, so a module
         // rebuilt at the same path serves too.
         let module = match module {
             Some(module) if difference.restart.is_empty() => {
-                let module = module(&next).await.map_err(Refused::Module)?;
+                let commit = Commit {
+                    installation: Arc::clone(&self.installation),
+                    provider_id: Arc::clone(&self.provider_id),
+                    settings: next.clone(),
+                };
+                let module = module(&next, commit)
+                    .await
+                    .map_err(|failure| match failure {
+                        ChangeError::Commit(error) => Refused::Write(error),
+                        failure => Refused::Module(failure),
+                    })?;
                 if module.serving != module.previous
                     && !difference.live.iter().any(|field| field == "module")
                 {
@@ -293,10 +338,12 @@ impl Writer {
                 }
                 Some(module)
             }
-            _ => None,
+            _ => {
+                next.write(&self.installation, &self.provider_id)
+                    .map_err(Refused::Write)?;
+                None
+            }
         };
-        next.write(&self.installation, &self.provider_id)
-            .map_err(Refused::Write)?;
         if difference.restart.is_empty() {
             if !difference.live.is_empty() {
                 info!(
@@ -357,6 +404,10 @@ pub(crate) fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
                 "Discord rejected the module's commands: {failure:#}. Nothing was applied; \
                  correct the module's command definitions and apply again"
             ),
+        ),
+        ChangeError::Commit(failure) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not write the settings file: {failure:#}; nothing was applied"),
         ),
         ChangeError::Register(failure) => (
             StatusCode::GATEWAY_TIMEOUT,

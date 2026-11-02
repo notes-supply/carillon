@@ -500,7 +500,7 @@ async fn apply_settings(
                 || read_settings(state),
                 |file| {
                     let source = file.module_source(&state.installation.root);
-                    state.module.apply(source, state.app())
+                    state.module.change(source, state.app(), || Ok(()))
                 },
             )
             .await
@@ -579,9 +579,11 @@ async fn change_settings(
             .writer()
             .declare(
                 |discord| change.apply(discord),
-                |file| {
+                |file, commit| {
                     let source = file.module_source(&state.installation.root);
-                    state.module.apply(source, state.app())
+                    state
+                        .module
+                        .change(source, state.app(), move || commit.write())
                 },
             )
             .await

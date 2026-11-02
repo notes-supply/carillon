@@ -302,6 +302,17 @@ async fn counting_registration_server(
     ))
 }
 
+impl Module {
+    /// Serves `source` with nothing to commit beside it.
+    pub(crate) async fn apply(
+        &self,
+        source: Source,
+        app: Option<&DiscordApp>,
+    ) -> Result<Change, ChangeError> {
+        self.change(source, app, || Ok(())).await
+    }
+}
+
 pub(crate) fn route() -> crate::config::DiscordRoute {
     crate::config::DiscordRoute {
         channel_id: "300".to_owned(),

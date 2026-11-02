@@ -62,3 +62,18 @@ async fn unattended_setup_refuses_other_routes_once_channels_are_routed() -> any
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn unattended_setup_takes_the_same_routes_in_another_order() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = fresh(directory.path())?;
+    let routes = ["300:always:thread:default", "301:mention:thread:default"];
+    unattended(&config, &["200"], &routes).await?;
+    unattended(&config, &["200"], &[routes[1], routes[0]]).await?;
+    assert_eq!(
+        DiscordConfig::load(&config, "discord-private")?.routes,
+        [route(routes[0])?, route(routes[1])?],
+        "the routes keep their order"
+    );
+    Ok(())
+}

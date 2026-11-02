@@ -559,6 +559,8 @@ pub(crate) enum ChangeError {
     Record(PublishError),
     /// Discord refused the definitions or did not confirm them.
     Register(anyhow::Error),
+    /// What the change was committed with failed, so nothing activated.
+    Commit(anyhow::Error),
 }
 
 impl fmt::Display for ChangeError {
@@ -577,6 +579,7 @@ impl fmt::Display for ChangeError {
             Self::Register(error) => {
                 write!(formatter, "register Discord guild commands: {error:#}")
             }
+            Self::Commit(error) => write!(formatter, "write the settings file: {error:#}"),
         }
     }
 }
@@ -638,19 +641,21 @@ impl Module {
 
     /// Serves the module `source` names unless it already serves, byte for
     /// byte: validate, register when the record does not show its
-    /// definitions, then activate. A module that already serves has its
-    /// registration repeated when the record does not show it. Only a change
-    /// takes the maintenance lock.
-    pub(crate) async fn apply(
+    /// definitions, `commit`, then activate. A module that already serves
+    /// has its registration repeated when the record does not show it. Only
+    /// a change takes the maintenance lock, which `commit` runs under.
+    pub(crate) async fn change(
         &self,
         source: Source,
         app: Option<&DiscordApp>,
+        commit: impl FnOnce() -> Result<()>,
     ) -> Result<Change, ChangeError> {
         let _changes = self.changes.lock().await;
         let bytes = self.files.read(&source).map_err(ChangeError::Unusable)?;
         let serving = self.current();
         let unchanged = serving.source == source && serving.digest == digest(&bytes);
         if unchanged && app.is_none_or(|app| self.registered(app, &serving.definitions)) {
+            commit().map_err(ChangeError::Commit)?;
             return Ok(Change {
                 serving: serving.summary(),
                 previous: serving.summary(),
@@ -668,6 +673,7 @@ impl Module {
             let discord = self
                 .reconcile_definitions(app, &serving.definitions)
                 .await?;
+            commit().map_err(ChangeError::Commit)?;
             return Ok(Change {
                 serving: serving.summary(),
                 previous: serving.summary(),
@@ -680,6 +686,7 @@ impl Module {
         let discord = self
             .reconcile_definitions(app, &candidate.definitions)
             .await?;
+        commit().map_err(ChangeError::Commit)?;
         let serving = candidate.summary();
         let previous = self.activate(candidate).summary();
         Ok(Change {
