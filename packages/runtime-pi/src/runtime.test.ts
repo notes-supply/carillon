@@ -125,7 +125,7 @@ it("fails the turns of an agent with no model, naming the command that sets one"
   const { settings } = await agent.runtime.settings({
     subject: { kind: "agent", agent_id: "default" },
   });
-  expect(settings).toMatchObject([{ id: "model", value: null }]);
+  expect(settings[0]).toMatchObject({ id: "model", value: null });
   await agent.runtime.turns.submit(agent.turn("turn-1", "hello"));
   const failed = await agent.outcome("turn-1");
   expect(failed.outcome === "failed" && failed.explanation).toContain(
@@ -226,4 +226,46 @@ it("refuses a turn of an agent it does not serve", async () => {
   await expect(
     agent.runtime.turns.submit(agent.turn("turn-1", "hello", { agent_id: "elsewhere" })),
   ).rejects.toMatchObject({ status: 422 });
+});
+
+it("lists the agent's busy mode and extensions after its model, and refuses a stale extensions change", async () => {
+  const agent = await fixture({
+    defaults: ["schedules"],
+    resources: { "settings.json": "{}\n", "extensions/notes.js": "export default {};" },
+  });
+  const subject = { kind: "agent", agent_id: "default" } as const;
+  const { settings } = await agent.runtime.settings({ subject });
+  expect(settings.map(({ id, value, inherited }) => ({ id, value, inherited }))).toEqual([
+    {
+      id: "model",
+      value: { kind: "one", id: `${agent.model.provider.id}/scripted` },
+      inherited: false,
+    },
+    { id: "busy", value: { kind: "one", id: "steer" }, inherited: true },
+    { id: "extensions", value: { kind: "many", ids: ["schedules"] }, inherited: true },
+  ]);
+  const drawn = settings.find(({ id }) => id === "extensions");
+  expect(drawn?.choices.map(({ id }) => id)).toEqual([
+    "schedules",
+    "subagents",
+    "extensions/notes.js",
+  ]);
+  await agent.set(subject, "extensions", ["schedules", "subagents"]);
+  await expect(
+    agent.runtime.settings({
+      subject,
+      change: {
+        setting: "extensions",
+        value: { kind: "many", ids: ["extensions/notes.js"] },
+        expected: drawn?.revision ?? "",
+      },
+    }),
+  ).rejects.toMatchObject({ status: 409 });
+  const { settings: after } = await agent.runtime.settings({ subject: channel("300") });
+  expect(after.map(({ id }) => id)).toEqual(["model"]);
+  const { settings: page } = await agent.runtime.settings({ subject });
+  expect(page.find(({ id }) => id === "extensions")).toMatchObject({
+    value: { kind: "many", ids: ["schedules", "subagents"] },
+    inherited: false,
+  });
 });

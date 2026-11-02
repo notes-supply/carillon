@@ -7,10 +7,10 @@ import {
   type SystemMessage,
 } from "@earendil-works/pi-ai";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { heldAnswer, startFixture, type Fixture } from "./fixture.ts";
+import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
 
 const fixtures: Fixture[] = [];
 afterEach(async () => {
@@ -509,4 +509,81 @@ it("replaces the user extensions a newer snapshot no longer lists", async () => 
   await agent.outcome("turn-1");
   await agent.runtime.turns.submit(agent.turn("turn-2", "again", { resource_root: after }));
   expect(await agent.outcome("turn-2")).toMatchObject({ output: "Second." });
+});
+
+const agentPage = { kind: "agent", agent_id: "default" } as const;
+const settingsFile = (agent: Fixture) => join(agent.resources ?? "", "settings.json");
+
+it("writes a busy mode into the agent's resources, keeping every other field", async () => {
+  const agent = await fixture({
+    builtIns: [echo],
+    resources: {
+      "settings.json": JSON.stringify({ extensions: { add: ["echo"] }, busy: "queue" }),
+    },
+  });
+  const lines = await agent.set(agentPage, "busy", "interrupt");
+  expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({
+    extensions: { add: ["echo"] },
+    busy: "interrupt",
+  });
+  expect(lines.find(({ id }) => id === "busy")).toMatchObject({
+    value: { kind: "one", id: "interrupt" },
+    inherited: false,
+  });
+  await agent.set(agentPage, "busy", null);
+  expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({
+    extensions: { add: ["echo"] },
+  });
+});
+
+it("refuses an extension the agent does not have, writing nothing", async () => {
+  const agent = await fixture({
+    builtIns: [echo],
+    resources: { "settings.json": '{"extensions":["echo"]}\n' },
+  });
+  await expect(agent.set(agentPage, "extensions", ["echo", "nope"])).rejects.toMatchObject({
+    status: 422,
+    message: expect.stringContaining("nope is not an extension") as unknown,
+  });
+  expect(await readFile(settingsFile(agent), "utf8")).toBe('{"extensions":["echo"]}\n');
+});
+
+it("carries a busy change in the next capture, while an admitted turn keeps its own", async () => {
+  const pause = pauseTool();
+  const agent = await fixture({
+    builtIns: [pause.extension],
+    defaults: ["pause"],
+    resources: { "settings.json": "{}\n" },
+    answers: [
+      fauxAssistantMessage(fauxToolCall("pause", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage("First answer."),
+      fauxAssistantMessage("Second answer."),
+    ],
+  });
+  const before = await agent.capture();
+  await agent.runtime.turns.submit(agent.turn("turn-1", "first", { resource_root: before }));
+  await pause.started;
+  await agent.set(agentPage, "busy", "queue");
+  const after = await agent.capture();
+  await agent.runtime.turns.submit(agent.turn("turn-2", "second", { resource_root: after }));
+  let activity = agent.runtime.activity("turn-2", "discord-private");
+  for (let attempt = 0; activity === undefined && attempt < 300; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    activity = agent.runtime.activity("turn-2", "discord-private");
+  }
+  expect(activity).toMatchObject({ phase: "queued" });
+  expect(await readFile(join(before, "settings.json"), "utf8")).toBe("{}\n");
+  pause.release();
+  expect(await agent.outcome("turn-1")).toMatchObject({ output: "First answer." });
+  expect(await agent.outcome("turn-2")).toMatchObject({ output: "Second answer." });
+});
+
+it("shows an agent without resources what it runs with, offering no change", async () => {
+  const agent = await fixture({ builtIns: [echo], defaults: ["echo"] });
+  const { settings } = await agent.runtime.settings({ subject: agentPage });
+  expect(settings.slice(1)).toMatchObject([
+    { id: "busy", choices: [], value: { kind: "one", id: "steer" }, inherited: true },
+    { id: "extensions", choices: [], value: { kind: "many", ids: ["echo"] }, inherited: true },
+  ]);
+  await expect(agent.set(agentPage, "busy", "queue")).rejects.toMatchObject({ status: 422 });
 });
