@@ -295,6 +295,8 @@ and the [module](#discord-module) apply live. The guild, bot user, bot token fil
 settings it was admitted with. While the provider runs, it is the only
 program that writes its settings file: setup, `carillon discord module` and
 route changes send their change to it, and it writes and serves the file.
+It writes the whole file in its own layout, every setting included, so
+comments in the file don't survive a change.
 It refuses a change while the file has edits nobody applied. A change to
 what only a restart applies is written and served at the next restart;
 until then, setup can change the file again, and route and module changes
