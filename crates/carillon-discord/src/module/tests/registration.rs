@@ -231,6 +231,36 @@ async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyho
 }
 
 #[tokio::test]
+async fn a_change_that_cannot_be_committed_leaves_discord_the_serving_commands()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let commands = release_commands(root, &["settings"], "release").await?;
+    let (address, server) = registration_server(Arc::new(AtomicU16::new(200))).await?;
+    let target = app(&address.to_string(), 1, 100);
+    commands.reconcile(&target).await?;
+    std::fs::write(root.join("custom.wasm"), variant(&["other"], "custom")?)?;
+
+    let refused = commands
+        .change(custom(root, "custom.wasm"), Some(&target), || {
+            anyhow::bail!("disk full")
+        })
+        .await;
+
+    assert!(
+        matches!(refused, Err(ChangeError::Commit(_))),
+        "{refused:?}"
+    );
+    assert_eq!(reply(&commands).await?, "release");
+    assert_eq!(
+        commands.status(Some(&target), Declared::Serving).registered,
+        Some(true)
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_record_that_cannot_be_cleared_stops_before_discord() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();

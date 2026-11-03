@@ -686,7 +686,11 @@ impl Module {
         let discord = self
             .reconcile_definitions(app, &candidate.definitions)
             .await?;
-        commit().map_err(ChangeError::Commit)?;
+        if let Err(error) = commit() {
+            self.reconcile_definitions(app, &serving.definitions)
+                .await?;
+            return Err(ChangeError::Commit(error));
+        }
         let serving = candidate.summary();
         let previous = self.activate(candidate).summary();
         Ok(Change {
