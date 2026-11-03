@@ -28,7 +28,7 @@ import {
 import { createCoreClient } from "@carillon/runtime/core";
 import type { RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Parse } from "typebox/value";
@@ -51,10 +51,19 @@ export interface Fixture {
   readonly models: MutableModels;
   readonly workspace: string;
   readonly componentDirectory: string;
+  /** The agents' own resource root, when they have one. */
+  readonly resources: string | undefined;
   turn(id: string, input: string, overrides?: Partial<TurnRequest>): TurnRequest;
-  set(subject: Subject, setting: string, choice: string | null): Promise<Setting[]>;
+  /** Sets one choice, a list of them, or resets with `null`, from a fresh read. */
+  set(
+    subject: Subject,
+    setting: string,
+    choice: string | readonly string[] | null,
+  ): Promise<Setting[]>;
   /** A resource snapshot holding these files. */
   snapshot(files: Record<string, string>): Promise<string>;
+  /** A resource snapshot of the agents' resource root as it is now, as core captures one. */
+  capture(): Promise<string>;
   /** The outcome core received for the turn, once it did. */
   outcome(turnId: string): Promise<TurnOutcome>;
   /** Hands the agent a message in a turn of its own, and returns its answer. */
@@ -64,12 +73,13 @@ export interface Fixture {
   /**
    * Closes the runtime and opens it again once `meanwhile` is done, over
    * the same storage or, `fresh`, new storage in its place, and with `mcp`
-   * as its MCP servers once given.
+   * as its MCP servers and `defaults` as its default extensions once given.
    */
   restart(changes?: {
     readonly meanwhile?: () => unknown;
     readonly fresh?: true;
     readonly mcp?: readonly McpServer[];
+    readonly defaults?: readonly string[];
   }): Promise<Fixture>;
   close(): Promise<void>;
 }
@@ -82,6 +92,8 @@ interface FixtureOptions {
   readonly agentModel?: string | null;
   readonly builtIns?: readonly Extension[];
   readonly defaults?: readonly string[];
+  /** The files of a resource root the agents share; none without them. */
+  readonly resources?: Record<string, string>;
   readonly answers?: FauxResponseStep[];
   readonly clock?: Clock;
   readonly mcp?: readonly McpServer[];
@@ -112,16 +124,28 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     return Promise.resolve(memory);
   }
   let snapshots = 0;
+  const resources = options.resources === undefined ? undefined : join(directory, "resources");
+  if (resources !== undefined) {
+    await mkdir(resources);
+    for (const [path, content] of Object.entries(options.resources ?? {})) {
+      await mkdir(dirname(join(resources, path)), { recursive: true });
+      await writeFile(join(resources, path), content);
+    }
+  }
 
-  async function open(mcp = options.mcp): Promise<Fixture> {
+  async function open(mcp = options.mcp, defaults = options.defaults ?? []): Promise<Fixture> {
     const runtime = await createPiRuntime({
-      agents: (options.agents ?? ["default"]).map((id) => ({ id, workspace })),
+      agents: (options.agents ?? ["default"]).map((id) => ({
+        id,
+        workspace,
+        ...(resources === undefined ? {} : { resources }),
+      })),
       componentDirectory,
       catalogue,
       core: createCoreClient({ url: core.url, providerId: "runtime-pi", token: "test-only" }),
       images,
       builtIns: options.builtIns ?? [],
-      defaults: options.defaults ?? [],
+      defaults,
       storage,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       ...(mcp === undefined ? {} : { mcp }),
@@ -133,6 +157,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       models,
       workspace,
       componentDirectory,
+      resources,
       turn: (id, input, overrides = {}) => ({
         correlation_id: id,
         interface_id: "discord-private",
@@ -148,7 +173,12 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         const { settings } = await runtime.settings({ subject });
         const line = settings.find(({ id }) => id === setting);
         if (line === undefined) throw new Error(`${subject.agent_id} shows no ${setting} line`);
-        const value = choice === null ? null : { kind: "one" as const, id: choice };
+        const value =
+          choice === null
+            ? null
+            : typeof choice === "string"
+              ? { kind: "one" as const, id: choice }
+              : { kind: "many" as const, ids: [...choice] };
         return (
           await runtime.settings({ subject, change: { setting, value, expected: line.revision } })
         ).settings;
@@ -161,6 +191,13 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
           await mkdir(dirname(join(root, path)), { recursive: true });
           await writeFile(join(root, path), content);
         }
+        return root;
+      },
+      async capture() {
+        if (resources === undefined) throw new Error("the agents have no resources");
+        snapshots += 1;
+        const root = join(directory, "snapshots", String(snapshots));
+        await cp(resources, root, { recursive: true });
         return root;
       },
       async outcome(turnId) {
@@ -181,14 +218,14 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       },
       openings: () =>
         core.received.filter((call) => call.path === "/v1/runtime/turns").map((call) => call.body),
-      async restart({ meanwhile, fresh, mcp: servers = mcp } = {}) {
+      async restart({ meanwhile, fresh, mcp: servers = mcp, defaults: next = defaults } = {}) {
         await runtime.close();
         await meanwhile?.();
         if (fresh === true) {
           memories.clear();
           await rm(join(componentDirectory, "agents"), { recursive: true, force: true });
         }
-        return open(servers);
+        return open(servers, next);
       },
       async close() {
         await runtime.close();

@@ -78,9 +78,9 @@ try {
   await testConfigurationSymlinkUpdates();
   await testProviderVersions();
   await startAll();
-  assert.equal(
+  assert.match(
     run("--home", installation, "settings", "--agent", "assistant", "model=local/echo"),
-    "assistant\nModel  Local echo",
+    /^assistant\nModel {7}Local echo\n/u,
   );
   for (const authorization of [
     null,

@@ -297,6 +297,69 @@ fn an_unknown_key_or_value_lists_what_the_line_accepts() {
     );
 }
 
+fn agent_page() -> Page {
+    let extensions = [
+        ("schedules", "schedules"),
+        ("subagents", "subagents"),
+        ("extensions/notes.js", "extensions/notes.js"),
+    ];
+    let mut page = Page {
+        title: "assistant".to_owned(),
+        subject: Subject::Agent {
+            agent_id: "assistant".to_owned(),
+        },
+        interface: Vec::new(),
+        runtime: RuntimePart::Settings(RuntimeSettings {
+            settings: vec![
+                setting("model", "Model", &MODELS, Some(MODELS[0].0), false),
+                setting("busy", "Busy", &[], Some("steer"), true),
+                Setting {
+                    value: Some(Value::Many {
+                        ids: vec!["schedules".to_owned(), "subagents".to_owned()],
+                    }),
+                    ..setting("extensions", "Extensions", &extensions, None, false)
+                },
+            ],
+        }),
+    };
+    renumber(&mut page, 0);
+    page
+}
+
+#[test]
+fn a_line_of_many_values_is_a_comma_list_both_ways() -> Result<()> {
+    let page = agent_page();
+    assert_eq!(
+        render(&page),
+        "assistant\n\
+         Model       GPT-6.1 Sol\n\
+         Busy        steer · default\n\
+         Extensions  schedules, subagents\n"
+    );
+    let ids = |words: &[&str]| {
+        Some(Value::Many {
+            ids: words.iter().map(|&id| id.to_owned()).collect(),
+        })
+    };
+    assert_eq!(
+        change(&page, &set("extensions", "schedules, extensions/notes.js"))?.value,
+        ids(&["schedules", "extensions/notes.js"])
+    );
+    assert_eq!(change(&page, &set("extensions", ""))?.value, ids(&[]));
+    assert!(
+        refusal(change(&page, &set("extensions", "schedules,nope")))
+            .starts_with("nope is not a choice of Extensions."),
+    );
+    assert_eq!(
+        change(&page, &set("busy", "queue"))?.value,
+        Some(Value::One {
+            id: "queue".to_owned()
+        }),
+        "a line without choices leaves the refusal to its owner"
+    );
+    Ok(())
+}
+
 struct Stub {
     token: String,
     home: Page,

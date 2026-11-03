@@ -421,7 +421,7 @@ done
 
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" settings --agent assistant model=local/echo |
-  grep -Fx 'Model  Local echo' >/dev/null
+  grep -Ex 'Model +Local echo' >/dev/null
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null

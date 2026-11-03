@@ -13,6 +13,9 @@ const INHERITED = [
 ];
 const BESIDE_THINKING = ["Agent     assistant", "Listens   always", "Replies   threads"];
 const CHANNEL = ["Agent    assistant", "Listens  always", "Replies  channel"];
+const MODEL = "Model       Local echo";
+const BUSY = "Busy        steer · default";
+const EXTENSIONS = "Extensions  coding, tool-search, discord, extensions/carillon-context.js";
 
 export async function testSettings(services) {
   const { interact, simulateRoute, settings } = services;
@@ -102,22 +105,20 @@ export async function testSettings(services) {
   const held = await services.holdTurn("settings-held");
   assert.equal(
     settings("--agent", "assistant", "model=local/reasoner"),
-    "assistant\nModel     Local reasoner\nThinking  Medium · default",
+    agentPage(["Model       Local reasoner", "Thinking    Medium · default"]),
   );
   const released = await held.release();
   assert.match(released.output, /model local\/echo\.$/u, "an admitted turn keeps its model");
   const next = await simulateRoute("settings-next", "305", null, "which model");
   assert.match(next.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
-  assert.equal(settings("--agent", "assistant", "reset", "model"), "assistant\nModel");
+  assert.equal(settings("--agent", "assistant", "reset", "model"), agentPage(["Model"]));
   const unset = await interact("305", null, "command", "settings");
   assert.equal(unset.content, card("305", [...CHANNEL, "Model"]));
   const refused = await simulateRoute("settings-unset", "305", null, "which model");
   assert.equal(refused.delivery.turn_state, "interrupted");
   assert.match(refused.delivery.content, /`carillon settings --agent assistant model=/u);
-  assert.equal(
-    settings("--agent", "assistant", "model=local/echo"),
-    "assistant\nModel  Local echo",
-  );
+  assert.equal(settings("--agent", "assistant", "model=local/echo"), agentPage([MODEL]));
+  await testAgentResources(services);
 
   const drawn = await interact("305", null, "command", "settings");
   const unreachable = "The runtime is not reachable right now.";
@@ -140,6 +141,39 @@ export async function testSettings(services) {
   }
 
   await testRefusals(services);
+}
+
+async function testAgentResources({ settings, configPath }) {
+  const file = join(dirname(configPath), "agents/default/settings.json");
+  const original = await readFile(file, "utf8");
+  try {
+    assert.equal(
+      settings("--agent", "assistant", "busy=queue", "extensions=coding,discord"),
+      agentPage([MODEL], ["Busy        queue", "Extensions  coding, discord"]),
+    );
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), {
+      extensions: ["coding", "discord"],
+      busy: "queue",
+    });
+    const before = await readFile(file);
+    assert.throws(
+      () => settings("--agent", "assistant", "extensions=coding,nope"),
+      /nope is not a choice of Extensions/u,
+    );
+    assert.deepEqual(await readFile(file), before, "a refused extension writes nothing");
+    assert.equal(
+      settings("--agent", "assistant", "reset", "busy", "reset", "extensions"),
+      agentPage([MODEL], [BUSY, "Extensions  coding, tool-search, discord · default"]),
+    );
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), {});
+  } finally {
+    await writeFile(file, original);
+  }
+  assert.equal(settings("--agent", "assistant"), agentPage([MODEL]));
+}
+
+function agentPage(models, resources = [BUSY, EXTENSIONS]) {
+  return ["assistant", ...models, ...resources].join("\n");
 }
 
 async function testRefusals(services) {
