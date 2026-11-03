@@ -225,8 +225,9 @@ to another agent, whose model lines the page then shows. Listens is
 change applies to the next message; a message already admitted keeps the
 place its answer goes. The Discord provider writes the change to its
 settings file and serves it. If the file has changes nobody applied, the
-route is not changed, and the page says to run `carillon discord settings
-apply` first. `/settings` cannot remove a route.
+route is not changed. The page says to run `carillon discord settings
+apply` first, or `carillon restart` when one of those changes needs a
+restart. `/settings` cannot remove a route.
 
 The terminal shows the same pages:
 
@@ -301,7 +302,9 @@ It refuses a change while the file has edits nobody applied. A change to
 what only a restart applies is written and served at the next restart;
 until then, setup can change the file again, and route and module changes
 are refused.
-While the provider is stopped, these commands change the file themselves.
+While the provider is stopped, setup and `carillon discord module` change
+the file themselves. A route change needs the running provider: while it
+is stopped, `carillon settings` fails and changes nothing.
 
 ### Conversations at once
 
