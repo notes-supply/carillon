@@ -329,8 +329,11 @@ async fn listens_and_replies_govern_the_next_message() -> anyhow::Result<()> {
         after.create_thread,
         "a thread route answers in a new thread"
     );
-    assert!(
-        !before.create_thread,
+    let earlier =
+        crate::conversations::prepare_deterministic_conversation(&state.participation, before)
+            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+    assert_eq!(
+        earlier.event.delivery_target_id, "300",
         "a message admitted before the change keeps its destination"
     );
     server.abort();
