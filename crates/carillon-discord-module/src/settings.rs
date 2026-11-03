@@ -9,12 +9,13 @@
 //! Custom IDs and select values carry fingerprints of setting and choice IDs,
 //! never the IDs themselves, so they stay within Discord's limits whatever
 //! the owner calls its settings. A click whose revision is no longer the
-//! line's sends nothing and redraws as changed meanwhile.
+//! line's sends nothing and redraws as changed meanwhile, and so does a pick
+//! on a card drawn for another subject, such as before a re-route.
 
 use std::fmt::Write as _;
 
 use carillon_protocol::settings::{
-    Change, Page, Revision, RuntimePart, Setting, Value as SettingValue,
+    Change, Page, Revision, RuntimePart, Setting, Subject, Value as SettingValue,
 };
 use serde_json::{Value, json};
 
@@ -62,6 +63,14 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
     };
     let drawn = match action {
         Action::Show(view) => host.settings().map(|(page, notice)| (page, notice, view)),
+        Action::Pick { view, subject } => host.settings().map(|(page, notice)| {
+            let notice = if drawn_for(&page) == subject {
+                notice
+            } else {
+                Some(Notice::Stale)
+            };
+            (page, notice, view)
+        }),
         Action::Change {
             line,
             expected,
@@ -80,6 +89,12 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
 
 enum Action {
     Show(View),
+    /// Show `view` of a card whose line picker was drawn for the subject
+    /// with this fingerprint.
+    Pick {
+        view: View,
+        subject: String,
+    },
     /// Set the line with this fingerprint to the choice with this
     /// fingerprint, or reset it without one, if it is still at `expected`.
     Change {
@@ -100,10 +115,11 @@ struct View {
     values_page: Option<usize>,
 }
 
-/// Custom IDs are `settings:pick:<line>:<page>` for the line picker,
-/// `settings:set:<line>:<revision>:<page>` for the picked line's choices and
-/// `settings:reset:<line>:<revision>`, where `<line>` is the picked line's
-/// fingerprint. A picker's [`PREVIOUS`] and [`NEXT`] values turn its page.
+/// Custom IDs are `settings:pick:<line>:<subject>:<page>` for the line
+/// picker, `settings:set:<line>:<revision>:<page>` for the picked line's
+/// choices and `settings:reset:<line>:<revision>`, where `<line>` is the
+/// picked line's fingerprint and `<subject>` the page's. A picker's
+/// [`PREVIOUS`] and [`NEXT`] values turn its page.
 fn parse(custom_id: &str, value: Option<&str>) -> Option<Action> {
     let mut parts = custom_id.split(':');
     if parts.next()? != COMMAND {
@@ -113,20 +129,22 @@ fn parse(custom_id: &str, value: Option<&str>) -> Option<Action> {
     let line = parts.next()?.to_owned();
     let action = match (control, value) {
         ("pick", Some(value)) => {
+            let subject = parts.next()?.to_owned();
             let page: usize = parts.next()?.parse().ok()?;
             let turned = |lines_page| View {
                 line: Some(line.clone()),
                 lines_page: Some(lines_page),
                 values_page: None,
             };
-            Action::Show(match value {
+            let view = match value {
                 PREVIOUS => turned(page.saturating_sub(1)),
                 NEXT => turned(page + 1),
                 picked => View {
                     line: Some(picked.to_owned()),
                     ..View::default()
                 },
-            })
+            };
+            Action::Pick { view, subject }
         }
         ("set", Some(value)) => {
             let expected = Revision::try_from(parts.next()?.to_owned()).ok()?;
@@ -227,6 +245,20 @@ fn render(page: &Page, notice: Option<&Notice>, view: &View, markers: &ActivityM
         content: content(page, &warnings),
         embeds: Vec::new(),
         components: controls(page, view, markers),
+    }
+}
+
+/// The fingerprint of what the page is about: a card's picks stay its own
+/// only while the page has the subject it was drawn for.
+fn drawn_for(page: &Page) -> String {
+    match &page.subject {
+        Some(Subject::Channel {
+            interface_id,
+            channel_id,
+            agent_id,
+        }) => fingerprint(&[interface_id.as_str(), channel_id, agent_id]),
+        Some(Subject::Agent { agent_id }) => fingerprint(&[agent_id]),
+        None => fingerprint(&[]),
     }
 }
 
@@ -357,7 +389,7 @@ fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
             .unwrap_or_else(|| held.map_or(0, |index| page_holding(index, picked.choices.len()))),
     );
     let mut rows = vec![select(
-        &format!("{COMMAND}:pick:{line}:{lines_page}"),
+        &format!("{COMMAND}:pick:{line}:{}:{lines_page}", drawn_for(page)),
         "Setting",
         lines.into_iter(),
     )];

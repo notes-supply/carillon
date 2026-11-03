@@ -598,6 +598,29 @@ fn a_stale_click_redraws_as_changed_meanwhile_and_sends_nothing() -> Result<(), 
 }
 
 #[test]
+fn a_pick_on_a_card_drawn_for_another_agent_redraws_as_changed_meanwhile() -> Result<(), String> {
+    let mut host = FakeHost::new(home()?);
+    let drawn = run(&mut host, &command())?;
+    host.page.subject = Some(Subject::Channel {
+        interface_id: "discord".to_owned(),
+        channel_id: "300".to_owned(),
+        agent_id: "coder".to_owned(),
+    });
+    let redrawn = pick(&mut host, &drawn, "Thinking")?;
+    assert!(
+        redrawn
+            .content
+            .starts_with("⚠ Changed meanwhile\n<#300>\n```\n"),
+        "{}",
+        redrawn.content
+    );
+    assert!(host.changes().is_empty(), "a pick sent a change");
+    let current = pick(&mut host, &redrawn, "Thinking")?;
+    assert!(!current.content.starts_with('⚠'), "{}", current.content);
+    Ok(())
+}
+
+#[test]
 fn an_unconfirmed_change_says_so_and_is_not_retried() -> Result<(), String> {
     let mut host = FakeHost::new(home()?);
     host.answer = Some(Notice::Unconfirmed);
