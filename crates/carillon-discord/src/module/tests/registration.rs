@@ -236,26 +236,42 @@ async fn a_change_that_cannot_be_committed_leaves_discord_the_serving_commands()
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     let commands = release_commands(root, &["settings"], "release").await?;
-    let (address, server) = registration_server(Arc::new(AtomicU16::new(200))).await?;
+    let status = Arc::new(AtomicU16::new(200));
+    let (address, server) = registration_server(status.clone()).await?;
     let target = app(&address.to_string(), 1, 100);
     commands.reconcile(&target).await?;
     std::fs::write(root.join("custom.wasm"), variant(&["other"], "custom")?)?;
+    let registered = || commands.status(Some(&target), Declared::Serving).registered;
 
     let refused = commands
         .change(custom(root, "custom.wasm"), Some(&target), || {
             anyhow::bail!("disk full")
         })
         .await;
-
     assert!(
         matches!(refused, Err(ChangeError::Commit(_))),
         "{refused:?}"
     );
     assert_eq!(reply(&commands).await?, "release");
-    assert_eq!(
-        commands.status(Some(&target), Declared::Serving).registered,
-        Some(true)
+    assert_eq!(registered(), Some(true));
+
+    // Discord fails the restore: the write is still what is refused, and
+    // the next start registers the serving commands.
+    let failing = status.clone();
+    let refused = commands
+        .change(custom(root, "custom.wasm"), Some(&target), move || {
+            failing.store(500, Ordering::SeqCst);
+            anyhow::bail!("disk full")
+        })
+        .await;
+    assert!(
+        matches!(&refused, Err(ChangeError::Commit(error)) if error.to_string() == "disk full"),
+        "{refused:?}"
     );
+    assert_eq!(registered(), Some(false));
+    status.store(200, Ordering::SeqCst);
+    assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
+    assert_eq!(registered(), Some(true));
     server.abort();
     Ok(())
 }

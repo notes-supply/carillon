@@ -686,8 +686,7 @@ impl Module {
             .reconcile_definitions(app, &candidate.definitions)
             .await?;
         if let Err(error) = commit() {
-            self.reconcile_definitions(app, &serving.definitions)
-                .await?;
+            self.restore(app, &serving.definitions).await;
             return Err(ChangeError::Commit(error));
         }
         let serving = candidate.summary();
@@ -992,6 +991,7 @@ fn command(definition: &Value) -> Result<Command> {
 pub(crate) mod answer;
 #[cfg(test)]
 mod measurement;
+mod restore;
 mod smoke;
 
 #[cfg(test)]
