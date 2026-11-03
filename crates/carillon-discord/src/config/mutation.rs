@@ -116,7 +116,6 @@ impl FileChange {
     }
 }
 
-/// Whether both name the same routes, in any order.
 fn same_routes(left: &[DiscordRoute], right: &[DiscordRoute]) -> bool {
     fn sorted(routes: &[DiscordRoute]) -> Vec<&DiscordRoute> {
         let mut sorted: Vec<&DiscordRoute> = routes.iter().collect();
@@ -179,7 +178,6 @@ pub(crate) struct Written<T> {
 /// Why a change left the file and what serves as they were.
 #[derive(Debug)]
 pub(crate) enum Refused {
-    /// The file does not read as valid settings.
     Unreadable(anyhow::Error),
     /// The file differs from what serves: edits nobody applied.
     Unapplied(Difference),
@@ -319,8 +317,6 @@ impl Writer {
                 restart: difference.restart,
             }));
         }
-        // The module's file decides as well as its declaration, so a module
-        // rebuilt at the same path serves too.
         let module = match module {
             Some(module) if difference.restart.is_empty() => {
                 let commit = Commit {
@@ -334,6 +330,8 @@ impl Writer {
                         ChangeError::Commit(error) => Refused::Write(error),
                         failure => Refused::Module(failure),
                     })?;
+                // The module's file decides as well as its declaration, so
+                // a module rebuilt at the same path serves too.
                 if module.serving != module.previous
                     && !difference.live.iter().any(|field| field == "module")
                 {

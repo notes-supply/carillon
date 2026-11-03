@@ -50,7 +50,6 @@ impl Routing {
         }
     }
 
-    /// How `discord` routes `channel_id`.
     pub(crate) fn of(discord: &DiscordConfig, channel_id: &str) -> Self {
         discord
             .routes
@@ -250,7 +249,6 @@ async fn runtime(
         })
 }
 
-/// The page, with the runtime's part when the channel is routed.
 fn composed(
     core: &CoreClient,
     writer: &Writer,

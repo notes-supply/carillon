@@ -705,7 +705,6 @@ async fn a_valid_change_is_written_privately_and_served() -> anyhow::Result<()> 
         .provider_config_path("discord-private")?;
     assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
 
-    // A change the settings refuse writes nothing.
     let before = settings_file(&writer)?;
     let refused = writer
         .change(|discord| {

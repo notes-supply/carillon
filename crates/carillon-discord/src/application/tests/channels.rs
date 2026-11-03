@@ -249,8 +249,6 @@ async fn a_connected_provider_titles_pages_with_the_channels_name() -> anyhow::R
     Ok(())
 }
 
-/// A route line changes through the provider's one writer: written, served
-/// and answered with the page, while a hand edit nobody applied blocks it.
 #[tokio::test]
 async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edited()
 -> anyhow::Result<()> {
@@ -335,8 +333,6 @@ async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edit
     Ok(())
 }
 
-/// Setup's admission reaches the provider's one writer, which serves it,
-/// and refuses routes other than the first.
 #[tokio::test]
 async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -565,8 +561,6 @@ async fn a_hand_edit_over_a_pending_restart_names_the_restart() -> anyhow::Resul
     Ok(())
 }
 
-/// A module change whose settings cannot be written leaves the module that
-/// served before.
 #[tokio::test]
 async fn a_module_change_that_cannot_be_written_serves_nothing_new() -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;

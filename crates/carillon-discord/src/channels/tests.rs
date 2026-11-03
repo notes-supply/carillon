@@ -90,7 +90,6 @@ fn file(writer: &Writer) -> anyhow::Result<DiscordConfig> {
     DiscordConfig::read(writer.installation(), "discord-private")
 }
 
-/// The installation's channel `300`, as the settings serving route it.
 fn served(writer: &Writer) -> Routing {
     Routing::of(&writer.current(), "300")
 }

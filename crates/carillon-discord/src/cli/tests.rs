@@ -89,7 +89,6 @@ async fn a_settings_apply_is_sent_once_and_only_an_answer_confirms_it() -> Resul
         operator.apply_settings().await?,
         super::Applying::Unreachable
     ));
-    // A refusal is the provider's answer, in its words.
     let refusal: &[u8] =
         b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
     let (operator, server) = applying_provider(Some(refusal)).await?;
@@ -557,8 +556,6 @@ async fn a_module_declaration_changes_only_outside_other_maintenance() -> Result
     Ok(())
 }
 
-/// After the provider wrote a change only a restart applies, the saved file
-/// waits for `carillon restart` only when this release would serve it.
 #[tokio::test]
 async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Result<()> {
     use crate::module::tests::{definition, describing, module, replying};
@@ -782,7 +779,6 @@ fn configure_is_no_longer_a_command() -> Result<()> {
     .err()
     .context("configure parsed")?;
     assert_eq!(refused.kind(), ErrorKind::InvalidSubcommand);
-    // Unattended setup takes its flags, all of them or none.
     Cli::try_parse_from([
         "carillon-discord",
         "setup",
@@ -802,8 +798,6 @@ fn configure_is_no_longer_a_command() -> Result<()> {
     Ok(())
 }
 
-/// The running provider applies a change; the CLI writes the file itself
-/// only once nothing answers at the provider's address.
 #[tokio::test]
 async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_changes_here()
 -> Result<()> {

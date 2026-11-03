@@ -70,8 +70,6 @@ fn shared_settings_wire_fixtures() -> Result<()> {
     Ok(())
 }
 
-/// A page names its subject, or `null` for an unrouted channel, which has no
-/// agent; a page that leaves the subject out is refused.
 #[test]
 fn a_page_names_its_subject_or_null_and_never_omits_it() -> Result<()> {
     let agent_line = serde_json::json!({

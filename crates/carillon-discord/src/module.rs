@@ -193,7 +193,6 @@ impl InteractionCalls {
                 }
             }
             Ok(HostRequest::Submit { text, intent }) => {
-                // Only a routed channel has a conversation.
                 match (&self.submissions, &self.audience_id, self.routing.route()) {
                     (Some(submissions), Some(audience_id), Some(route)) => {
                         match submit(
