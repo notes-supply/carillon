@@ -504,6 +504,67 @@ async fn route_and_module_changes_wait_for_a_pending_restart() -> anyhow::Result
     Ok(())
 }
 
+/// A hand edit over a pending restart is refused naming the restart, which
+/// serves both; once the file is back to what serves, changes serve again.
+#[tokio::test]
+async fn a_hand_edit_over_a_pending_restart_names_the_restart() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    restart_pending(&state).await?;
+    let mut edited = DiscordConfig::read(&state.installation, "discord")?;
+    edited.typing = !edited.typing;
+    edited.write(&state.installation, "discord")?;
+    let path = state.installation.provider_config_path("discord")?;
+    let before = std::fs::read(&path)?;
+    let listens = |state: &DiscordState| {
+        let state = state.clone();
+        async move {
+            let (_, page) = operator(
+                &state,
+                Method::GET,
+                "/v1/channels/300/settings",
+                "operator",
+                None,
+            )
+            .await?;
+            let revision = page["interface"][1]["revision"].clone();
+            operator(
+                &state,
+                Method::PUT,
+                "/v1/channels/300/settings",
+                "operator",
+                Some(json!({"setting": "listens", "value": {"kind": "one", "id": "mention"}, "expected": revision})),
+            )
+            .await
+        }
+    };
+
+    let (status, body) = listens(&state).await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("(typing, guild_id)")
+                && error.contains("`carillon restart`")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+
+    state
+        .settings
+        .current()
+        .write(&state.installation, "discord")?;
+    let (status, body) = listens(&state).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.settings.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
+    server.abort();
+    Ok(())
+}
+
 /// A module change whose settings cannot be written leaves the module that
 /// served before.
 #[tokio::test]

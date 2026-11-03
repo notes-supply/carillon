@@ -299,9 +299,12 @@ impl Writer {
         let serving = self.settings.current();
         let file = DiscordConfig::load(&self.installation, &self.provider_id)
             .map_err(Refused::Unreadable)?;
-        let unapplied = Difference::between(written.as_deref().unwrap_or(&serving), &file);
-        if !unapplied.live.is_empty() || !unapplied.restart.is_empty() {
-            return Err(Refused::Unapplied(unapplied));
+        let differs = |from: &DiscordConfig| {
+            let difference = Difference::between(from, &file);
+            !difference.live.is_empty() || !difference.restart.is_empty()
+        };
+        if differs(&serving) && written.as_deref().is_none_or(differs) {
+            return Err(Refused::Unapplied(Difference::between(&serving, &file)));
         }
         let mut next = file.clone();
         let value = edit(&mut next)?;
