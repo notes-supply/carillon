@@ -15,7 +15,12 @@ use tokio::{
 };
 
 use super::{DiscordState, authorize_operator};
-use crate::{InterfaceError, channels, client::RUNTIME_CALL_TIMEOUT, config::DiscordRoute};
+use crate::{
+    InterfaceError,
+    channels::{self, Routing},
+    client::RUNTIME_CALL_TIMEOUT,
+    config::DiscordRoute,
+};
 
 /// How long a title waits for Discord to name the channel.
 const NAMING_LIMIT: Duration = Duration::from_secs(2);
@@ -47,7 +52,8 @@ pub(super) async fn show(
 }
 
 /// Applies the change and answers the page it leaves, or the refusal with
-/// its status: 422 for a read-only line, and the runtime's own otherwise.
+/// its status: the settings file's for a route line, and the runtime's own
+/// otherwise.
 pub(super) async fn change(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -63,7 +69,15 @@ pub(super) async fn change(
     let title = title(&state, &route).await;
     let until = Instant::now() + RUNTIME_CALL_TIMEOUT;
     Ok(Json(
-        channels::change(&state.core, &route, title, change, until).await?,
+        channels::change(
+            &state.core,
+            &state.writer(),
+            &Routing::Routed(route),
+            title,
+            change,
+            until,
+        )
+        .await?,
     ))
 }
 
@@ -85,7 +99,8 @@ async fn page(state: &DiscordState, route: &DiscordRoute) -> Page {
     let title = title(state, route).await;
     channels::page(
         &state.core,
-        route,
+        &state.writer(),
+        &Routing::Routed(route.clone()),
         title,
         Instant::now() + RUNTIME_CALL_TIMEOUT,
     )

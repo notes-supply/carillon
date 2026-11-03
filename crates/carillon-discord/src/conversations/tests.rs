@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DiscordRoute;
 use anyhow::anyhow;
 
 #[test]
@@ -157,9 +158,25 @@ fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
     assert_eq!(in_thread_event.delivery_target_id, "400");
     assert_eq!(in_thread_event.channel_id, "300");
 
+    // A channel no route names is admitted unrouted, outside any
+    // conversation; a thread in it is not.
+    let unrouted = admit_interaction(&thread, interaction("301", None))
+        .map_err(|failure| anyhow!(failure.message))?;
+    assert!(matches!(&unrouted.routing, Routing::Unrouted(id) if id == "301"));
+    assert_eq!(unrouted.audience_id, None);
+    assert!(!unrouted.interaction.conversation);
+    assert_eq!(unrouted.origin.route_channel_id, "301");
+
     for refused in [
-        interaction("301", None),
         interaction("400", Some("301")),
+        InteractionSource {
+            user_id: "999".to_owned(),
+            ..interaction("301", None)
+        },
+        InteractionSource {
+            guild_id: Some("101".to_owned()),
+            ..interaction("301", None)
+        },
         InteractionSource {
             user_id: "999".to_owned(),
             ..interaction("300", None)

@@ -251,3 +251,91 @@ async fn a_replayed_interaction_discord_does_not_acknowledge_again_runs_nothing(
     core_server.abort();
     Ok(())
 }
+
+/// A route change governs the messages admitted after it, and a message
+/// admitted before it keeps the destination it was admitted with.
+#[tokio::test]
+async fn listens_and_replies_govern_the_next_message() -> anyhow::Result<()> {
+    use super::channels::{operator, settings_core};
+    use axum::http::Method;
+
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let message = |content: &str| IncomingMessage {
+        event_id: "500".to_owned(),
+        guild_id: Some("100".to_owned()),
+        user_id: "200".to_owned(),
+        channel_id: "300".to_owned(),
+        parent_channel_id: None,
+        content: content.to_owned(),
+        attachments: Vec::new(),
+    };
+    let admitted = |content: &str| {
+        crate::conversations::admit_message(
+            &state.settings.current(),
+            &state.participation,
+            message(content),
+            Value::Null,
+        )
+        .map_err(|failure| anyhow::anyhow!(failure.message))
+    };
+    let set = |setting: &'static str, value: &'static str| {
+        let state = state.clone();
+        async move {
+            let (_, page) = operator(
+                &state,
+                Method::GET,
+                "/v1/channels/300/settings",
+                "operator",
+                None,
+            )
+            .await?;
+            let revision = page["interface"]
+                .as_array()
+                .and_then(|lines| lines.iter().find(|line| line["id"] == setting))
+                .and_then(|line| line["revision"].as_str())
+                .context("no route line")?
+                .to_owned();
+            let (status, body) = operator(
+                &state,
+                Method::PUT,
+                "/v1/channels/300/settings",
+                "operator",
+                Some(json!({"setting": setting, "value": {"kind": "one", "id": value}, "expected": revision})),
+            )
+            .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{body}");
+            anyhow::Ok(())
+        }
+    };
+
+    let before = admitted("hello")?.context("an always route ignored a message")?;
+    assert!(
+        !before.create_thread,
+        "a channel route answers in the channel"
+    );
+
+    set("listens", "mention").await?;
+    assert!(
+        admitted("hello")?.is_none(),
+        "an unmentioned message started a turn"
+    );
+    assert!(admitted("<@201> hello")?.is_some(), "a mention was ignored");
+
+    set("replies", "thread").await?;
+    let after = admitted("<@201> hello")?.context("a mention was ignored")?;
+    assert!(
+        after.create_thread,
+        "a thread route answers in a new thread"
+    );
+    let earlier =
+        crate::conversations::prepare_deterministic_conversation(&state.participation, before)
+            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+    assert_eq!(
+        earlier.event.delivery_target_id, "300",
+        "a message admitted before the change keeps its destination"
+    );
+    server.abort();
+    Ok(())
+}

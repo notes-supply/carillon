@@ -231,6 +231,52 @@ async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyho
 }
 
 #[tokio::test]
+async fn a_change_that_cannot_be_committed_leaves_discord_the_serving_commands()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let commands = release_commands(root, &["settings"], "release").await?;
+    let status = Arc::new(AtomicU16::new(200));
+    let (address, server) = registration_server(status.clone()).await?;
+    let target = app(&address.to_string(), 1, 100);
+    commands.reconcile(&target).await?;
+    std::fs::write(root.join("custom.wasm"), variant(&["other"], "custom")?)?;
+    let registered = || commands.status(Some(&target), Declared::Serving).registered;
+
+    let refused = commands
+        .change(custom(root, "custom.wasm"), Some(&target), || {
+            anyhow::bail!("disk full")
+        })
+        .await;
+    assert!(
+        matches!(refused, Err(ChangeError::Commit(_))),
+        "{refused:?}"
+    );
+    assert_eq!(reply(&commands).await?, "release");
+    assert_eq!(registered(), Some(true));
+
+    // Discord fails the restore: the write is still what is refused, and
+    // the next start registers the serving commands.
+    let failing = status.clone();
+    let refused = commands
+        .change(custom(root, "custom.wasm"), Some(&target), move || {
+            failing.store(500, Ordering::SeqCst);
+            anyhow::bail!("disk full")
+        })
+        .await;
+    assert!(
+        matches!(&refused, Err(ChangeError::Commit(error)) if error.to_string() == "disk full"),
+        "{refused:?}"
+    );
+    assert_eq!(registered(), Some(false));
+    status.store(200, Ordering::SeqCst);
+    assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
+    assert_eq!(registered(), Some(true));
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_record_that_cannot_be_cleared_stops_before_discord() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
@@ -335,8 +381,13 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let core = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let calls =
-        super::super::InteractionCalls::new(crate::client::test_client(core)?, route(), None);
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let calls = super::super::InteractionCalls::new(
+        crate::client::test_client(core)?,
+        writer,
+        crate::channels::Routing::Routed(route()),
+        None,
+    );
     let under_way = tokio::spawn({
         let commands = commands.clone();
         async move { commands.invoke(calls, interaction()).await }

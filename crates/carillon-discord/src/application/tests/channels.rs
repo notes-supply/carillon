@@ -2,7 +2,9 @@ use super::*;
 
 use carillon_protocol::settings::{Page, SettingsRequest};
 
-async fn settings_core(
+use crate::config::DiscordRoute;
+
+pub(super) async fn settings_core(
     refusal: Option<(StatusCode, &'static str)>,
 ) -> anyhow::Result<(
     CoreClient,
@@ -41,7 +43,7 @@ async fn settings_core(
     Ok((core_client(format!("http://{address}"))?, requests, server))
 }
 
-async fn operator(
+pub(super) async fn operator(
     state: &DiscordState,
     method: Method,
     uri: &str,
@@ -164,8 +166,11 @@ async fn an_operator_change_answers_the_page_or_the_refusal_as_it_came() -> anyh
         Some(route_line),
     )
     .await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body, json!({"error": "Listens is read-only."}));
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        json!({"error": "Changed meanwhile; nothing was changed"})
+    );
     let (status, body) = operator(
         &state,
         Method::PUT,
@@ -241,5 +246,352 @@ async fn a_connected_provider_titles_pages_with_the_channels_name() -> anyhow::R
     assert_eq!(body["title"], "#home");
     discord_server.abort();
     core_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edited()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, requests, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let path = state.installation.provider_config_path("discord")?;
+    let listens = |page: &Value| -> anyhow::Result<(Value, String)> {
+        let line = page["interface"]
+            .as_array()
+            .and_then(|lines| lines.iter().find(|line| line["id"] == "listens"))
+            .context("no listens line")?;
+        Ok((
+            line["value"]["id"].clone(),
+            line["revision"].as_str().unwrap_or_default().to_owned(),
+        ))
+    };
+    let (_, page) = operator(
+        &state,
+        Method::GET,
+        "/v1/channels/300/settings",
+        "operator",
+        None,
+    )
+    .await?;
+    let (_, revision) = listens(&page)?;
+
+    // A hand edit nobody applied: the change is refused, the file as it was.
+    let mut edited = DiscordConfig::read(&state.installation, "discord")?;
+    edited.typing = !edited.typing;
+    edited.write(&state.installation, "discord")?;
+    let before = std::fs::read(&path)?;
+    let change = json!({"setting": "listens", "value": {"kind": "one", "id": "mention"}, "expected": revision});
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/300/settings",
+        "operator",
+        Some(change.clone()),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("(typing)")
+                && error.contains("`carillon discord settings apply`")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+
+    // Once applied, the same change is written and served.
+    let (status, _) = operator(&state, Method::POST, "/v1/settings", "operator", None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, page) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/300/settings",
+        "operator",
+        Some(change),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(listens(&page)?.0, json!("mention"));
+    assert_eq!(
+        DiscordConfig::read(&state.installation, "discord")?.routes[0].activation,
+        DiscordActivation::Mention
+    );
+    assert_eq!(
+        state.settings.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
+    assert!(
+        requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .iter()
+            .all(|request| request.change.is_none()),
+        "a route change asks the runtime nothing but a read"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_provider_applies_setup_and_refuses_other_first_routes() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let path = state.installation.provider_config_path("discord")?;
+    let routes = state.settings.current().routes.clone();
+    let admission = |first: &[DiscordRoute]| {
+        json!({
+            "change": "admission",
+            "guild_id": "100",
+            "bot_user_id": "201",
+            "allowed_user_ids": ["200", "250"],
+            "routes": {"routes": "first", "list": first},
+        })
+    };
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(admission(&routes)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["changed"], json!(["allowed_user_ids"]));
+    assert_eq!(state.settings.current().allowed_user_ids, ["200", "250"]);
+
+    let before = std::fs::read(&path)?;
+    let mut other = routes.clone();
+    other[0].activation = DiscordActivation::Mention;
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(admission(&other)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("`carillon settings <channel>")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(state.settings.current().routes, routes);
+    let (status, _) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "discord",
+        Some(admission(&routes)),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    server.abort();
+    Ok(())
+}
+
+/// Setup writes a new guild, which waits for a restart.
+async fn restart_pending(state: &DiscordState) -> anyhow::Result<()> {
+    let serving = state.settings.current();
+    let (status, body) = operator(
+        state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(json!({
+            "change": "admission",
+            "guild_id": "110",
+            "bot_user_id": serving.bot_user_id,
+            "allowed_user_ids": serving.allowed_user_ids,
+            "routes": {"routes": "first", "list": serving.routes},
+        })),
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::OK, "{body}");
+    assert_eq!(body["restart"], json!(["guild_id"]));
+    Ok(())
+}
+
+/// While a restart is pending, a route or module change would be written
+/// and not served, so it is refused with the file as it was.
+#[tokio::test]
+async fn route_and_module_changes_wait_for_a_pending_restart() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    restart_pending(&state).await?;
+    let path = state.installation.provider_config_path("discord")?;
+    let before = std::fs::read(&path)?;
+    let (_, page) = operator(
+        &state,
+        Method::GET,
+        "/v1/channels/300/settings",
+        "operator",
+        None,
+    )
+    .await?;
+    let revision = page["interface"][1]["revision"].clone();
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/300/settings",
+        "operator",
+        Some(json!({"setting": "listens", "value": {"kind": "one", "id": "mention"}, "expected": revision})),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(
+            |error| error.contains("(guild_id)") && error.contains("`carillon restart`")
+        ),
+        "{body}"
+    );
+    let custom = directory.path().join("custom.wasm");
+    write_module(
+        &custom,
+        &describing(&[definition("custom")]),
+        &replying("custom", &[]),
+    )?;
+    let _held =
+        carillon_installation::maintenance::MaintenanceLock::acquire(&state.installation.root)?;
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(json!({"change": "module", "enabled": true, "path": custom})),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(
+        state.settings.current().routes[0].activation,
+        DiscordActivation::Always
+    );
+
+    // Setup builds on the file it wrote: returning the guild serves the
+    // people it names.
+    let serving = state.settings.current();
+    let (status, body) = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(json!({
+            "change": "admission",
+            "guild_id": serving.guild_id,
+            "bot_user_id": serving.bot_user_id,
+            "allowed_user_ids": ["200", "250"],
+            "routes": {"routes": "first", "list": serving.routes},
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["changed"], json!(["allowed_user_ids"]));
+    assert_eq!(
+        DiscordConfig::read(&state.installation, "discord")?.guild_id,
+        "100"
+    );
+    server.abort();
+    Ok(())
+}
+
+/// A hand edit over a pending restart is refused naming the restart, which
+/// serves both; once the file is back to what serves, changes serve again.
+#[tokio::test]
+async fn a_hand_edit_over_a_pending_restart_names_the_restart() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    restart_pending(&state).await?;
+    let mut edited = DiscordConfig::read(&state.installation, "discord")?;
+    edited.typing = !edited.typing;
+    edited.write(&state.installation, "discord")?;
+    let path = state.installation.provider_config_path("discord")?;
+    let before = std::fs::read(&path)?;
+    let listens = |state: &DiscordState| {
+        let state = state.clone();
+        async move {
+            let (_, page) = operator(
+                &state,
+                Method::GET,
+                "/v1/channels/300/settings",
+                "operator",
+                None,
+            )
+            .await?;
+            let revision = page["interface"][1]["revision"].clone();
+            operator(
+                &state,
+                Method::PUT,
+                "/v1/channels/300/settings",
+                "operator",
+                Some(json!({"setting": "listens", "value": {"kind": "one", "id": "mention"}, "expected": revision})),
+            )
+            .await
+        }
+    };
+
+    let (status, body) = listens(&state).await?;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("(typing, guild_id)")
+                && error.contains("`carillon restart`")),
+        "{body}"
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+
+    state
+        .settings
+        .current()
+        .write(&state.installation, "discord")?;
+    let (status, body) = listens(&state).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.settings.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_module_change_that_cannot_be_written_serves_nothing_new() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let custom = directory.path().join("custom.wasm");
+    write_module(
+        &custom,
+        &describing(&[definition("custom")]),
+        &replying("custom", &[]),
+    )?;
+    let path = state.installation.provider_config_path("discord")?;
+    let before = std::fs::read(&path)?;
+    let parent = path.parent().context("no providers directory")?;
+    let mode = std::fs::metadata(parent)?.permissions();
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))?;
+    let answered = operator(
+        &state,
+        Method::PUT,
+        "/v1/settings",
+        "operator",
+        Some(json!({"change": "module", "enabled": true, "path": custom})),
+    )
+    .await;
+    std::fs::set_permissions(parent, mode)?;
+    let (status, body) = answered?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(state.module.serving().source, Source::Bundled);
+    assert_eq!(std::fs::read(&path)?, before);
+    server.abort();
     Ok(())
 }

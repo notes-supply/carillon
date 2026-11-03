@@ -158,11 +158,11 @@ fn route() -> Result<Vec<Setting>, String> {
 fn page(runtime: RuntimePart) -> Result<Page, String> {
     Ok(Page {
         title: "<#300>".to_owned(),
-        subject: Subject::Channel {
+        subject: Some(Subject::Channel {
             interface_id: "discord".to_owned(),
             channel_id: "300".to_owned(),
             agent_id: "assistant".to_owned(),
-        },
+        }),
         interface: route()?,
         runtime,
     })
@@ -598,6 +598,29 @@ fn a_stale_click_redraws_as_changed_meanwhile_and_sends_nothing() -> Result<(), 
 }
 
 #[test]
+fn a_pick_on_a_card_drawn_for_another_agent_redraws_as_changed_meanwhile() -> Result<(), String> {
+    let mut host = FakeHost::new(home()?);
+    let drawn = run(&mut host, &command())?;
+    host.page.subject = Some(Subject::Channel {
+        interface_id: "discord".to_owned(),
+        channel_id: "300".to_owned(),
+        agent_id: "coder".to_owned(),
+    });
+    let redrawn = pick(&mut host, &drawn, "Thinking")?;
+    assert!(
+        redrawn
+            .content
+            .starts_with("⚠ Changed meanwhile\n<#300>\n```\n"),
+        "{}",
+        redrawn.content
+    );
+    assert!(host.changes().is_empty(), "a pick sent a change");
+    let current = pick(&mut host, &redrawn, "Thinking")?;
+    assert!(!current.content.starts_with('⚠'), "{}", current.content);
+    Ok(())
+}
+
+#[test]
 fn an_unconfirmed_change_says_so_and_is_not_retried() -> Result<(), String> {
     let mut host = FakeHost::new(home()?);
     host.answer = Some(Notice::Unconfirmed);
@@ -729,5 +752,63 @@ fn a_click_while_the_runtime_is_out_shows_only_its_reason() -> Result<(), String
         redrawn.content
     );
     assert!(host.changes().is_empty(), "nothing is sent");
+    Ok(())
+}
+
+#[test]
+fn route_lines_with_choices_are_picked_and_changed_like_any_line() -> Result<(), String> {
+    let mut page = home()?;
+    let listens = page
+        .interface
+        .iter_mut()
+        .find(|line| line.id == "listens")
+        .ok_or("no listens line")?;
+    listens.choices = vec![named("mention", "mentions"), named("always", "always")];
+    let mut host = FakeHost::new(page);
+    let drawn = run(&mut host, &command())?;
+    let lines = control(&drawn, "pick")?;
+    assert_eq!(labels(&drawn, &lines), ["Listens", "Model", "Thinking"]);
+    assert_eq!(
+        selected(&drawn, &lines),
+        ["Model"],
+        "the runtime's first line is picked"
+    );
+    let listens = pick(&mut host, &drawn, "Listens")?;
+    assert!(
+        !offers(&listens, "reset"),
+        "a route line has nothing to return to"
+    );
+    choose(&mut host, &listens, "mentions")?;
+    let changes = host.changes();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].setting, "listens");
+    assert_eq!(changes[0].value, Some(one("mention")));
+    Ok(())
+}
+
+#[test]
+fn an_unrouted_page_offers_its_agent_line_alone() -> Result<(), String> {
+    let page = Page {
+        title: "<#301>".to_owned(),
+        subject: None,
+        interface: vec![line(
+            "agent",
+            "Agent",
+            vec![named("assistant", "assistant"), named("t3", "t3")],
+            None,
+            false,
+            9,
+        )?],
+        runtime: RuntimePart::Settings(RuntimeSettings::default()),
+    };
+    let mut host = FakeHost::new(page);
+    let drawn = run(&mut host, &command())?;
+    assert_eq!(drawn.content, "<#301>\n```\nAgent\n```");
+    assert_eq!(labels(&drawn, &control(&drawn, "pick")?), ["Agent"]);
+    assert_eq!(
+        labels(&drawn, &control(&drawn, "set")?),
+        ["assistant", "t3"]
+    );
+    assert!(!offers(&drawn, "reset"));
     Ok(())
 }

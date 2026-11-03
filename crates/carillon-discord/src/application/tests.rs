@@ -355,7 +355,7 @@ async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> a
             .await
             .err()
             .context("undecodable create should fail")?;
-        assert!(!super::discord_failure_is_terminal(&failure));
+        assert!(!crate::error::discord_failure_is_terminal(&failure));
         assert_eq!(state.participation.created_thread("200"), None);
         let recovered =
             super::prepare_conversation(&state.participation, &http, plan.clone()).await?;
@@ -429,7 +429,7 @@ async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<
         .err()
         .context("lookup should fail")?;
         assert_eq!(
-            super::discord_failure_is_terminal(&failure),
+            crate::error::discord_failure_is_terminal(&failure),
             status == StatusCode::FORBIDDEN
         );
         assert_eq!(creates.load(Ordering::SeqCst), 0);
@@ -560,12 +560,9 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
 
     let (status, _) = interact(&state, None, &interaction("300", None)).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, body) = interact(&state, Some("token"), &interaction("301", None)).await?;
+    let (status, body) = interact(&state, Some("token"), &interaction("400", Some("301"))).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        body["error"],
-        "channel is not configured as a Discord route"
-    );
+    assert_eq!(body["error"], "thread is not in a Discord route's channel");
 
     // Replies Discord would refuse are reported instead of sent.
     let option =

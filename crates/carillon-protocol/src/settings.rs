@@ -169,7 +169,9 @@ pub struct RuntimeSettings {
 pub struct Page {
     /// What the interface calls the subject.
     pub title: String,
-    pub subject: Subject,
+    /// `null` for a channel no agent serves yet, which has no runtime lines.
+    #[serde(deserialize_with = "required_nullable")]
+    pub subject: Option<Subject>,
     pub interface: Vec<Setting>,
     pub runtime: RuntimePart,
 }

@@ -68,7 +68,12 @@ pub(super) async fn run_interaction(
     admitted: AdmittedInteraction,
     settings: Arc<DiscordConfig>,
 ) -> Result<Reply> {
-    let mut calls = InteractionCalls::new(state.core.clone(), admitted.route, admitted.audience_id);
+    let mut calls = InteractionCalls::new(
+        state.core.clone(),
+        state.writer(),
+        admitted.routing,
+        admitted.audience_id,
+    );
     // Without a Discord connection there is nowhere to anchor a submission.
     if let Some(connection) = &state.connection {
         calls = calls.with_submissions(Submissions {

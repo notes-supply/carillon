@@ -46,9 +46,9 @@ use twilight_model::{
 };
 
 use crate::{
-    channels,
+    channels::{self, Routing},
     client::{CoreClient, RUNTIME_LATE},
-    config::{DiscordConfig, DiscordRoute},
+    config::{DiscordConfig, Writer},
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},
     inbound::lanes::Lanes,
@@ -75,14 +75,15 @@ pub(crate) struct DiscordApp {
 }
 
 /// The native operations one interaction may perform: the settings page of
-/// the routed channel it happened in and changes to it; inside a
-/// conversation, the runtime's commands there; and, with a Discord
-/// connection, submitting text to the conversation as the person who
-/// invoked it.
+/// the channel it happened in and changes to it; in a routed channel, the
+/// runtime's commands there; and, inside a conversation with a Discord
+/// connection, submitting text to it as the person who invoked it.
 pub(crate) struct InteractionCalls {
     core: CoreClient,
-    /// The route that admitted the interaction, also in one of its threads.
-    route: DiscordRoute,
+    writer: Writer,
+    /// How the settings admitting the interaction route its channel, also in
+    /// one of its threads.
+    routing: Routing,
     /// The conversation it happened in, when the agent participates there.
     audience_id: Option<String>,
     submissions: Option<Submissions>,
@@ -103,12 +104,14 @@ pub(crate) struct Submissions {
 impl InteractionCalls {
     pub(crate) const fn new(
         core: CoreClient,
-        route: DiscordRoute,
+        writer: Writer,
+        routing: Routing,
         audience_id: Option<String>,
     ) -> Self {
         Self {
             core,
-            route,
+            writer,
+            routing,
             audience_id,
             submissions: None,
         }
@@ -155,21 +158,33 @@ async fn within<T>(
 impl InteractionCalls {
     /// Answers one of the interaction's native requests by `until`.
     async fn answer(&self, request: &[u8], until: Instant) -> HostReply {
-        let title = format!("<#{}>", self.route.channel_id);
+        let title = format!("<#{}>", self.routing.channel_id());
         match serde_json::from_slice::<HostRequest>(request) {
             Ok(HostRequest::Settings) => HostReply::Page {
-                page: channels::page(&self.core, &self.route, title, until).await,
+                page: channels::page(&self.core, &self.writer, &self.routing, title, until).await,
                 notice: None,
             },
             Ok(HostRequest::ChangeSetting(change)) => {
-                let (page, notice) =
-                    channels::settled(&self.core, &self.route, title, change, until).await;
+                let (page, notice) = channels::settled(
+                    &self.core,
+                    &self.writer,
+                    &self.routing,
+                    title,
+                    change,
+                    until,
+                )
+                .await;
                 HostReply::Page { page, notice }
             }
             Ok(HostRequest::Commands) => {
+                let Some(route) = self.routing.route() else {
+                    return HostReply::Error(
+                        "This channel has no agent yet; /settings can choose one.".to_owned(),
+                    );
+                };
                 let query = ConversationQuery {
-                    agent_id: self.route.agent.clone(),
-                    channel_id: self.route.channel_id.clone(),
+                    agent_id: route.agent.clone(),
+                    channel_id: route.channel_id.clone(),
                     audience_id: self.audience_id.clone(),
                 };
                 match within(until, self.core.commands(&query)).await {
@@ -178,12 +193,12 @@ impl InteractionCalls {
                 }
             }
             Ok(HostRequest::Submit { text, intent }) => {
-                match (&self.submissions, &self.audience_id) {
-                    (Some(submissions), Some(audience_id)) => {
+                match (&self.submissions, &self.audience_id, self.routing.route()) {
+                    (Some(submissions), Some(audience_id), Some(route)) => {
                         match submit(
                             &self.core,
                             submissions,
-                            &self.route.agent,
+                            &route.agent,
                             audience_id,
                             &text,
                             intent,
@@ -195,12 +210,12 @@ impl InteractionCalls {
                             Err(message) => HostReply::Error(message),
                         }
                     }
-                    (_, None) => {
-                        HostReply::Error("There is no conversation here to send it to.".to_owned())
-                    }
-                    (None, Some(_)) => HostReply::Error(
+                    (None, Some(_), Some(_)) => HostReply::Error(
                         "Sending to the conversation needs the Discord connection.".to_owned(),
                     ),
+                    _ => {
+                        HostReply::Error("There is no conversation here to send it to.".to_owned())
+                    }
                 }
             }
             Err(error) => HostReply::Error(format!("invalid host request: {error}")),
@@ -543,6 +558,8 @@ pub(crate) enum ChangeError {
     Record(PublishError),
     /// Discord refused the definitions or did not confirm them.
     Register(anyhow::Error),
+    /// What the change was committed with failed, so nothing activated.
+    Commit(anyhow::Error),
 }
 
 impl fmt::Display for ChangeError {
@@ -561,6 +578,7 @@ impl fmt::Display for ChangeError {
             Self::Register(error) => {
                 write!(formatter, "register Discord guild commands: {error:#}")
             }
+            Self::Commit(error) => write!(formatter, "write the settings file: {error:#}"),
         }
     }
 }
@@ -622,19 +640,21 @@ impl Module {
 
     /// Serves the module `source` names unless it already serves, byte for
     /// byte: validate, register when the record does not show its
-    /// definitions, then activate. A module that already serves has its
-    /// registration repeated when the record does not show it. Only a change
-    /// takes the maintenance lock.
-    pub(crate) async fn apply(
+    /// definitions, `commit`, then activate. A module that already serves
+    /// has its registration repeated when the record does not show it. Only
+    /// a change takes the maintenance lock, which `commit` runs under.
+    pub(crate) async fn change(
         &self,
         source: Source,
         app: Option<&DiscordApp>,
+        commit: impl FnOnce() -> Result<()>,
     ) -> Result<Change, ChangeError> {
         let _changes = self.changes.lock().await;
         let bytes = self.files.read(&source).map_err(ChangeError::Unusable)?;
         let serving = self.current();
         let unchanged = serving.source == source && serving.digest == digest(&bytes);
         if unchanged && app.is_none_or(|app| self.registered(app, &serving.definitions)) {
+            commit().map_err(ChangeError::Commit)?;
             return Ok(Change {
                 serving: serving.summary(),
                 previous: serving.summary(),
@@ -652,6 +672,7 @@ impl Module {
             let discord = self
                 .reconcile_definitions(app, &serving.definitions)
                 .await?;
+            commit().map_err(ChangeError::Commit)?;
             return Ok(Change {
                 serving: serving.summary(),
                 previous: serving.summary(),
@@ -664,6 +685,10 @@ impl Module {
         let discord = self
             .reconcile_definitions(app, &candidate.definitions)
             .await?;
+        if let Err(error) = commit() {
+            self.restore(app, &serving.definitions).await;
+            return Err(ChangeError::Commit(error));
+        }
         let serving = candidate.summary();
         let previous = self.activate(candidate).summary();
         Ok(Change {
@@ -966,6 +991,7 @@ fn command(definition: &Value) -> Result<Command> {
 pub(crate) mod answer;
 #[cfg(test)]
 mod measurement;
+mod restore;
 mod smoke;
 
 #[cfg(test)]

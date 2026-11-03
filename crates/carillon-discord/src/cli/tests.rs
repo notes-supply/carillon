@@ -89,33 +89,13 @@ async fn a_settings_apply_is_sent_once_and_only_an_answer_confirms_it() -> Resul
         operator.apply_settings().await?,
         super::Applying::Unreachable
     ));
-    // A refusal is the provider's answer. A conflict it does not mark as
-    // one a restart resolves, as when maintenance is busy, is not one.
     let refusal: &[u8] =
         b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
     let (operator, server) = applying_provider(Some(refusal)).await?;
     let super::Applying::Refused(refused) = operator.apply_settings().await? else {
         anyhow::bail!("a refusal was not reported as one");
     };
-    assert_eq!(refused.reason, "guild changed");
-    assert!(refused.restart.is_empty());
-    assert_eq!(server.await?, 1);
-    let body = json!({
-        "error": "only a restart applies (guild_id)",
-        "serving": {"source": "bundled", "commands": [], "digest": "d"},
-        "restart": ["guild_id"],
-    })
-    .to_string();
-    let answer = format!(
-        "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let (operator, server) =
-        answering_after(Some(answer.into_bytes()), std::time::Duration::ZERO).await?;
-    let super::Applying::Refused(refused) = operator.apply_settings().await? else {
-        anyhow::bail!("a refusal was not reported as one");
-    };
-    assert_eq!(refused.restart, ["guild_id"]);
+    assert_eq!(refused, "guild changed");
     assert_eq!(server.await?, 1);
     // A request the provider received without answering may have been
     // applied: it is reported as unconfirmed and not sent again.
@@ -576,9 +556,6 @@ async fn a_module_declaration_changes_only_outside_other_maintenance() -> Result
     Ok(())
 }
 
-/// After setup or `configure`, a refusal of what only a restart applies
-/// waits for `carillon restart` only when this release would serve the
-/// saved file; any other refusal is an error, the file saved.
 #[tokio::test]
 async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Result<()> {
     use crate::module::tests::{definition, describing, module, replying};
@@ -589,17 +566,16 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
         "discord-private",
         46_720,
     )?;
-    let refused = |restart: &[&str]| super::Refused {
-        reason: "the settings file changes what only a restart applies".to_owned(),
-        restart: restart.iter().map(|field| (*field).to_owned()).collect(),
-    };
-    let outcome = |restart: &[&str]| {
+    let outcome = || {
         let config = config.clone();
-        let refused = refused(restart);
         async move {
-            super::saved_but_refused(&config, "discord-private", refused)
-                .await
-                .map_err(|error| format!("{error:#}"))
+            super::writing::written_for_restart(
+                &config,
+                "discord-private",
+                &["guild_id".to_owned()],
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))
         }
     };
     let declare = |path: Option<&Path>| -> Result<()> {
@@ -609,16 +585,16 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
         discord.write(&config, "discord-private")
     };
 
-    // Fields only a restart applies, with the bundled module or a usable
-    // custom one: the saved file waits for `carillon restart`.
-    outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+    // With the bundled module or a usable custom one, the saved file waits
+    // for `carillon restart`.
+    outcome().await.map_err(anyhow::Error::msg)?;
     let custom = directory.path().join("custom.wasm");
     fs::write(
         &custom,
         module(&describing(&[definition("model")]), &replying("ok", &[]))?,
     )?;
     declare(Some(&custom))?;
-    outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+    outcome().await.map_err(anyhow::Error::msg)?;
     // The provider did not try the module: one rebuilt for another
     // contract, or deleted, would keep a restart from starting it.
     for broken in [Some(&b"\0asm old contract"[..]), None] {
@@ -626,7 +602,7 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
             Some(bytes) => fs::write(&custom, bytes)?,
             None => fs::remove_file(&custom)?,
         }
-        let refusal = outcome(&["guild_id"])
+        let refusal = outcome()
             .await
             .err()
             .context("a restart was advised for an unusable module")?;
@@ -638,17 +614,6 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
             "{refusal}"
         );
     }
-    // Any other refusal leaves the file saved but not served.
-    declare(None)?;
-    let refusal = outcome(&[])
-        .await
-        .err()
-        .context("a refusal was reported as served")?;
-    assert_eq!(
-        refusal,
-        "the settings file is saved, but discord-private did not serve it: the settings \
-         file changes what only a restart applies; it keeps serving the settings it has"
-    );
     Ok(())
 }
 
@@ -794,5 +759,209 @@ fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
             .ends_with("discord-a, slack, discord-b"),
         "{unconfigured}"
     );
+    Ok(())
+}
+
+#[test]
+fn configure_is_no_longer_a_command() -> Result<()> {
+    let refused = Cli::try_parse_from([
+        "carillon-discord",
+        "configure",
+        "--guild-id",
+        "100",
+        "--bot-user-id",
+        "201",
+        "--user-id",
+        "200",
+        "--route",
+        "300:always:thread:default",
+    ])
+    .err()
+    .context("configure parsed")?;
+    assert_eq!(refused.kind(), ErrorKind::InvalidSubcommand);
+    Cli::try_parse_from([
+        "carillon-discord",
+        "setup",
+        "--guild-id",
+        "100",
+        "--bot-user-id",
+        "201",
+        "--user-id",
+        "200",
+        "--route",
+        "300:always:thread:default",
+    ])?;
+    let partial = Cli::try_parse_from(["carillon-discord", "setup", "--guild-id", "100"])
+        .err()
+        .context("setup took a guild alone")?;
+    assert_eq!(partial.kind(), ErrorKind::MissingRequiredArgument);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_changes_here()
+-> Result<()> {
+    use crate::{
+        config::{Applied, FileChange},
+        module::{Change, ModuleSummary, Registration, Source},
+    };
+
+    let directory = tempfile::tempdir()?;
+    let mut config =
+        crate::config::tests::installation(directory.path(), "discord-private", 46_800)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+    let address = listener.local_addr()?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing provider")?
+        .url = format!("http://{address}");
+    let bundled = ModuleSummary {
+        source: Source::Bundled,
+        commands: vec!["settings".to_owned()],
+        digest: "d".to_owned(),
+    };
+    let answer = serde_json::to_vec(&Applied {
+        changed: Vec::new(),
+        module: Change {
+            serving: bundled.clone(),
+            previous: bundled,
+            discord: Registration::Unchanged,
+        },
+        restart: Vec::new(),
+    })?;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let kept = received.clone();
+    let provider = Router::new().route(
+        "/v1/settings",
+        axum::routing::put(move |headers: HeaderMap, body: Bytes| {
+            let kept = kept.clone();
+            let answer = answer.clone();
+            async move {
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push((headers, body));
+                }
+                ([("content-type", "application/json")], answer).into_response()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, provider).await });
+    let settings = config.provider_config_path("discord-private")?;
+    let before = fs::read(&settings)?;
+    let change = FileChange::Module {
+        enabled: false,
+        path: Some("modules/custom.wasm".into()),
+    };
+    super::deliver(&config, "discord-private", change.clone()).await?;
+    assert_eq!(
+        fs::read(&settings)?,
+        before,
+        "the CLI wrote a running provider's file"
+    );
+    let sent = received
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["authorization"], "Bearer operator");
+    assert_eq!(serde_json::from_slice::<FileChange>(&sent[0].1)?, change);
+
+    server.abort();
+    let _ = server.await;
+    super::deliver(&config, "discord-private", change).await?;
+    let declared = crate::config::DiscordConfig::read(&config, "discord-private")?.module;
+    assert_eq!(declared.path, Some("modules/custom.wasm".into()));
+    Ok(())
+}
+
+/// Disable and a bare enable send only `enabled`, so the module another
+/// change declares between their read and their apply is kept.
+#[tokio::test]
+async fn module_changes_keep_a_module_declared_meanwhile() -> Result<()> {
+    use super::{ModuleAction, manage_module};
+    use crate::{
+        config::{Applied, DiscordConfig, FileChange},
+        module::{
+            Change, ModuleSummary, Registration, Source,
+            tests::{definition, describing, replying, write_module},
+        },
+    };
+
+    let directory = tempfile::tempdir()?;
+    let mut config =
+        crate::config::tests::installation(directory.path(), "discord-private", 46_900)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing provider")?
+        .url = format!("http://{}", listener.local_addr()?);
+    let first = directory.path().join("first.wasm");
+    write_module(
+        &first,
+        &describing(&[definition("first")]),
+        &replying("first", &[]),
+    )?;
+    let mut file = DiscordConfig::read(&config, "discord-private")?;
+    file.module.enabled = true;
+    file.module.path = Some(first);
+    file.write(&config, "discord-private")?;
+    let bundled = ModuleSummary {
+        source: Source::Bundled,
+        commands: vec!["settings".to_owned()],
+        digest: "d".to_owned(),
+    };
+    let answer = serde_json::to_vec(&Applied {
+        changed: Vec::new(),
+        module: Change {
+            serving: bundled.clone(),
+            previous: bundled,
+            discord: Registration::Unchanged,
+        },
+        restart: Vec::new(),
+    })?;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let kept = received.clone();
+    let provider = Router::new().route(
+        "/v1/settings",
+        axum::routing::put(move |body: Bytes| {
+            let kept = kept.clone();
+            let answer = answer.clone();
+            async move {
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push(body);
+                }
+                ([("content-type", "application/json")], answer).into_response()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, provider).await });
+    for action in [ModuleAction::Disable, ModuleAction::Enable { file: None }] {
+        manage_module(|| Ok(config.clone()), None, Some(action)).await?;
+    }
+    let sent = received
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(sent.len(), 2);
+    for body in sent {
+        let change: FileChange = serde_json::from_slice(&body)?;
+        let mut meanwhile = DiscordConfig::read(&config, "discord-private")?;
+        meanwhile.module.path = Some("other.wasm".into());
+        change
+            .clone()
+            .apply(&mut meanwhile)
+            .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+        assert_eq!(
+            meanwhile.module.path,
+            Some("other.wasm".into()),
+            "{change:?} replaced the module declared meanwhile"
+        );
+    }
+    server.abort();
     Ok(())
 }

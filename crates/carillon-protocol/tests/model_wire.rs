@@ -71,6 +71,38 @@ fn shared_settings_wire_fixtures() -> Result<()> {
 }
 
 #[test]
+fn a_page_names_its_subject_or_null_and_never_omits_it() -> Result<()> {
+    let agent_line = serde_json::json!({
+        "id": "agent", "name": "Agent",
+        "choices": [{"id": "assistant", "name": "assistant"}],
+        "value": null, "inherited": false, "revision": "a".repeat(64),
+    });
+    let unrouted = serde_json::json!({
+        "title": "<#301>",
+        "subject": null,
+        "interface": [agent_line],
+        "runtime": {"state": "settings", "settings": []},
+    });
+    round_trip::<Page>(&unrouted)?;
+    let routed = serde_json::json!({
+        "title": "<#300>",
+        "subject": {"kind": "channel", "interface_id": "discord", "channel_id": "300", "agent_id": "assistant"},
+        "interface": [],
+        "runtime": {"state": "unavailable", "reason": "The runtime is not reachable right now."},
+    });
+    round_trip::<Page>(&routed)?;
+    let mut omitted = unrouted;
+    omitted
+        .as_object_mut()
+        .context("an object")?
+        .remove("subject");
+    refused::<Page>(&omitted)?;
+    let mut agentless = routed;
+    agentless["subject"]["agent_id"] = Value::String(String::new());
+    refused::<Page>(&agentless)
+}
+
+#[test]
 fn a_turn_without_its_channel_is_refused() -> Result<()> {
     let event = serde_json::json!({
         "event_id": "500",

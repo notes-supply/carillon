@@ -215,7 +215,7 @@ fi
 if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
   # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
   # shellcheck disable=SC2086
-  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord configure --provider discord-private \
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord setup --provider discord-private \
     --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES >/dev/null
 fi
 

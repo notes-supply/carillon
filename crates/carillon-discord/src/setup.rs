@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
     config::{AgentConfig, LoadedConfig, ProviderRole, read_token_file},
     filesystem::publish,
@@ -32,8 +32,13 @@ use twilight_model::{
 use twilight_util::permission_calculator::PermissionCalculator;
 use uuid::Uuid;
 
-use crate::config::{
-    BOT_TOKEN_FILE, DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, admitted,
+use crate::{
+    InterfaceError,
+    cli::deliver,
+    config::{
+        BOT_TOKEN_FILE, DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute,
+        FileChange, Routes, file_or_defaults,
+    },
 };
 
 /// Why the bot asks for a permission in its channels.
@@ -164,42 +169,44 @@ pub(crate) async fn setup(
     let people = people(prompt, &http, guild_id, &guild, &application, &bot).await?;
 
     let users: Vec<String> = people.iter().map(|(id, _)| id.clone()).collect();
-    // Only the writes hold the maintenance lock, never the questions. The
-    // registry and the settings file are read again under it, so what is
-    // written follows what changed meanwhile, or is refused.
+    // The registry and the settings file are read again once every answer is
+    // in, so what is written follows what changed meanwhile, or is refused.
     let unchanged = "the Discord settings and the bot token they name were not changed";
-    let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root).context(unchanged)?;
     let loaded = &loaded.reload().context(unchanged)?;
     enabled(loaded, provider).context(unchanged)?;
-    let mut settings = admitted(
-        loaded,
-        provider,
-        &guild_id.to_string(),
-        &bot.id.to_string(),
-        &users,
-        &routes,
-    )
-    .context(unchanged)?;
+    let mut settings = file_or_defaults(loaded, provider).context(unchanged)?;
     // Another token gets a file of its own, so the file the settings in
     // place name is never rewritten.
-    let changed = read_token_file(&settings.bot_token_path(&loaded.root))
+    let token_file = read_token_file(&settings.bot_token_path(&loaded.root))
         .ok()
-        .is_none_or(|named| named != token);
-    if changed {
-        settings.bot_token_file = Some(PathBuf::from(format!(
-            "credentials/discord-bot.{}.token",
-            Uuid::now_v7().simple()
-        )));
-    }
+        .is_none_or(|named| named != token)
+        .then(|| {
+            PathBuf::from(format!(
+                "credentials/discord-bot.{}.token",
+                Uuid::now_v7().simple()
+            ))
+        });
+    let change = FileChange::Admission {
+        guild_id: guild_id.to_string(),
+        bot_user_id: bot.id.to_string(),
+        bot_token_file: token_file.clone(),
+        allowed_user_ids: users,
+        routes: Routes::Answered(routes.clone()),
+    };
+    change
+        .clone()
+        .apply(&mut settings)
+        .map_err(|refused| anyhow!(InterfaceError::from(refused).message))
+        .context(unchanged)?;
     settings.validate(loaded, provider).context(unchanged)?;
-    if changed {
+    if token_file.is_some() {
+        let _maintenance = MaintenanceLock::acquire_unless_held(&loaded.root).context(unchanged)?;
         let path = settings.bot_token_path(&loaded.root);
         publish(&path, format!("{token}\n").as_bytes(), 0o600)
             .with_context(|| format!("write {}", path.display()))
             .context(unchanged)?;
     }
-    settings.write(loaded, provider)?;
-    drop(maintenance);
+    deliver(loaded, provider, change).await?;
     let answered = channels
         .iter()
         .zip(&routes)
@@ -223,6 +230,39 @@ pub(crate) async fn setup(
             .join(", "),
         answered.join(", "),
     ))?;
+    Ok(())
+}
+
+/// Unattended setup: the guild, bot, people and routes given on the command
+/// line, asking nothing and keeping the bot token file the settings name and
+/// everything tuned. The routes are only the first ones: once the settings
+/// route channels, other routes are refused and the file is unchanged.
+///
+/// # Errors
+///
+/// Returns why the settings are unchanged.
+pub(crate) async fn unattended(
+    loaded: &LoadedConfig,
+    provider: &str,
+    guild_id: String,
+    bot_user_id: String,
+    allowed_user_ids: Vec<String>,
+    routes: Vec<DiscordRoute>,
+) -> Result<()> {
+    enabled(loaded, provider)?;
+    deliver(
+        loaded,
+        provider,
+        FileChange::Admission {
+            guild_id,
+            bot_user_id,
+            bot_token_file: None,
+            allowed_user_ids,
+            routes: Routes::First(routes),
+        },
+    )
+    .await?;
+    println!("{}", loaded.provider_config_path(provider)?.display());
     Ok(())
 }
 

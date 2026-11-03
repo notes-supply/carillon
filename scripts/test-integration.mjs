@@ -451,7 +451,7 @@ function configureDiscord(home, guildId, botUserId, userId, ...routes) {
     "--home",
     home,
     "discord",
-    "configure",
+    "setup",
     "--provider",
     "discord-private",
     "--guild-id",
@@ -568,9 +568,9 @@ async function testModuleOperations() {
   assert.equal(
     operate("enable", custom),
     [
-      `${settingsFile} now declares the custom Discord module ${custom}: ${commands}.`,
       "discord-private now serves its settings file: module.",
       `It serves the custom Discord module ${custom}: ${commands}.`,
+      `${settingsFile} now declares the custom Discord module ${custom}: ${commands}.`,
     ].join("\n"),
   );
   assert.equal(
@@ -617,9 +617,9 @@ async function testModuleOperations() {
   assert.equal(
     operate("disable"),
     [
-      `${settingsFile} now declares the bundled Discord module.`,
       "discord-private now serves its settings file: module.",
       `It serves the bundled Discord module: ${commands}.`,
+      `${settingsFile} now declares the bundled Discord module.`,
     ].join("\n"),
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
@@ -1363,14 +1363,14 @@ async function testConfigurationSymlinkUpdates() {
       await stop("core");
     }
     // Provider settings live in the provider's own file; the registry is untouched.
-    configureDiscord(link, "101", "202", "203", "304:mention:thread:assistant");
+    configureDiscord(link, "101", "202", "203", ...DISCORD_ROUTES);
     await assertUpdated();
     assert.equal(await readFile(configPath(), "utf8"), original);
     const configured = await readFile(providerConfigPath(), "utf8");
     assert.match(configured, /^guild_id = "101"$/mu);
     assert.equal((await stat(providerConfigPath())).mode & 0o777, 0o600);
     assert.throws(
-      () => configureDiscord(link, "invalid", "202", "203", "304:mention:thread:assistant"),
+      () => configureDiscord(link, "invalid", "202", "203", ...DISCORD_ROUTES),
       /snowflake/u,
     );
     await assertUpdated();
@@ -1382,7 +1382,7 @@ async function testConfigurationSymlinkUpdates() {
     );
     assert.equal(denied.status, 403);
     const ignored = await requestSimulation(
-      event("symlink-new-route", "101", "203", "304", null, "no mention"),
+      event("symlink-new-route", "101", "203", "301", null, "no mention"),
     );
     assert.equal(ignored.status, 204);
     assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);

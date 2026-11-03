@@ -205,7 +205,7 @@ refuse locked-enable flock "$INSTALLATION/.maintenance.lock" carillon discord mo
 grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-enable.log" >/dev/null
 cmp "$SETTINGS" "$TEST_ROOT/settings-before"
 carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /settings, /command.' >/dev/null
-carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
+carillon discord setup --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel:assistant >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
 # A restart drains core first, then stops the target with its services.

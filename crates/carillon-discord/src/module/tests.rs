@@ -302,6 +302,17 @@ async fn counting_registration_server(
     ))
 }
 
+impl Module {
+    /// Serves `source` with nothing to commit beside it.
+    pub(crate) async fn apply(
+        &self,
+        source: Source,
+        app: Option<&DiscordApp>,
+    ) -> Result<Change, ChangeError> {
+        self.change(source, app, || Ok(())).await
+    }
+}
+
 pub(crate) fn route() -> crate::config::DiscordRoute {
     crate::config::DiscordRoute {
         channel_id: "300".to_owned(),
@@ -311,11 +322,16 @@ pub(crate) fn route() -> crate::config::DiscordRoute {
     }
 }
 
-fn calls() -> anyhow::Result<super::InteractionCalls> {
-    Ok(super::InteractionCalls::new(
-        crate::client::test_client("http://127.0.0.1:1".to_owned())?,
-        route(),
-        None,
+fn calls() -> anyhow::Result<(tempfile::TempDir, super::InteractionCalls)> {
+    let (installation, writer) = crate::config::tests::writer()?;
+    Ok((
+        installation,
+        super::InteractionCalls::new(
+            crate::client::test_client("http://127.0.0.1:1".to_owned())?,
+            writer,
+            crate::channels::Routing::Routed(route()),
+            None,
+        ),
     ))
 }
 
@@ -331,7 +347,8 @@ fn interaction() -> Interaction {
 }
 
 async fn reply(commands: &Module) -> anyhow::Result<String> {
-    Ok(commands.invoke(calls()?, interaction()).await?.content)
+    let (_installation, calls) = calls()?;
+    Ok(commands.invoke(calls, interaction()).await?.content)
 }
 
 /// A Discord API that reports each registration on `sent` and confirms it
@@ -421,20 +438,25 @@ async fn submitting(
     let reactions =
         crate::delivery::Reactions::new(http.clone(), crate::config::Settings::new(config));
     let core = crate::client::test_client(format!("http://{address}"))?;
-    let calls =
-        super::InteractionCalls::new(core.clone(), route(), Some("discord-100-400".to_owned()))
-            .with_submissions(super::Submissions {
-                lanes: serving_lanes(core, http.clone())?,
-                http,
-                reactions: reactions.clone(),
-                origin: crate::conversations::InteractionOrigin {
-                    guild_id: "100".to_owned(),
-                    user_id: "200".to_owned(),
-                    channel_id: "400".to_owned(),
-                    route_channel_id: "300".to_owned(),
-                },
-                settings: reactions.settings().current(),
-            });
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let calls = super::InteractionCalls::new(
+        core.clone(),
+        writer,
+        crate::channels::Routing::Routed(route()),
+        Some("discord-100-400".to_owned()),
+    )
+    .with_submissions(super::Submissions {
+        lanes: serving_lanes(core, http.clone())?,
+        http,
+        reactions: reactions.clone(),
+        origin: crate::conversations::InteractionOrigin {
+            guild_id: "100".to_owned(),
+            user_id: "200".to_owned(),
+            channel_id: "400".to_owned(),
+            route_channel_id: "300".to_owned(),
+        },
+        settings: reactions.settings().current(),
+    });
     Ok((calls, reactions, server))
 }
 
@@ -583,3 +605,4 @@ mod admission;
 mod registration;
 mod settings;
 mod submissions;
+mod unrouted;
