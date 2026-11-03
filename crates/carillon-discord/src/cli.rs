@@ -22,7 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     application::{ServeOptions, serve},
-    config::{self, Applied, DiscordConfig, DiscordRoute, FileChange, FileState, ModuleSetting},
+    config::{self, Applied, DiscordConfig, DiscordRoute, FileChange, FileState},
     module::{self, Declared, Refusal, Registration, Source, Status},
     operations::{
         self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
@@ -467,8 +467,9 @@ async fn manage_module(
             return Ok(());
         }
         Some(ModuleAction::Enable { file }) => {
-            let declared = match file {
-                Some(file) => std::path::absolute(file)?,
+            let given = file.map(std::path::absolute).transpose()?;
+            let declared = match &given {
+                Some(file) => file.clone(),
                 None => DiscordConfig::read(&loaded, &provider)?
                     .module
                     .path
@@ -481,21 +482,21 @@ async fn manage_module(
                 declared.display(),
                 list(&commands)
             );
-            let module = ModuleSetting {
+            let module = FileChange::Module {
                 enabled: true,
-                path: Some(declared),
+                path: given,
             };
             (module, named)
         }
         Some(ModuleAction::Disable) => {
-            let module = ModuleSetting {
+            let module = FileChange::Module {
                 enabled: false,
-                ..DiscordConfig::read(&loaded, &provider)?.module
+                path: None,
             };
             (module, "the bundled Discord module".to_owned())
         }
     };
-    deliver(&loaded, &provider, FileChange::Module(module)).await?;
+    deliver(&loaded, &provider, module).await?;
     println!("{} now declares {declares}.", settings.display());
     Ok(())
 }

@@ -15,7 +15,7 @@ use carillon_installation::{config::LoadedConfig, maintenance::MaintenanceLock};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
-use super::{Difference, DiscordConfig, DiscordRoute, ModuleSetting, Settings};
+use super::{Difference, DiscordConfig, DiscordRoute, Settings};
 use crate::{
     InterfaceError,
     error::discord_failure_is_terminal,
@@ -37,7 +37,13 @@ pub(crate) enum FileChange {
         allowed_user_ids: Vec<String>,
         routes: Routes,
     },
-    Module(ModuleSetting),
+    /// Whether the custom module serves, and its file when given; without
+    /// one the file keeps the path it declares.
+    Module {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<PathBuf>,
+    },
 }
 
 /// The routes an admission change brings.
@@ -91,7 +97,12 @@ impl FileChange {
                 discord.allowed_user_ids = allowed_user_ids;
                 discord.routes = routes;
             }
-            Self::Module(module) => discord.module = module,
+            Self::Module { enabled, path } => {
+                discord.module.enabled = enabled;
+                if path.is_some() {
+                    discord.module.path = path;
+                }
+            }
         }
         Ok(())
     }

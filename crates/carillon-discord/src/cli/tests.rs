@@ -802,7 +802,7 @@ fn configure_is_no_longer_a_command() -> Result<()> {
 async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_changes_here()
 -> Result<()> {
     use crate::{
-        config::{Applied, FileChange, ModuleSetting},
+        config::{Applied, FileChange},
         module::{Change, ModuleSummary, Registration, Source},
     };
 
@@ -850,10 +850,10 @@ async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_chan
     let server = tokio::spawn(async move { axum::serve(listener, provider).await });
     let settings = config.provider_config_path("discord-private")?;
     let before = fs::read(&settings)?;
-    let change = FileChange::Module(ModuleSetting {
+    let change = FileChange::Module {
         enabled: false,
         path: Some("modules/custom.wasm".into()),
-    });
+    };
     super::deliver(&config, "discord-private", change.clone()).await?;
     assert_eq!(
         fs::read(&settings)?,
@@ -873,5 +873,95 @@ async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_chan
     super::deliver(&config, "discord-private", change).await?;
     let declared = crate::config::DiscordConfig::read(&config, "discord-private")?.module;
     assert_eq!(declared.path, Some("modules/custom.wasm".into()));
+    Ok(())
+}
+
+/// Disable and a bare enable send only `enabled`, so the module another
+/// change declares between their read and their apply is kept.
+#[tokio::test]
+async fn module_changes_keep_a_module_declared_meanwhile() -> Result<()> {
+    use super::{ModuleAction, manage_module};
+    use crate::{
+        config::{Applied, DiscordConfig, FileChange},
+        module::{
+            Change, ModuleSummary, Registration, Source,
+            tests::{definition, describing, replying, write_module},
+        },
+    };
+
+    let directory = tempfile::tempdir()?;
+    let mut config =
+        crate::config::tests::installation(directory.path(), "discord-private", 46_900)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing provider")?
+        .url = format!("http://{}", listener.local_addr()?);
+    let first = directory.path().join("first.wasm");
+    write_module(
+        &first,
+        &describing(&[definition("first")]),
+        &replying("first", &[]),
+    )?;
+    let mut file = DiscordConfig::read(&config, "discord-private")?;
+    file.module.enabled = true;
+    file.module.path = Some(first);
+    file.write(&config, "discord-private")?;
+    let bundled = ModuleSummary {
+        source: Source::Bundled,
+        commands: vec!["settings".to_owned()],
+        digest: "d".to_owned(),
+    };
+    let answer = serde_json::to_vec(&Applied {
+        changed: Vec::new(),
+        module: Change {
+            serving: bundled.clone(),
+            previous: bundled,
+            discord: Registration::Unchanged,
+        },
+        restart: Vec::new(),
+    })?;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let kept = received.clone();
+    let provider = Router::new().route(
+        "/v1/settings",
+        axum::routing::put(move |body: Bytes| {
+            let kept = kept.clone();
+            let answer = answer.clone();
+            async move {
+                if let Ok(mut kept) = kept.lock() {
+                    kept.push(body);
+                }
+                ([("content-type", "application/json")], answer).into_response()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, provider).await });
+    for action in [ModuleAction::Disable, ModuleAction::Enable { file: None }] {
+        manage_module(|| Ok(config.clone()), None, Some(action)).await?;
+    }
+    let sent = received
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(sent.len(), 2);
+    for body in sent {
+        let change: FileChange = serde_json::from_slice(&body)?;
+        let mut meanwhile = DiscordConfig::read(&config, "discord-private")?;
+        meanwhile.module.path = Some("other.wasm".into());
+        change
+            .clone()
+            .apply(&mut meanwhile)
+            .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+        assert_eq!(
+            meanwhile.module.path,
+            Some("other.wasm".into()),
+            "{change:?} replaced the module declared meanwhile"
+        );
+    }
+    server.abort();
     Ok(())
 }
