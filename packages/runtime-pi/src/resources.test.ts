@@ -6,6 +6,7 @@ import {
   type Message,
   type SystemMessage,
 } from "@earendil-works/pi-ai";
+import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -173,6 +174,19 @@ it.each([
     "selects mcp:nowhere, but the Pi runtime's mcp.json configures no server nowhere",
   ],
   [
+    "a user extension whose file is gone",
+    { "settings.json": JSON.stringify({ extensions: ["extensions/gone.js"] }) },
+    "extensions/gone.js could not be loaded",
+  ],
+  [
+    "a user extension whose file name holds a comma",
+    {
+      "extensions/a,b.js": "export default {};",
+      "settings.json": JSON.stringify({ extensions: ["extensions/a,b.js"] }),
+    },
+    "selects extensions/a,b.js, which is neither a built-in extension",
+  ],
+  [
     "a user extension that throws",
     {
       "extensions/broken.js": 'throw new Error("broken on purpose");',
@@ -234,7 +248,9 @@ it.each([
   const agent = await fixture({ answers: [fauxAssistantMessage("unused")] });
   const root = await agent.snapshot(files);
   const turn = agent.turn("turn-1", "hello", { resource_root: root });
-  await expect(agent.runtime.turns.submit(turn)).rejects.toThrow(message);
+  await expect(agent.runtime.turns.submit(turn)).rejects.toSatisfy(
+    (failure: Error) => displayableExplanation(failure.message)?.includes(message) === true,
+  );
   await expect(agent.runtime.turns.submit(turn)).rejects.toMatchObject({ status: 422 });
   expect(agent.model.state.callCount).toBe(0);
 });
@@ -538,6 +554,24 @@ it("writes a busy mode into the agent's resources, keeping every other field", a
   expect((await stat(settingsFile(agent))).mode & 0o777).toBe(0o640);
 });
 
+it("keeps settings.json's mode and says a change was made when its directory does not sync", async () => {
+  const agent = await fixture({ resources: { "settings.json": "{}\n" } });
+  const resources = agent.resources ?? "";
+  await chmod(settingsFile(agent), 0o640);
+  // A directory its owner may write but not read cannot be opened to sync.
+  await chmod(resources, 0o300);
+  try {
+    await expect(agent.set(agentPage, "busy", "queue")).rejects.toMatchObject({
+      status: 500,
+      message: expect.stringContaining("changed, but not confirmed durable") as unknown,
+    });
+  } finally {
+    await chmod(resources, 0o700);
+  }
+  expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({ busy: "queue" });
+  expect((await stat(settingsFile(agent))).mode & 0o777).toBe(0o640);
+});
+
 it("refuses an extension the agent does not have, writing nothing", async () => {
   const agent = await fixture({
     builtIns: [echo],
@@ -613,10 +647,50 @@ it("refuses a change drawn before the agent's default extensions changed", async
   expect(await readFile(settingsFile(agent), "utf8")).toBe("{}\n");
 });
 
-it("offers only module files as the agent's own extensions", async () => {
+it("shows a selection the resources no longer hold as unavailable, and lets a change remove it", async () => {
+  const agent = await fixture({
+    resources: {
+      "settings.json": JSON.stringify({
+        extensions: ["schedules", "extensions/gone.js", "mcp:nowhere"],
+        busy: "queue",
+      }),
+    },
+  });
+  const extensions = async () =>
+    (await agent.runtime.settings({ subject: agentPage })).settings.find(
+      ({ id }) => id === "extensions",
+    );
+  expect(await extensions()).toMatchObject({
+    value: { kind: "many", ids: ["schedules", "extensions/gone.js", "mcp:nowhere"] },
+    choices: [
+      { id: "schedules", name: "schedules" },
+      { id: "subagents", name: "subagents" },
+      { id: "extensions/gone.js", name: "extensions/gone.js (unavailable)" },
+      { id: "mcp:nowhere", name: "mcp:nowhere (unavailable)" },
+    ],
+  });
+  await expect(
+    agent.set(agentPage, "extensions", ["schedules", "extensions/gone.js"]),
+  ).rejects.toMatchObject({
+    status: 422,
+    message: expect.stringContaining("extensions/gone.js is not an extension") as unknown,
+  });
+  await agent.set(agentPage, "extensions", ["schedules"]);
+  expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({
+    extensions: ["schedules"],
+    busy: "queue",
+  });
+  await writeFile(settingsFile(agent), JSON.stringify({ extensions: { add: ["mcp:nowhere"] } }));
+  expect((await extensions())?.value).toEqual({ kind: "many", ids: ["mcp:nowhere"] });
+  await agent.set(agentPage, "extensions", null);
+  expect(JSON.parse(await readFile(settingsFile(agent), "utf8"))).toEqual({});
+});
+
+it("offers only module files whose names the CLI can list as the agent's own extensions", async () => {
   const agent = await fixture({
     resources: {
       "settings.json": "{}\n",
+      "extensions/a,b.js": "export default {};",
       "extensions/notes.js": "export default {};",
       "extensions/folder.js/index.js": "export default {};",
     },

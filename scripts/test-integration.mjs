@@ -20,6 +20,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { isolateEnvironment } from "./environment.ts";
 import { availableBasePort } from "./integration/ports.mjs";
 import { embedText, seen } from "./integration/replies.mjs";
 import { testSettings } from "./integration/settings.mjs";
@@ -42,6 +43,7 @@ const exampleModule = resolve(
 );
 const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
+isolateEnvironment();
 let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
@@ -685,8 +687,7 @@ async function testResourceStateSeparation(turnId) {
       await rename(nested, state);
     }
   }
-  // Non-selected siblings remain valid: the resource root need not be
-  // isolated from every kind of state.
+  // Non-selected siblings remain valid: the resource root need not be isolated from all state.
   const sibling = join(resources, "core-state");
   await rename(state, sibling);
   try {
@@ -709,8 +710,7 @@ async function testPiModelReadiness() {
   await rename(privateState, `${privateState}-saved`);
   await rename(storage, `${storage}-saved`);
   await mkdir(privateState);
-  // Pi's own offline switch keeps catalog refresh local, without substituting
-  // ModelRuntime or borrowing the installing user's model credentials.
+  // Pi's own offline switch keeps catalog refresh local without substituting ModelRuntime.
   const options = { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } };
   const modelsPath = join(privateState, "models.json");
   const provider = {

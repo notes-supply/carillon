@@ -275,8 +275,8 @@ it("lists the agent's busy mode and extensions after its model, and refuses a st
 it.each<[string, (resources: string) => Promise<unknown>, string]>([
   [
     "settings it cannot use",
-    (resources) => writeFile(join(resources, "settings.json"), '{"extensions":["nope"]}'),
-    "selects nope",
+    (resources) => writeFile(join(resources, "settings.json"), '{"busy":"later"}'),
+    "invalid at /busy",
   ],
   [
     "a settings file that is a directory",

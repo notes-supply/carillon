@@ -2,7 +2,9 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defineConfig } from "vitest/config";
+import { isolateEnvironment } from "./scripts/environment.ts";
 
+isolateEnvironment();
 // Tests and the programs they start never see the real home: a profile, a
 // harness login or an installation a test resolves by default lands here.
 const home = join(tmpdir(), `carillon-vitest-home-${String(process.pid)}`);
