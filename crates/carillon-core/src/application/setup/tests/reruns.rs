@@ -220,10 +220,7 @@ fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Resul
         directory.path(),
         &serde_json::json!({"projects": [], "models": models}),
     )?;
-    std::fs::write(
-        directory.path().join("offer-t3-other.json"),
-        serde_json::json!({"projects": [], "models": models, "value": "codex/gpt"}).to_string(),
-    )?;
+    std::fs::write(directory.path().join("model-t3-other"), "codex/gpt")?;
     let mut questions = Shown::answering(&["0"]);
     set_up_t3(
         &home,
@@ -249,6 +246,12 @@ fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Resul
     );
     assert!(calls.contains(&configured), "{configured}\nnot in\n{calls}");
     assert!(!calls.contains("--agent t3-other --project"), "{calls}");
+    assert!(
+        !calls
+            .lines()
+            .any(|call| call.starts_with("discover") && call.ends_with("--agent t3-other")),
+        "{calls}"
+    );
     Ok(())
 }
 

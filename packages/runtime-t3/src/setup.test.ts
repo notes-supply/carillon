@@ -455,9 +455,9 @@ it("takes the token on standard input, says the settings are saved for a start, 
   expect(configured.stderr).toMatch(/runtime-t3 is not in carillon\.toml/u);
 });
 
-it("discovers the models offered to an agent and the one it uses through the CLI", async () => {
+it("discovers the models offered to an agent through the CLI", async () => {
   const fake = await fakeT3();
-  const { config, workspace } = await installation();
+  const { config } = await installation();
   const offered = (id: string) =>
     cli(["discover", "--config", config, "--url", fake.url, "--agent", id], `${fake.token}\n`);
   const found = await offered("code");
@@ -469,17 +469,31 @@ it("discovers the models offered to an agent and the one it uses through the CLI
       { provider: "claudeAgent", model: "claude-haiku-4-5" },
       { provider: "codex", model: "gpt-6-astra" },
     ],
-    value: null,
   });
+  const unknown = await offered("unknown");
+  expect(unknown.status).toBe(1);
+  expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
+});
+
+it("tells the model an agent uses from its settings ledger without reaching T3", async () => {
+  const fake = await fakeT3();
+  const { config, workspace } = await installation();
+  const used = (id: string) => cli(["model", "--config", config, "--agent", id], "");
+  const none = await used("code");
+  expect(none.status, none.stderr).toBe(0);
+  expect(JSON.parse(none.stdout)).toEqual({ value: null });
   fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
   await configure(
     await loaded(config),
     { url: fake.url, token: fake.token },
     { agentId: "code", projectId: "agent", instanceId: "codex", model: "gpt-6-astra" },
   );
-  const chosen = await offered("code");
-  expect(JSON.parse(chosen.stdout)).toMatchObject({ value: "codex/gpt-6-astra" });
-  const unknown = await offered("unknown");
+  await fake.close();
+  const chosen = await used("code");
+  expect(chosen.status, chosen.stderr).toBe(0);
+  expect(JSON.parse(chosen.stdout)).toEqual({ value: "codex/gpt-6-astra" });
+  expect(JSON.parse((await used("notes")).stdout)).toEqual({ value: null });
+  const unknown = await used("unknown");
   expect(unknown.status).toBe(1);
   expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
 });
