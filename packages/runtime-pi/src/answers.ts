@@ -73,10 +73,9 @@ async function readable(path: string): Promise<string> {
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) throw new Error(`${path} is not a regular file.`);
-    const { size } = stats;
-    return size < 1024 * 1024
-      ? `${String(Math.ceil(size / 1024))} KiB`
-      : `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+    return stats.size < 1024 * 1024
+      ? `${String(Math.ceil(stats.size / 1024))} KiB`
+      : `${(stats.size / (1024 * 1024)).toFixed(1)} MiB`;
   } finally {
     await handle.close();
   }

@@ -24,7 +24,7 @@ use crate::{
 
 /// A file kept with an answer; its ordinal in the answer is its ordinal in
 /// the capture.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct KeptFile {
     pub(crate) capture: String,
     pub(crate) name: String,
