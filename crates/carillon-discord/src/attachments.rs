@@ -421,7 +421,8 @@ impl Downloads {
     }
 }
 
-/// The same attachment of the same message, as Discord describes it now.
+/// The same attachment of the same message, or of the message it forwards,
+/// as Discord describes it now.
 async fn refresh(
     http: &DiscordHttp,
     plan: &MessagePlan,
@@ -464,6 +465,12 @@ async fn refresh(
     let current = message
         .attachments
         .into_iter()
+        .chain(
+            message
+                .message_snapshots
+                .into_iter()
+                .flat_map(|snapshot| snapshot.message.attachments),
+        )
         .find(|candidate| candidate.id.to_string() == file.id)
         .ok_or_else(gone)?;
     if current.size != file.size {

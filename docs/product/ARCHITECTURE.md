@@ -138,7 +138,14 @@ an answer's files with it, from core's copies; creates and adopts threads;
 and owns typing, reactions, mention-free delivery and slash command
 registration. A message that replies to or forwards another reaches core
 with a short quote of that message, from what Discord sent with it, before
-its own text. It also owns one card per job, drawn from core's
+its own text; a forward's files are downloaded with it. The provider
+records, with its thread participation, which agent had the bot send each
+of its latest messages, answers with their files and tool sends alike, and
+what agents sent each person directly since that person's last direct
+message. A quote names the agent from that record, and a person's direct
+message opens with what they were sent. The gateway session record names
+the intents the session was opened with, so a release that asks for other
+events starts a new session. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
 best-effort and never decides delivery. While a message's turn is in a
 runtime that offers controls, it offers them as reactions (steer,

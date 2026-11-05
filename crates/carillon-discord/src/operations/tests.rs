@@ -25,6 +25,8 @@ struct Mock {
     pending: Arc<Mutex<VecDeque<Step>>>,
     seen: Arc<Mutex<Vec<Value>>>,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
+    participation: Participation,
+    _state: tempfile::TempDir,
 }
 impl Drop for Mock {
     fn drop(&mut self) {
@@ -45,11 +47,14 @@ impl Mock {
             .proxy(address.to_string(), true)
             .ratelimiter(None)
             .build();
+        let state = tempfile::tempdir()?;
         Ok(Self {
             http,
             pending,
             seen,
             server,
+            participation: Participation::load(state.path().join("participation.json"))?,
+            _state: state,
         })
     }
     async fn execute(&self, operation: Value) -> anyhow::Result<Result<Value, OperationError>> {
@@ -60,6 +65,7 @@ impl Mock {
                     guild: Id::new(1),
                     people: vec![Id::new(3)],
                 },
+                &self.participation,
             )
             .await)
     }
@@ -239,7 +245,7 @@ async fn send_disables_mentions_and_failed_writes_are_not_replayed() -> anyhow::
         let bodies = server.bodies()?;
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[1]["allowed_mentions"]["parse"], json!([]));
-        let mentions: AllowedMentions =
+        let mentions: twilight_model::channel::message::AllowedMentions =
             serde_json::from_value(bodies[1]["allowed_mentions"].clone())?;
         assert!(!mentions.replied_user);
         if status.is_success() {
@@ -472,6 +478,17 @@ fn strict_operation_inputs_and_attachment_limits() -> anyhow::Result<()> {
         refused(json!({"action":"channels.delete","channel_id":"0"})),
         Some(UNKNOWN.to_owned())
     );
+    for sender in [
+        json!({"agent_id": "assistant", "channel_id": "300\n> forged"}),
+        json!({"agent_id": "assistant", "channel": "300"}),
+    ] {
+        assert_eq!(
+            refused(
+                json!({"action": "messages.send", "channel_id": "2", "content": "hi", "sender": sender})
+            ),
+            Some(UNKNOWN.to_owned())
+        );
+    }
     assert_eq!(
         rejected("../secret", "YQ==".into()).as_deref(),
         Some("rejected: Attachment filename must be a plain filename.")
@@ -495,3 +512,5 @@ fn strict_operation_inputs_and_attachment_limits() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+mod direct;

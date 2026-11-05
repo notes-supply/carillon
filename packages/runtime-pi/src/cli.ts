@@ -138,6 +138,7 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
       const provider = config.interfaces.find((item) => item.id === conversation?.interface_id);
       return {
         interface_id: conversation?.interface_id,
+        agent_id: conversation?.agent_id,
         native: conversation?.native,
         connection:
           provider === undefined

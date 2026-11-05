@@ -143,27 +143,41 @@ fn status(code: u16) -> Vec<u8> {
 pub(crate) async fn serve_discord(
     attachments: Option<Vec<Value>>,
 ) -> Result<(Arc<twilight_http::Client>, Arc<Mutex<usize>>)> {
+    serve_message(attachments.map(|attachments| json!({"attachments": attachments}))).await
+}
+
+/// A Discord API stand-in for message 500 in channel 300, with `fields`
+/// beside those of a plain message, or a deletion when `None`.
+async fn serve_message(
+    fields: Option<Value>,
+) -> Result<(Arc<twilight_http::Client>, Arc<Mutex<usize>>)> {
     let lookups = Arc::new(Mutex::new(0));
     let counted = lookups.clone();
+    let message = fields.map(|fields| {
+        let mut message = json!({
+            "id": "500", "channel_id": "300",
+            "author": {"id": "200", "username": "sender", "discriminator": "0"},
+            "content": "", "attachments": [], "embeds": [],
+            "mention_everyone": false, "mention_roles": [], "mentions": [],
+            "pinned": false, "timestamp": "2026-01-01T00:00:00.000000+00:00",
+            "tts": false, "type": 0
+        });
+        if let (Some(message), Some(fields)) = (message.as_object_mut(), fields.as_object()) {
+            message.extend(fields.clone());
+        }
+        message
+    });
     let app = Router::new()
         .route(
             "/api/v10/channels/300/messages/500",
-            axum::routing::get(move |State(attachments): State<Option<Vec<Value>>>| {
+            axum::routing::get(move |State(message): State<Option<Value>>| {
                 let counted = counted.clone();
                 async move {
                     if let Ok(mut lookups) = counted.lock() {
                         *lookups += 1;
                     }
-                    match attachments {
-                        Some(attachments) => Json(json!({
-                            "id": "500", "channel_id": "300",
-                            "author": {"id": "200", "username": "sender", "discriminator": "0"},
-                            "content": "", "attachments": attachments, "embeds": [],
-                            "mention_everyone": false, "mention_roles": [], "mentions": [],
-                            "pinned": false, "timestamp": "2026-01-01T00:00:00.000000+00:00",
-                            "tts": false, "type": 0
-                        }))
-                        .into_response(),
+                    match message {
+                        Some(message) => Json(message).into_response(),
                         None => (
                             StatusCode::NOT_FOUND,
                             Json(json!({"message": "Unknown Message", "code": 10008})),
@@ -173,7 +187,7 @@ pub(crate) async fn serve_discord(
                 }
             }),
         )
-        .with_state(attachments);
+        .with_state(message);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -219,6 +233,7 @@ fn plan(attachments: Vec<SourceAttachment>) -> MessagePlan {
         content: String::new(),
         attachments,
         reference: None,
+        quotes: Vec::new(),
         create_thread: false,
         adopt_thread: false,
         native: Value::Null,
@@ -601,6 +616,44 @@ async fn an_expired_address_is_refreshed_once_from_the_same_message() -> Result<
             .all(|path| path.starts_with("/attachments/300/60"))
     );
     wait_until_empty(staging.path()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_forwarded_files_expired_address_is_refreshed_from_the_forward() -> Result<()> {
+    let fresh = "/attachments/800/601/voice-message.ogg";
+    let (port, _) = serve_cdn(HashMap::from([
+        (
+            "/attachments/300/601/voice-message.ogg".to_owned(),
+            Serve::Status(403),
+        ),
+        (fresh.to_owned(), Serve::Bytes(b"OggS".to_vec())),
+    ]))
+    .await?;
+    let staging = tempfile::tempdir()?;
+    let downloads = downloads(staging.path(), port, AttachmentPolicy::default())?;
+    let (http, lookups) = serve_message(Some(json!({
+        "message_reference": {"type": 1, "channel_id": "800", "message_id": "799"},
+        "message_snapshots": [{"message": {
+            "content": "", "embeds": [], "edited_timestamp": null, "type": 0,
+            "timestamp": "2026-01-01T00:00:00.000000+00:00",
+            "attachments": [described(port, "601", "voice-message.ogg", 4, fresh)],
+        }}],
+    })))
+    .await?;
+    let staged = downloads
+        .stage(
+            Some(&http),
+            &plan(vec![attachment(port, "601", "voice-message.ogg", 4)]),
+            soon(),
+        )
+        .await
+        .map_err(|refusal| anyhow!(refusal.0))?;
+    assert_eq!(
+        std::fs::read(staging.path().join(&staged.manifest.batch).join("0"))?,
+        b"OggS"
+    );
+    assert_eq!(*lookups.lock().map_err(|_| anyhow!("poisoned"))?, 1);
     Ok(())
 }
 

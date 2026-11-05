@@ -219,6 +219,7 @@ fn titled(content: &str, files: &[&str]) -> MessagePlan {
             })
             .collect(),
         reference: None,
+        quotes: Vec::new(),
         create_thread: true,
         adopt_thread: false,
         native: Value::Null,
@@ -418,6 +419,19 @@ pub(crate) fn discord_config(
     }
 }
 
+pub(crate) fn participation(directory: &std::path::Path) -> Result<std::sync::Arc<Participation>> {
+    Ok(std::sync::Arc::new(Participation::load(
+        directory.join("participation.json"),
+    )?))
+}
+
+/// Participation kept beside `file`, for tests that never read it.
+pub(crate) fn unread_participation(file: &std::path::Path) -> std::sync::Arc<Participation> {
+    std::sync::Arc::new(Participation::empty(
+        file.with_file_name("participation.json"),
+    ))
+}
+
 fn accepted(
     resolution: std::result::Result<Option<MessagePlan>, InterfaceError>,
 ) -> Result<MessagePlan> {
@@ -497,8 +511,11 @@ fn gateway_messages_carry_what_they_reply_to_or_forward() -> Result<()> {
         received.reference,
         Some(Reference {
             kind: ReferenceKind::Reply,
-            author: Some(Author::Agent),
+            author: Some(Author::Bot {
+                message_id: Id::new(499)
+            }),
             sent_at: "2026-11-05T14:03:27+00:00".to_owned(),
+            forwarding: false,
             content: "Ship it?".to_owned(),
             files: vec!["plan.pdf".to_owned()],
         })
@@ -508,7 +525,10 @@ fn gateway_messages_carry_what_they_reply_to_or_forward() -> Result<()> {
         IncomingMessage::received(&reply(sent("499", &ada, "lunch?", &json!([])))?, "201");
     assert_eq!(
         received.reference.and_then(|reference| reference.author),
-        Some(Author::Person("Ada".to_owned()))
+        Some(Author::Person {
+            id: "202".to_owned(),
+            name: "Ada".to_owned()
+        })
     );
     let deleted = reply(Value::Null)?;
     assert_eq!(IncomingMessage::received(&deleted, "201").reference, None);
@@ -527,6 +547,7 @@ fn gateway_messages_carry_what_they_reply_to_or_forward() -> Result<()> {
             kind: ReferenceKind::Forward,
             author: None,
             sent_at: "2026-11-04T09:00:00+00:00".to_owned(),
+            forwarding: false,
             content: "the original words".to_owned(),
             files: Vec::new(),
         })
@@ -595,3 +616,62 @@ fn direct_messages_never_run_commands_even_when_admitted() -> Result<()> {
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
     Ok(())
 }
+
+#[test]
+fn direct_messages_stay_one_conversation_across_restarts_and_admit_only_routed_allowlisted_people()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("participation.json");
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.direct_messages = Some(crate::config::DirectMessages {
+        agent: "default".to_owned(),
+    });
+    let message = IncomingMessage {
+        guild_id: None,
+        channel_id: "900".to_owned(),
+        ..request("900", None, "hello")
+    };
+    let mut conversations = Vec::new();
+    for _ in 0..2 {
+        let participation = Participation::load(path.clone())?;
+        let plan = accepted(admit_message(
+            &config,
+            &participation,
+            message.clone(),
+            Value::Null,
+        ))?;
+        let resolved = prepare_deterministic_conversation(&participation, plan)
+            .map_err(|failure| anyhow!(failure.message))?;
+        conversations.push(resolved.conversation_id);
+    }
+    assert_eq!(conversations, ["discord-dm-900", "discord-dm-900"]);
+    let participation = Participation::load(path)?;
+    let refusal = |config: &DiscordConfig, message: IncomingMessage| {
+        admit_message(config, &participation, message, Value::Null)
+            .err()
+            .map(|failure| failure.status)
+    };
+    for refused in [
+        IncomingMessage {
+            user_id: "999".to_owned(),
+            ..message.clone()
+        },
+        IncomingMessage {
+            guild_id: Some("999".to_owned()),
+            ..message.clone()
+        },
+    ] {
+        assert_eq!(refusal(&config, refused), Some(StatusCode::FORBIDDEN));
+    }
+    config.allowed_user_ids.clear();
+    assert_eq!(
+        refusal(&config, message.clone()),
+        Some(StatusCode::FORBIDDEN)
+    );
+    config.allowed_user_ids.push("200".to_owned());
+    config.direct_messages = None;
+    assert_eq!(refusal(&config, message), Some(StatusCode::FORBIDDEN));
+    Ok(())
+}
+
+mod quotes;

@@ -28,7 +28,10 @@ configured model badges, and their custom IDs.
   direct messages, one conversation each. `prepare_conversation` creates or
   adopts threads; one provider process owns the participation file.
   [`reference`](src/conversations/reference.rs) quotes the message a new
-  one replies to or forwards before its text.
+  one replies to or forwards before its text, and
+  [`sent`](src/conversations/sent.rs) records, with participation, which
+  agent had the bot send its latest messages and what agents sent each
+  person directly, which their next direct message quotes.
 - [`client`](src/client.rs): authenticated requests to core, with bounded
   waits.
 - [`channels`](src/channels.rs): a routed channel's settings page. It joins
@@ -77,10 +80,11 @@ configured model badges, and their custom IDs.
   entry points.
 - [`gateway`](src/gateway.rs): the gateway session, including the record a
   graceful stop leaves so the next start can resume and have Discord replay
-  what it missed.
+  what it missed. A record of other intents is not resumed.
 - [`operations`](src/operations.rs): typed actions for agents, with the bot's
   credential, independent of admission and delivery, in the guild and in
   allowlisted people's direct messages.
+  [`messages`](src/operations/messages.rs) records what a send makes.
 - [`application`](src/application.rs) assembles the operator server and the
   gateway; [`cli`](src/cli.rs) supplies installation paths and credentials.
   Importing the library starts nothing.

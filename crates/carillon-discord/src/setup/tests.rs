@@ -651,6 +651,7 @@ async fn setup_during_other_maintenance_changes_neither_token_nor_settings() -> 
     Ok(())
 }
 mod routing;
+mod saved;
 mod unattended;
 
 #[tokio::test]
@@ -904,76 +905,6 @@ async fn owners_sharing_a_name_are_told_apart_and_the_one_chosen_is_admitted() -
         DiscordConfig::load(&config, "discord-private")?.allowed_user_ids,
         ["210"]
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() -> anyhow::Result<()>
-{
-    let address = discord(Arc::new(Discord::default())).await?;
-    let installation = |root: &Path, bot: &str, token: &str| -> anyhow::Result<LoadedConfig> {
-        let config = crate::config::tests::installation(root, "discord-private", 46_600)?;
-        let mut settings = DiscordConfig::read(&config, "discord-private")?;
-        bot.clone_into(&mut settings.bot_user_id);
-        settings.write(&config, "discord-private")?;
-        std::fs::write(config.root.join(BOT_TOKEN_FILE), format!("{token}\n"))?;
-        Ok(config)
-    };
-    let keep = "Keep the saved Discord bot and settings?";
-
-    let directory = tempfile::tempdir()?;
-    let config = installation(directory.path(), "201", TOKEN)?;
-    let before = saved_files(&config)?;
-    let (result, shown) = run(&config, address, &[""]).await;
-    result?;
-    assert!(shown.contains(keep), "{shown}");
-    assert_eq!(saved_files(&config)?, before);
-
-    // Revoked, or another bot's: said, not offered, and a token asked for;
-    // nothing is written while the question goes unanswered.
-    for (bot, token, said) in [
-        (
-            "201",
-            "old-token",
-            "Discord refuses the saved bot token, so the saved settings cannot be kept.",
-        ),
-        (
-            "101",
-            TOKEN,
-            "The saved bot token signs in as carillon-bot (201), not the bot the saved settings \
-             name (101), so they cannot be kept.",
-        ),
-    ] {
-        let directory = tempfile::tempdir()?;
-        let config = installation(directory.path(), bot, token)?;
-        let before = saved_files(&config)?;
-        let (result, shown) = run(&config, address, &[]).await;
-        assert_eq!(
-            result.map_err(|error| error.to_string()),
-            Err("no answer to Bot token (Enter keeps the saved one):".to_owned())
-        );
-        assert!(shown.contains(said), "{shown}");
-        assert!(!shown.contains(keep), "{shown}");
-        assert_eq!(saved_files(&config)?, before);
-    }
-
-    // Discord not answering says so, asks nothing and changes nothing.
-    let directory = tempfile::tempdir()?;
-    let config = installation(directory.path(), "201", TOKEN)?;
-    let before = saved_files(&config)?;
-    let (result, shown) = run(&config, "127.0.0.1:1".parse()?, &[]).await;
-    let failure = result
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
-    assert!(
-        failure.starts_with(
-            "Discord did not say whether the saved bot token still works; nothing was changed: "
-        ),
-        "{failure}"
-    );
-    assert!(shown.is_empty(), "{shown}");
-    assert_eq!(saved_files(&config)?, before);
     Ok(())
 }
 

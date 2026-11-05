@@ -85,3 +85,56 @@ async fn a_turn_waiting_in_its_runtime_shows_no_typing_until_it_runs() -> anyhow
     provider.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn new_jobs_type_and_cards_draw_as_the_settings_serving_then_say() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let accepted = now();
+    let work = || tools(None, &[("bash", "make")], &[]);
+    let first = running("first", "300", accepted, Some(work()));
+    discord.record(vec![first.clone()]);
+    // The provider starts without typing, drawing the default markers.
+    let settings = crate::config::Settings::new(config(false));
+    let (_delivering, monitor) = discord.serving(discord.http(false), settings.clone(), &records);
+    let card = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    assert!(card[0].content().starts_with("⏳ Working"), "{card:#?}");
+    // The operator then serves typing and other markers, and another job
+    // starts.
+    let mut next = with_markers()?;
+    next.typing = true;
+    let changed = settings
+        .apply(
+            || Ok(next),
+            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
+        )
+        .await
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?
+        .changed;
+    assert_eq!(changed, ["typing", "activity_markers"]);
+    discord.record(vec![
+        first,
+        running("second", "301", accepted, Some(work())),
+    ]);
+    discord
+        .wait_for(&Method::POST, "/channels/301/typing", 1)
+        .await?;
+    let card = discord
+        .wait_for(&Method::POST, "/channels/301/messages", 1)
+        .await?;
+    assert!(
+        card[0].content().starts_with("<a:working:123> Working"),
+        "{card:#?}"
+    );
+    // The job followed before keeps the typing decision it started with.
+    assert!(
+        discord
+            .matching(&Method::POST, "/channels/300/typing")
+            .is_empty()
+    );
+    monitor.abort();
+    Ok(())
+}

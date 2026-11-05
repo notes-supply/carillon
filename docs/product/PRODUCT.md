@@ -54,21 +54,25 @@ native state between engines or T3 projects.
   routes before core sees it. Direct messages to the bot are admitted only
   from allowlisted people, and only while the Discord settings name the
   agent that answers them; each person's direct messages are one rolling
-  conversation with it. Repeating the same event never starts a second
-  turn.
+  conversation with it. A person's direct message opens with what agents
+  sent them directly from other conversations since their last one.
+  Repeating the same event never starts a second turn.
 - **Replies and forwards.** A message that replies to another, or forwards
   one, reaches the agent opening with a short quote of that message: who
-  wrote it, or that the agent did, when, how it began and its files' names.
-  Only the new message carries the quote; nothing earlier changes.
+  wrote it (a person by name and user ID, or the agent that had the bot
+  send it), when, its files' names and how it began. Quoted words are
+  marked, so they cannot pass for Carillon's own lines. A forward's files
+  arrive with it. Only the new message carries the quote; nothing earlier
+  changes.
 - **Files.** A message is accepted with all its files or not at all. Files
   are kept with the turn and checked before it runs; nothing is extracted,
-  converted, transcribed or executed on arrival. A voice message reaches the
-  agent as its audio file. An answer can carry files too: on Pi the agent
-  attaches them, and core keeps a copy of each with the answer, which
-  Discord uploads with it. A file that can't be kept or sent never fails
-  the answer; the answer names it and where it is. Files attached while the
-  agent worked on an answer that never came, because it was stopped,
-  interrupted or failed, are dropped. T3 answers are text.
+  converted, transcribed or executed on arrival. A voice message, forwarded
+  or not, reaches the agent as its audio file. An answer can carry files
+  too: on Pi the agent attaches them, and core keeps a copy of each with
+  the answer, which Discord uploads with it. A file that can't be kept or
+  sent never fails the answer; the answer names it and where it is. Files
+  attached while the agent worked on an answer that never came, because it
+  was stopped, interrupted or failed, are dropped. T3 answers are text.
 - **Turns.** Core stores each accepted turn before acknowledging it, hands it
   once to its runtime, and stores the answer and its delivery together. Pi
   holds the turns it accepts and finishes them across its own restarts; a

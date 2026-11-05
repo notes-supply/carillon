@@ -17,12 +17,13 @@ use std::{
     path::PathBuf,
     sync::{Mutex, MutexGuard, PoisonError},
 };
+use tracing::warn;
 use twilight_http::{
     Client as DiscordHttp, error::ErrorType as DiscordErrorType,
     response::StatusCode as DiscordStatusCode,
 };
 use twilight_model::{
-    channel::{ChannelType, message::Message},
+    channel::{Attachment, ChannelType, message::Message},
     id::{
         Id,
         marker::{ChannelMarker, MessageMarker},
@@ -30,8 +31,11 @@ use twilight_model::{
 };
 
 mod reference;
+mod sent;
 
+use reference::Reader;
 pub use reference::{Author, Reference, ReferenceKind};
+pub(crate) use sent::{Sender, SentDirect};
 
 /// An incoming Discord message, shared by gateway and simulation adapters.
 /// Without a guild it is a direct message to the bot.
@@ -44,8 +48,9 @@ pub struct IncomingMessage {
     #[serde(default)]
     pub parent_channel_id: Option<String>,
     pub content: String,
-    /// Files uploaded with the message, in message order. Nothing is
-    /// fetched for them before the message is admitted and activated.
+    /// Files uploaded with the message, then those of the message it
+    /// forwards, in message order. Nothing is fetched for them before the
+    /// message is admitted and activated.
     #[serde(default)]
     pub attachments: Vec<SourceAttachment>,
     /// The message it replies to or forwards.
@@ -54,7 +59,6 @@ pub struct IncomingMessage {
 }
 
 impl IncomingMessage {
-    /// A message as the gateway delivers it.
     pub(crate) fn received(message: &Message, bot_user_id: &str) -> Self {
         Self {
             event_id: message.id.to_string(),
@@ -66,13 +70,13 @@ impl IncomingMessage {
             attachments: message
                 .attachments
                 .iter()
-                .map(|attachment| SourceAttachment {
-                    id: attachment.id.to_string(),
-                    filename: attachment.filename.clone(),
-                    size: attachment.size,
-                    content_type: attachment.content_type.clone(),
-                    url: attachment.url.clone(),
-                })
+                .chain(
+                    message
+                        .message_snapshots
+                        .iter()
+                        .flat_map(|snapshot| &snapshot.message.attachments),
+                )
+                .map(SourceAttachment::from)
                 .collect(),
             reference: Reference::of(message, bot_user_id),
         }
@@ -91,17 +95,38 @@ pub struct SourceAttachment {
     /// A signed CDN address; never logged or shown with its query.
     pub url: String,
 }
-/// Durable record of the threads this provider participates in.
+
+impl From<&Attachment> for SourceAttachment {
+    fn from(attachment: &Attachment) -> Self {
+        Self {
+            id: attachment.id.to_string(),
+            filename: attachment.filename.clone(),
+            size: attachment.size,
+            content_type: attachment.content_type.clone(),
+            url: attachment.url.clone(),
+        }
+    }
+}
+/// Durable record of the threads this provider participates in, and of
+/// what the bot sent there for which agent.
 ///
 /// `threads` maps a thread to the route channel that admitted it, so later
 /// thread messages resolve and stay activated without Discord lookups.
 /// `created_threads` maps a root message to the thread already created for
-/// it, so a retried message never creates a second thread.
+/// it, so a retried message never creates a second thread. `senders` and
+/// `unanswered` are what [`sent`] records.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ParticipationState {
     pub(crate) threads: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) created_threads: BTreeMap<String, String>,
+    /// Who had the bot send each of its latest messages.
+    #[serde(default)]
+    pub(crate) senders: BTreeMap<Id<MessageMarker>, Sender>,
+    /// What was sent each person directly, by user ID, since their last
+    /// direct message.
+    #[serde(default)]
+    pub(crate) unanswered: BTreeMap<String, Vec<SentDirect>>,
 }
 
 pub struct Participation {
@@ -130,6 +155,14 @@ impl Participation {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            state: Mutex::default(),
+        }
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, ParticipationState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -143,13 +176,12 @@ impl Participation {
     }
 
     pub(crate) fn adopt(&self, thread_id: &str, route_channel_id: &str) -> Result<()> {
-        let mut state = self.lock();
-        let mut next = state.clone();
-        next.threads
-            .insert(thread_id.to_owned(), route_channel_id.to_owned());
-        self.persist(&next)?;
-        *state = next;
-        Ok(())
+        self.change(|state| {
+            state
+                .threads
+                .insert(thread_id.to_owned(), route_channel_id.to_owned());
+            true
+        })
     }
 
     pub(crate) fn remember_created(
@@ -158,14 +190,48 @@ impl Participation {
         thread_id: &str,
         route_channel_id: &str,
     ) -> Result<()> {
+        self.change(|state| {
+            state
+                .created_threads
+                .insert(message_id.to_owned(), thread_id.to_owned());
+            state
+                .threads
+                .insert(thread_id.to_owned(), route_channel_id.to_owned());
+            true
+        })
+    }
+
+    /// Records what the bot sent: a record that cannot be kept is logged,
+    /// as the message is sent all the same.
+    pub(crate) fn record(&self, change: impl FnOnce(&mut ParticipationState)) {
+        if let Err(failure) = self.change(|state| {
+            change(state);
+            true
+        }) {
+            warn!(error = %failure, "what the Discord bot sent could not be recorded");
+        }
+    }
+
+    /// Forgets what was sent `person` directly before their direct message
+    /// `message`, once core accepted it with its quote.
+    pub(crate) fn answered(&self, person: &str, message: &str) {
+        let Ok(message) = message.parse() else {
+            return;
+        };
+        if let Err(failure) = self.change(|state| state.answered(person, message)) {
+            warn!(error = %failure, "a quoted direct message could not be forgotten; the next one quotes it again");
+        }
+    }
+
+    /// Applies `change` to the state and serves the result once it is
+    /// durable, unless `change` says it changed nothing.
+    fn change(&self, change: impl FnOnce(&mut ParticipationState) -> bool) -> Result<()> {
         let mut state = self.lock();
         let mut next = state.clone();
-        next.created_threads
-            .insert(message_id.to_owned(), thread_id.to_owned());
-        next.threads
-            .insert(thread_id.to_owned(), route_channel_id.to_owned());
-        self.persist(&next)?;
-        *state = next;
+        if change(&mut next) {
+            self.persist(&next)?;
+            *state = next;
+        }
         Ok(())
     }
 
@@ -199,9 +265,23 @@ pub struct MessagePlan {
     pub(crate) content: String,
     pub(crate) attachments: Vec<SourceAttachment>,
     pub(crate) reference: Option<Reference>,
+    /// What opens the turn's text before the person's words: what was sent
+    /// them directly since their last direct message, then the message this
+    /// one replies to or forwards.
+    pub(crate) quotes: Vec<String>,
     pub(crate) create_thread: bool,
     pub(crate) adopt_thread: bool,
     pub(crate) native: Value,
+}
+
+impl MessagePlan {
+    /// The person and message of a direct message, which
+    /// [`Participation::answered`] takes once core accepts it.
+    pub(crate) fn direct(&self) -> Option<(String, String)> {
+        self.guild_id
+            .is_none()
+            .then(|| (self.user_id.clone(), self.message_id.clone()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +352,12 @@ fn resolve_message(
     {
         return Ok(None);
     }
+    let quotes = Reader {
+        agent_id: &agent_id,
+        channel_id: &request.channel_id,
+        participation,
+    }
+    .quotes(&request);
     Ok(Some(MessagePlan {
         message_id: request.event_id,
         guild_id: request.guild_id,
@@ -282,6 +368,7 @@ fn resolve_message(
         content,
         attachments: request.attachments,
         reference: request.reference,
+        quotes,
         create_thread,
         adopt_thread,
         native,
@@ -438,11 +525,13 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
         "user_id": plan.user_id,
         "parent_channel_id": parent,
     });
-    let content = match &plan.reference {
-        Some(reference) if plan.content.is_empty() => reference.quote(),
-        Some(reference) => format!("{}\n\n{}", reference.quote(), plan.content),
-        None => plan.content,
-    };
+    let content = plan
+        .quotes
+        .iter()
+        .chain((!plan.content.is_empty()).then_some(&plan.content))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     ResolvedMessage {
         event: ExternalEvent {
             event_id: plan.message_id.clone(),

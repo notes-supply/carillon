@@ -303,6 +303,7 @@ fn thread_plan() -> MessagePlan {
         content: "hello".to_owned(),
         attachments: Vec::new(),
         reference: None,
+        quotes: Vec::new(),
         create_thread: true,
         adopt_thread: false,
         native: Value::Null,
@@ -1027,56 +1028,6 @@ fn discord_route_errors_distinguish_terminal_responses() {
     ));
 }
 
-#[test]
-fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow::Result<()> {
-    let message: twilight_model::channel::Message = serde_json::from_value(json!({
-        "id": "500", "channel_id": "300",
-        "author": {"id": "200", "username": "sender", "discriminator": "0"},
-        "content": "", "mention_everyone": false, "mention_roles": [],
-        "mentions": [], "pinned": false, "tts": false, "type": 0,
-        "timestamp": "2026-01-01T00:00:00.000000+00:00",
-        "attachments": [{
-            "id": "600", "filename": "photo.png", "size": 10, "content_type": "image/png",
-            "url": "https://cdn.discordapp.com/attachments/300/600/photo.png?ex=1&hm=signed",
-            "proxy_url": "https://media.discordapp.net/attachments/300/600/photo.png?ex=1&hm=signed"
-        }],
-        "embeds": [{
-            "type": "image",
-            "url": "https://cdn.discordapp.com/attachments/300/602/shown.png?ex=1&hm=embedded",
-            "image": {"url": "https://media.discordapp.net/attachments/300/602/shown.png?ex=1&hm=embedded"}
-        }],
-        // A reply carries the replied-to message, with its own attachments.
-        "referenced_message": {
-            "id": "499", "channel_id": "300",
-            "author": {"id": "201", "username": "other", "discriminator": "0"},
-            "content": "", "embeds": [], "mention_everyone": false, "mention_roles": [],
-            "mentions": [], "pinned": false, "tts": false, "type": 0,
-            "timestamp": "2026-01-01T00:00:00.000000+00:00",
-            "attachments": [{
-                "id": "601", "filename": "earlier.pdf", "size": 20,
-                "url": "https://cdn.discordapp.com/attachments/300/601/earlier.pdf?ex=1&hm=nested",
-                "proxy_url": "https://media.discordapp.net/attachments/300/601/earlier.pdf?ex=1&hm=nested"
-            }]
-        }
-    }))?;
-    let native = super::native_message(&message);
-    assert_eq!(native["attachments"][0]["filename"], "photo.png");
-    assert_eq!(native["attachments"][0]["size"], 10);
-    assert!(!native.to_string().contains("hm=signed"));
-    assert!(!native.to_string().contains("hm=nested"));
-    assert!(!native.to_string().contains("hm=embedded"));
-    assert_eq!(
-        native["embeds"][0]["url"],
-        "https://cdn.discordapp.com/attachments/300/602/shown.png"
-    );
-    assert_eq!(
-        native["referenced_message"]["attachments"][0]["filename"],
-        "earlier.pdf"
-    );
-    assert!(native["attachments"][0].get("url").is_none());
-    Ok(())
-}
-
 /// Asks the provider's settings endpoint, as `bearer`, for its status or
 /// to apply its settings file.
 async fn settings(
@@ -1107,6 +1058,7 @@ fn edit_settings(
     Ok(file.write(&state.installation, "discord")?)
 }
 
+mod admission;
 mod channels;
 mod interaction_replies;
 mod interactions;

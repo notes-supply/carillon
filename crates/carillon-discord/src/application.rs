@@ -280,7 +280,7 @@ async fn connect(
     let mut deliveries = tokio::spawn(delivery_loop(
         delivery_state.core,
         reactions.clone(),
-        http,
+        delivery_state.participation,
         attachment_store(&state.installation.value.data_dir),
         delivering,
         stopping.clone(),
@@ -289,9 +289,6 @@ async fn connect(
     // Interactions are this function's tasks, not the gateway's, so ending
     // the gateway does not cut short one it already took.
     let mut interactions = JoinSet::new();
-    // A session recorded by a graceful stop is resumed only by the same
-    // provider, bot, guild and token, and only once. It is consumed only now,
-    // when nothing that can still fail stands before the gateway serving it.
     let record = record_path(&state_directory(&state.installation, &state.health.id));
     let owner = Identity::new(
         &state.health.id,
@@ -466,7 +463,10 @@ async fn discord_operation(
             .filter_map(|person| person.parse().ok())
             .collect(),
     };
-    Ok(match operation.execute(&app.http, &scope).await {
+    let executed = operation
+        .execute(&app.http, &scope, &state.participation)
+        .await;
+    Ok(match executed {
         Ok(result) => Json(result).into_response(),
         Err(failure) => {
             let status = match failure.outcome {
@@ -712,6 +712,7 @@ async fn simulate(
             );
         }
     }
+    let direct = plan.direct();
     let mut resolved = prepare_deterministic_conversation(&state.participation, plan)?;
     resolved.event.attachments = staged.as_ref().map(|staged| staged.manifest.clone());
     let mut feedback = Vec::new();
@@ -735,6 +736,9 @@ async fn simulate(
         drop(staged);
         settled?
     };
+    if let Some((person, message)) = direct {
+        state.participation.answered(&person, &message);
+    }
     let native_ref = format!("local:{}", resolved.event.event_id);
     let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
     let messages = match &delivery {

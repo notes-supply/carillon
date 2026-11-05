@@ -1675,7 +1675,6 @@ async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result
     assert_eq!(free.len(), slots, "the files still waited for a slot");
     drop(free);
     tokio::time::timeout(PAST_DEADLINE, dispatcher).await??;
-    // Admitted, its files being prepared: none was fetched or submitted.
     let trace = trace(&world)?;
     position(&trace, "status 188")?;
     assert!(

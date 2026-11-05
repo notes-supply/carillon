@@ -166,12 +166,13 @@ async fn upload_refusing(
     let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
+    let records = tempfile::tempdir()?;
     let ended = tokio::time::timeout(
         Duration::from_secs(10),
         delivery_loop(
             core_client(format!("http://{address}"))?,
             reactions.clone(),
-            http,
+            participation(records.path())?,
             store.to_path_buf(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),

@@ -68,6 +68,9 @@ the agent's normal reply; on Pi, a file for the reply goes with the runtime's
   allowlist check for direct messages.
 - [`skill`](skill/SKILL.md): the agent's instructions.
 
-The runtime gives the tools each conversation's Discord origin, from the
-latest message it admitted there, and its provider connection, from the
-installation's registry; never from the model's arguments.
+The runtime gives the tools each conversation's agent and Discord origin,
+from the latest message it admitted there, and its provider connection,
+from the installation's registry; never from the model's arguments. A send
+carries the agent and the origin's channel as `sender`, which the provider
+records: a reply to the message then names that agent, and a direct message
+sent from another conversation opens the person's next direct message.

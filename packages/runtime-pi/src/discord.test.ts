@@ -47,7 +47,10 @@ async function provider() {
  * Runs one conversation from `origin` whose model enables the Discord tools
  * and then makes `calls`, returning what it saw and what the provider got.
  */
-async function converse(origin: Record<string, unknown>, calls: Record<string, string | number>[]) {
+async function converse(
+  origin: Record<string, unknown>,
+  calls: Record<string, string | number | Record<string, string>>[],
+) {
   const root = await mkdtemp(join(tmpdir(), "carillon-discord-tools-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const token = "operator-test-token";
@@ -78,6 +81,7 @@ async function converse(origin: Record<string, unknown>, calls: Record<string, s
       context: () =>
         Promise.resolve({
           interface_id: "discord-private",
+          agent_id: "assistant",
           native: { origin },
           connection: {
             url: discord.url,
@@ -148,6 +152,40 @@ it("works from a direct message and reaches a person's direct messages by their 
   expect(discord.operations).toEqual([
     { action: "server.info" },
     { action: "messages.list", limit: 2, channel_id: "9" },
-    { action: "messages.send", user_id: "4", content: "An update." },
+    {
+      action: "messages.send",
+      user_id: "4",
+      content: "An update.",
+      sender: { agent_id: "assistant", channel_id: "9" },
+    },
+  ]);
+});
+
+it("says which agent sends, from which conversation, and never lets the model say it", async () => {
+  const origin = {
+    guild_id: "1",
+    channel_id: "2",
+    source_channel_id: "2",
+    message_id: "3",
+    user_id: "4",
+  };
+  const { settled, discord } = await converse(origin, [
+    { action: "messages.send", user_id: "4", content: "Done in #home." },
+    {
+      action: "messages.send",
+      channel_id: "5",
+      content: "Claimed.",
+      sender: { agent_id: "someone-else", channel_id: "6" },
+    },
+  ]);
+  expect(settled.status).toBe("done");
+  expect(discord.operations).toEqual([
+    { action: "server.info" },
+    {
+      action: "messages.send",
+      user_id: "4",
+      content: "Done in #home.",
+      sender: { agent_id: "assistant", channel_id: "2" },
+    },
   ]);
 });

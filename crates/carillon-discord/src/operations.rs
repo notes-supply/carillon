@@ -1,14 +1,13 @@
 //! Agent operations: one guild and its allowlisted people's direct
-//! messages, the existing Discord client, no participation changes.
+//! messages, through the existing Discord client. They enroll no channel in
+//! the provider's participation; they only record what they send.
 use clap::{ArgAction, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
-use twilight_http::{
-    Client, Response, error::ErrorType, request::channel::reaction::RequestReactionType,
-};
+use twilight_http::{Client, Response, error::ErrorType};
 use twilight_model::{
-    channel::{Channel, ChannelType, message::AllowedMentions},
+    channel::{Channel, ChannelType},
     guild::Permissions,
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
     id::{
@@ -19,10 +18,12 @@ use twilight_model::{
 };
 
 mod direct;
+mod messages;
 #[cfg(test)]
 mod tests;
 mod upload;
 
+use crate::conversations::{Participation, Sender};
 pub(crate) use direct::Scope;
 use upload::uploads;
 pub(crate) use upload::{ATTACHMENT_BYTES, ATTACHMENT_COUNT, Upload, too_large, too_many};
@@ -197,6 +198,11 @@ pub(crate) enum Messages {
         #[arg(skip)]
         #[serde(default)]
         attachments: Vec<Upload>,
+        /// The agent sending, and its conversation's channel, which its
+        /// Discord tools add, never the model.
+        #[arg(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender: Option<Sender>,
     },
     #[serde(rename = "messages.edit")]
     Edit {
@@ -404,11 +410,15 @@ impl Operation {
         self,
         http: &Client,
         scope: &Scope,
+        participation: &Participation,
     ) -> Result<Value, OperationError> {
         let mutates = self.mutates();
-        let result = tokio::time::timeout(Duration::from_secs(30), self.run(http, scope))
-            .await
-            .unwrap_or_else(|_| Err(OperationError::uncertain()));
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.run(http, scope, participation),
+        )
+        .await
+        .unwrap_or_else(|_| Err(OperationError::uncertain()));
         // The result goes to the model, which gets no signed attachment address.
         let result = result.map(|mut value| {
             strip_attachment_addresses(&mut value);
@@ -424,13 +434,18 @@ impl Operation {
         })
     }
 
-    async fn run(self, http: &Client, scope: &Scope) -> Result<Value, OperationError> {
+    async fn run(
+        self,
+        http: &Client,
+        scope: &Scope,
+        participation: &Participation,
+    ) -> Result<Value, OperationError> {
         let guild = scope.guild;
         match self {
             Self::Server(operation) => operation.run(http, guild).await,
             Self::Channels(operation) => operation.run(http, guild).await,
             Self::Threads(operation) => operation.run(http, guild).await,
-            Self::Messages(operation) => operation.run(http, scope).await,
+            Self::Messages(operation) => operation.run(http, scope, participation).await,
             Self::Roles(operation) => operation.run(http, guild).await,
             Self::Members(operation) => operation.run(http, guild).await,
         }
@@ -664,151 +679,6 @@ impl Threads {
                     request = request.locked(locked);
                 }
                 decoded(request.await?).await
-            }
-        }
-    }
-}
-
-impl Messages {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "direct dispatch over the resource-specific Discord operations"
-    )]
-    async fn run(self, http: &Client, scope: &Scope) -> Result<Value, OperationError> {
-        match self {
-            Self::List {
-                channel_id,
-                user_id,
-                before,
-                limit,
-            } => {
-                let channel_id = direct::destination(http, scope, channel_id, user_id)
-                    .await?
-                    .id;
-                validate_limit(limit)?;
-                let request = http.channel_messages(channel_id);
-                let response = if let Some(before) = before {
-                    request.before(before).limit(limit).await?
-                } else {
-                    request.limit(limit).await?
-                };
-                let messages = response
-                    .models()
-                    .await
-                    .map_err(|_| OperationError::uncertain())?;
-                let next = if messages.len() == usize::from(limit) {
-                    messages.last().map(|m| m.id)
-                } else {
-                    None
-                };
-                Ok(
-                    json!({ "items": messages, "next_before": next, "may_have_more": next.is_some() }),
-                )
-            }
-            Self::Get {
-                channel_id,
-                message_id,
-            } => {
-                direct::conversation(http, scope, channel_id).await?;
-                decoded(http.message(channel_id, message_id).await?).await
-            }
-            Self::Send {
-                channel_id,
-                user_id,
-                content,
-                reply_to,
-                mention_users,
-                mention_roles,
-                attachments,
-                ..
-            } => {
-                let attachments = uploads(attachments)?;
-                if content.is_empty() && attachments.is_empty() {
-                    return Err(OperationError::invalid(
-                        "A message needs content or attachments.",
-                    ));
-                }
-                let target = direct::destination(http, scope, channel_id, user_id).await?;
-                let channel_id = target.id;
-                if let Some(message) = reply_to {
-                    http.message(channel_id, message).await?;
-                }
-                let mentions = AllowedMentions {
-                    users: mention_users,
-                    roles: mention_roles,
-                    ..AllowedMentions::default()
-                };
-                let mut request = http
-                    .create_message(channel_id)
-                    .content(&content)
-                    .allowed_mentions(Some(&mentions));
-                if !attachments.is_empty() {
-                    request = request.attachments(&attachments);
-                }
-                if let Some(message) = reply_to {
-                    request = request.reply(message);
-                }
-                let mut result = decoded(request.await?).await?;
-                if let Some(id) = result.get("id").and_then(Value::as_str) {
-                    result["url"] = json!(target.link(scope, id));
-                }
-                Ok(result)
-            }
-            Self::Edit {
-                channel_id,
-                message_id,
-                content,
-            } => {
-                direct::conversation(http, scope, channel_id).await?;
-                decoded(
-                    http.update_message(channel_id, message_id)
-                        .content(Some(&content))
-                        .allowed_mentions(Some(&AllowedMentions::default()))
-                        .await?,
-                )
-                .await
-            }
-            Self::Delete {
-                channel_id,
-                message_id,
-            } => {
-                direct::conversation(http, scope, channel_id).await?;
-                http.delete_message(channel_id, message_id).await?;
-                Ok(json!({ "message_id": message_id, "deleted": true }))
-            }
-            Self::Pin {
-                channel_id,
-                message_id,
-                pinned,
-            } => {
-                direct::conversation(http, scope, channel_id).await?;
-                if pinned {
-                    http.create_pin(channel_id, message_id).await?;
-                } else {
-                    http.delete_pin(channel_id, message_id).await?;
-                }
-                Ok(json!({ "message_id": message_id, "pinned": pinned }))
-            }
-            Self::React {
-                channel_id,
-                message_id,
-                emoji,
-                add,
-            } => {
-                direct::conversation(http, scope, channel_id).await?;
-                if emojis::get(&emoji).is_none() {
-                    return Err(OperationError::invalid(
-                        "Use a Unicode emoji for reactions.",
-                    ));
-                }
-                let emoji = RequestReactionType::Unicode { name: &emoji };
-                if add {
-                    http.create_reaction(channel_id, message_id, &emoji).await?;
-                } else {
-                    http.delete_current_user_reaction(channel_id, message_id, &emoji)
-                        .await?;
-                }
-                Ok(json!({ "message_id": message_id, "added": add }))
             }
         }
     }

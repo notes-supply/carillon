@@ -46,6 +46,9 @@ pub(crate) enum FileChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direct_messages: Option<String>,
     },
+    /// The agent that answers direct messages, unless the settings already
+    /// name one.
+    DirectMessages { agent: String },
     /// Whether the custom module serves, and its file when given; without
     /// one the file keeps the path it declares.
     Module {
@@ -115,6 +118,11 @@ impl FileChange {
                     discord.direct_messages =
                         direct_messages.map(|agent| super::DirectMessages { agent });
                 }
+            }
+            Self::DirectMessages { agent } => {
+                discord
+                    .direct_messages
+                    .get_or_insert(super::DirectMessages { agent });
             }
             Self::Module { enabled, path } => {
                 discord.module.enabled = enabled;

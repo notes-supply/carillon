@@ -114,7 +114,9 @@ const MODES: [(&str, DiscordActivation, DiscordConversation); 4] = [
 
 /// Asks for the bot token, then the server, channels and people, and writes
 /// the provider's settings, naming the token's file. `connect` gives a
-/// Discord client for a token. Keeping saved settings changes nothing.
+/// Discord client for a token. Keeping saved settings changes nothing, but
+/// that they name the assistant for direct messages when they name no agent
+/// for them and the installation has it.
 ///
 /// The settings are validated whole before anything is written. A token
 /// other than the one they name goes to a new private file first, and the
@@ -153,7 +155,7 @@ pub(crate) async fn setup(
         && signs_in_as_saved(prompt, &connect, token, settings).await?
         && prompt.confirm("Keep the saved Discord bot and settings?", true)?
     {
-        return Ok(());
+        return keep(prompt, loaded, provider, settings).await;
     }
     prompt.say(
         "Paste the bot token from the Bot page of your application in the Discord Developer \
@@ -221,8 +223,11 @@ pub(crate) async fn setup(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    let direct = answering_direct_messages(loaded, &settings)?
+        .map(|agent| format!(" Direct messages from them go to {agent}."))
+        .unwrap_or_default();
     prompt.say(&format!(
-        "{} answers {} in {} on {guild}.",
+        "{} answers {} in {} on {guild}.{direct}",
         bot.name,
         people
             .iter()
@@ -232,6 +237,48 @@ pub(crate) async fn setup(
         answered.join(", "),
     ))?;
     Ok(())
+}
+
+/// Keeps the saved settings, naming the assistant for direct messages when
+/// they name no agent for them and the installation has it.
+async fn keep(
+    prompt: &mut impl Questions,
+    loaded: &LoadedConfig,
+    provider: &str,
+    settings: &DiscordConfig,
+) -> Result<()> {
+    if settings.direct_messages.is_some() {
+        return Ok(());
+    }
+    let Some(agent) = assistant(loaded) else {
+        return Ok(());
+    };
+    deliver(loaded, provider, FileChange::DirectMessages { agent }).await?;
+    if let Some(agent) = answering_direct_messages(loaded, &DiscordConfig::load(loaded, provider)?)?
+    {
+        prompt.say(&format!(
+            "Direct messages from allowlisted people go to {agent}."
+        ))?;
+    }
+    Ok(())
+}
+
+/// The agent that answers direct messages under `settings`, as setup names
+/// agents.
+fn answering_direct_messages(
+    loaded: &LoadedConfig,
+    settings: &DiscordConfig,
+) -> Result<Option<String>> {
+    settings
+        .direct_messages
+        .as_ref()
+        .map(|direct| {
+            Ok(loaded
+                .value
+                .agent(&direct.agent)?
+                .label(&loaded.value.agents))
+        })
+        .transpose()
 }
 
 /// Unattended setup: the guild, bot, people and routes given on the command

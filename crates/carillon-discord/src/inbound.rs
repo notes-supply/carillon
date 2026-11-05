@@ -194,7 +194,8 @@ impl Ingress {
 /// refused with feedback, ignored by admission, or left unconfirmed by the
 /// stop or by core. Everything before submission ends by one preparation
 /// deadline; a message whose route is not known by then was never admitted
-/// and is dropped silently.
+/// and is dropped silently. Once core holds a direct message, what its text
+/// quoted of the direct messages sent its person is forgotten.
 pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) -> Prepared {
     let deadline = Instant::now() + PREPARATION_DEADLINE;
     let settings = inbound.settings;
@@ -232,11 +233,18 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) -> Pr
     ) else {
         return Prepared::Ignored;
     };
-    if plan.attachments.is_empty() {
+    let direct = plan.direct();
+    let prepared = if plan.attachments.is_empty() {
         prepare_text(ingress, plan, &settings, deadline, inbound.dispatch).await
     } else {
         prepare_files(ingress, plan, &settings, deadline).await
+    };
+    if prepared == Prepared::Accepted
+        && let Some((person, message)) = direct
+    {
+        ingress.participation.answered(&person, &message);
     }
+    prepared
 }
 
 /// Open a text's conversation and start submitting it by `deadline`, then

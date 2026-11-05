@@ -15,6 +15,7 @@ const Origin = Type.Object({
 });
 const Context = Type.Object({
   interface_id: Type.String(),
+  agent_id: Type.Optional(Type.String()),
   connection: Type.Object({
     url: Type.String(),
     token_file: Type.String(),
@@ -67,6 +68,15 @@ export class DiscordClient {
 
   get origin(): Origin | undefined {
     return Check(Context, this.context) ? this.context.native.origin : undefined;
+  }
+
+  /** The conversation's agent and Discord channel, which the provider records with what it sends. */
+  get sender(): { agent_id: string; channel_id: string | undefined } | undefined {
+    if (!Check(Context, this.context)) return undefined;
+    const { agent_id, native } = this.context;
+    return agent_id === undefined || agent_id === ""
+      ? undefined
+      : { agent_id, channel_id: native.origin?.channel_id };
   }
 
   async call(operation: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
