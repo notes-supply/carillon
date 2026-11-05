@@ -154,6 +154,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
             core,
             Reactions::new(http.clone(), crate::config::Settings::new(config)),
             http,
+            std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
         ),
@@ -226,6 +227,7 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
                 )),
             ),
             http,
+            std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
         ),
@@ -423,6 +425,7 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
                 )),
             ),
             http.clone(),
+            std::path::PathBuf::new(),
             outcomes,
             stopping.clone(),
         ))
@@ -495,6 +498,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
                 )),
             ),
             http,
+            std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
         ),
@@ -584,6 +588,7 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
             core_client(format!("http://{address}"))?,
             reactions.clone(),
             http,
+            std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
         ),
@@ -908,4 +913,5 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     Ok(())
 }
 
+mod files;
 mod silence;

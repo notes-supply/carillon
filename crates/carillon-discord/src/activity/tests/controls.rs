@@ -84,6 +84,7 @@ fn following(discord: &Substitute, records: &Path, reactions: &Reactions) -> Pro
         discord.client.clone(),
         reactions.clone(),
         http,
+        PathBuf::new(),
         delivering,
         stopping.clone(),
     );

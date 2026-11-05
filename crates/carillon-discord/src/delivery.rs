@@ -9,8 +9,11 @@ use carillon_protocol::{
     model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState},
     turns::{ControlAction, Silence},
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, hash_map::Entry},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -543,13 +546,15 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 
 /// Claims, sends and acknowledges deliveries until the provider stops.
 /// Stopping ends the wait for work, never a delivery already claimed: it is
-/// sent and its outcome recorded first. Answers are plain text. `delivering`
-/// hears of each claimed delivery's job before it is sent, and of its
-/// outcome once core recorded it, without waiting for whoever receives it.
+/// sent and its outcome recorded first. Answers are text, with the files
+/// core keeps for them in `store`. `delivering` hears of each claimed
+/// delivery's job before it is sent, and of its outcome once core recorded
+/// it, without waiting for whoever receives it.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     reactions: Reactions,
     http: Arc<DiscordHttp>,
+    store: PathBuf,
     delivering: mpsc::UnboundedSender<Delivering>,
     stopping: CancellationToken,
 ) -> Result<()> {
@@ -576,7 +581,7 @@ pub(crate) async fn delivery_loop(
         };
         // Nobody may be listening: activity cards can be disabled.
         let _ = delivering.send(Delivering::Claimed(delivery.origin.turn_id.clone()));
-        let (outcome, native_ref, shown) = attempt_delivery(&http, &delivery).await;
+        let (outcome, native_ref, shown) = attempt_delivery(&http, &store, &delivery).await;
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -626,10 +631,11 @@ async fn reconcile_after_claim_failure(core: &CoreClient, reactions: &Reactions)
     }
 }
 
-/// Sends a delivery's text and says how it went: its outcome, the messages
-/// Discord confirmed, and the reaction to show.
+/// Sends a delivery's text and files and says how it went: its outcome, the
+/// messages Discord confirmed, and the reaction to show.
 async fn attempt_delivery(
     http: &DiscordHttp,
+    store: &Path,
     delivery: &Delivery,
 ) -> (DeliveryOutcome, Option<String>, Feedback) {
     // A turn steered into another or stopped sends nothing: its message
@@ -644,7 +650,8 @@ async fn attempt_delivery(
             return (DeliveryOutcome::Uncertain, None, Feedback::Uncertain);
         }
     };
-    match send_discord_message(http, channel, &delivery.content).await {
+    let messages = files::compose(&delivery.content, &delivery.files);
+    match send_discord_messages(http, channel, store, &messages).await {
         Ok(messages) => (
             DeliveryOutcome::Delivered,
             Some(
@@ -667,26 +674,73 @@ async fn attempt_delivery(
     }
 }
 
-/// Sends `content` in as many messages as it takes and returns the messages
-/// in order.
+/// A message of a delivery as Discord receives it: its text, and each
+/// file's name and digest as read from core's copy.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Composed {
+    pub(crate) content: String,
+    pub(crate) files: Vec<(String, String)>,
+}
+
+/// The messages that send `delivery`, with their files read from `store`,
+/// for a deterministic run, which sends nothing.
+pub(crate) async fn compose(store: &Path, delivery: &Delivery) -> Result<Vec<Composed>> {
+    let mut composed = Vec::new();
+    for message in files::compose(&delivery.content, &delivery.files) {
+        let loaded = files::load(store, &message.files).await?;
+        composed.push(Composed {
+            content: message.content,
+            files: loaded
+                .into_iter()
+                .map(|file| (file.filename, hex::encode(Sha256::digest(&file.file))))
+                .collect(),
+        });
+    }
+    Ok(composed)
+}
+
+/// Sends `content` in as many messages as it takes and returns them in order.
+#[cfg(test)]
 pub(crate) async fn send_discord_message(
     http: &DiscordHttp,
     channel_id: Id<ChannelMarker>,
     content: &str,
 ) -> Result<Vec<Id<MessageMarker>>> {
-    let chunks = discord_chunks(content);
-    if chunks.is_empty() {
+    send_discord_messages(
+        http,
+        channel_id,
+        Path::new(""),
+        &files::compose(content, &[]),
+    )
+    .await
+}
+
+/// Sends `messages` in order, each with its files read from `store`, and
+/// returns the messages Discord confirmed.
+async fn send_discord_messages(
+    http: &DiscordHttp,
+    channel_id: Id<ChannelMarker>,
+    store: &Path,
+    messages: &[files::Outgoing<'_>],
+) -> Result<Vec<Id<MessageMarker>>> {
+    if messages.is_empty() {
         bail!("Discord delivery content is empty");
     }
     // Delivered text is the agent's and the runtime's, not the user's: it
     // must not notify anyone, whatever mention syntax it contains.
     let silent = AllowedMentions::default();
-    let mut ids = Vec::with_capacity(chunks.len());
-    for chunk in &chunks {
-        let request = http
+    let mut ids = Vec::with_capacity(messages.len());
+    for message in messages {
+        let attachments = files::load(store, &message.files).await?;
+        let mut request = http
             .create_message(channel_id)
-            .allowed_mentions(Some(&silent))
-            .content(chunk);
+            .allowed_mentions(Some(&silent));
+        if !message.content.is_empty() {
+            request = request.content(&message.content);
+        }
+        if !attachments.is_empty() {
+            request = request.attachments(&attachments);
+        }
         ids.push(request.await?.model().await?.id);
     }
     Ok(ids)
@@ -716,5 +770,6 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
     chunks
 }
 
+mod files;
 #[cfg(test)]
 pub(crate) mod tests;
