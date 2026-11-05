@@ -57,7 +57,9 @@ native state between engines or T3 projects.
   executed on arrival. An answer can carry files too: on Pi the agent
   attaches them, and core keeps a copy of each with the answer, which
   Discord uploads with it. A file that can't be kept or sent never fails
-  the answer; the answer names it and where it is. T3 answers are text.
+  the answer; the answer names it and where it is. Files attached while the
+  agent worked on an answer that never came, because it was stopped,
+  interrupted or failed, are dropped. T3 answers are text.
 - **Turns.** Core stores each accepted turn before acknowledging it, hands it
   once to its runtime, and stores the answer and its delivery together. Pi
   holds the turns it accepts and finishes them across its own restarts; a

@@ -217,8 +217,8 @@ it. An agent's settings may select schedules, subagents and the MCP servers
 of `CARILLON_HOME/pi/mcp.json` as built-in extensions; a schedule's run and
 a background subagent's report come in turns Pi opens, in the channel core
 recorded for the conversation. The runtime's own `attach` tool records a file
-for the conversation's next answer, which takes every file attached before
-it; a subagent is not offered it. Pi's sign-in and catalogue live in
+with the run that attached it. That run's answer takes the file, and a run
+that ends without an answer drops it. A subagent is not offered the tool. Pi's sign-in and catalogue live in
 `CARILLON_HOME/pi`, apart from `~/.pi`.
 See the [Pi guide](../../packages/runtime-pi/README.md).
 

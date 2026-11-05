@@ -505,15 +505,24 @@ and suitable images (PNG, JPEG, WebP, GIF) are also given to the model as
 images. Nothing is extracted, converted or executed on arrival.
 
 The agent can send files with its answer. On Pi it attaches them with its
-`attach` tool; T3 answers are text only. Before core records the answer, it
-copies each file into `state/attachments`, within the limits below, and keeps
-it with the turn. Discord uploads the files with the answer, at most 10 and
-25 MiB to a message. A file core couldn't keep, or one over Discord's 20 MiB
-upload limit, is named in the answer with where the agent had it. Delivery
-sends core's copies, so the agent's own files may change or go once the
-answer is recorded, and an answer that waits for Discord, even across
-restarts, never runs the model again. To post files elsewhere, the agent
-uses its [Discord tools](#agent-discord-tools).
+`attach` tool. T3 answers are text only. A file goes with the answer of the
+run that attached it. If that run is stopped, interrupted by a new message or
+fails, its files are dropped, and the agent attaches them again with a later
+answer.
+
+Before core records the answer, it copies each file into `state/attachments`,
+within the limits below, and keeps it with the turn. A file core couldn't
+keep, such as one that changed or couldn't be read while core copied it, is
+named in the answer with the reason, and the other files are kept.
+
+Discord takes at most 10 files and 25 MiB in one message. The answer's last
+message carries the first files, and the files that don't fit follow on more
+messages after it, so every file arrives. A file over Discord's 20 MiB upload
+limit is named in the answer with where the agent had it. Delivery sends
+core's copies, so the agent's own files may change or go once the answer is
+recorded, and an answer that waits for Discord, even across restarts, never
+runs the model again. To post files elsewhere, the agent uses its
+[Discord tools](#agent-discord-tools).
 
 Limits, each applied when its service restarts:
 
@@ -657,9 +666,12 @@ the tools can administer the server.
   example), and never replays it: tools may already have run. Send another
   message to continue. `carillon inspect TURN_ID` and `carillon logs
   runtime-pi` show more.
-- **A reply may not have arrived.** Delivery has its own outbox: an answer
-  is never generated twice. If Discord crashed mid-send, the message gets the
-  uncertain reaction.
+- **A reply may not have arrived.** Delivery has its own outbox, so an
+  answer is never generated twice. Each message of an answer is sent once,
+  the messages that carry its extra files included. If Discord refuses one,
+  or the Discord provider crashes while it sends text or uploads a file,
+  nothing is sent again. The messages that went out stay, and the person's
+  message gets the uncertain reaction.
 - **A runtime crashes.** Its service restarts it. Pi finishes the answers it
   held: a model call it cut off counts as a failed attempt and is retried,
   and a tool call it cut off is reported to the model as interrupted rather
