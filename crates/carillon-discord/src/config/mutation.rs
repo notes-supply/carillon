@@ -147,8 +147,6 @@ impl FileChange {
     }
 }
 
-/// Sorts `answered` into the order the settings list them in, new ones
-/// last as answered, so answers that only reorder them change nothing.
 fn in_order_of<T>(answered: &mut [T], settings: &[T], same: impl Fn(&T, &T) -> bool) {
     answered.sort_by_key(|answer| {
         settings

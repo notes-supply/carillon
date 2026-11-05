@@ -1,13 +1,8 @@
-//! Each writer edits the owner's file only where a change makes it differ,
-//! so a change and its undo leave it byte for byte as it was.
-
 use std::fs;
 
 use super::{installation, later, writer};
 use crate::config::{DiscordActivation, DiscordConfig, DiscordRoute, FileChange, Routes};
 
-/// Sets the first route's `listens` to mention and back to always through
-/// the provider's writer, over `owned`, and answers the file after each.
 async fn listens_and_back(owned: &str) -> anyhow::Result<(String, String)> {
     let (_installation, writer) = writer()?;
     let path = writer

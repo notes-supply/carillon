@@ -470,6 +470,10 @@ async fn a_route_change_held_past_its_deadline_by_a_module_change_is_unconfirmed
     Ok(())
 }
 
+fn block_the_executor_for(duration: Duration) {
+    std::thread::sleep(duration);
+}
+
 #[tokio::test]
 async fn a_route_change_whose_writer_frees_only_after_its_deadline_is_unconfirmed_and_not_made()
 -> anyhow::Result<()> {
@@ -492,9 +496,7 @@ async fn a_route_change_whose_writer_frees_only_after_its_deadline_is_unconfirme
                     move |_, _| async move {
                         let _ = holding.send(());
                         let _ = released.await;
-                        // Blocks the executor past the card's deadline, so
-                        // the writer is free when the card next looks.
-                        std::thread::sleep(Duration::from_millis(150));
+                        block_the_executor_for(Duration::from_millis(150));
                         Err(crate::module::ChangeError::Busy("held".into()))
                     },
                 )
@@ -524,7 +526,14 @@ async fn a_route_change_whose_writer_frees_only_after_its_deadline_is_unconfirme
     });
     started.await?;
     let _ = release.send(());
-    assert!(module.await?.is_err(), "the module change was made");
+    let refused = module.await?.err().context("the module change was made")?;
+    assert!(
+        matches!(
+            refused,
+            crate::config::Refused::Module(crate::module::ChangeError::Busy(_))
+        ),
+        "{refused:?}"
+    );
     let (shown, notice) = card.await?;
     assert_eq!(notice, Some(Notice::Unconfirmed));
     assert_eq!(

@@ -1,10 +1,3 @@
-//! The settings file's text, written as an edit of what the owner wrote:
-//! only the values a change makes differ are written, each in its place
-//! and keeping its comment, so a change and its undo leave the file as it
-//! was. Comments, order, line endings and the defaults the file leaves
-//! unstated stay. Routes are matched by channel and other array elements
-//! by value, so each keeps its line and comments.
-
 use anyhow::Result;
 use toml::{Table, Value};
 use toml_edit::{
@@ -13,9 +6,6 @@ use toml_edit::{
 
 use super::{DiscordConfig, ModuleSetting};
 
-/// The text of a file that says `settings`: `file`, the text in place,
-/// edited where it says otherwise, or a new file's text when there is none
-/// or it is not settings.
 pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<String> {
     let Some((mut document, previous)) = file.and_then(|file| {
         let previous = toml::from_str::<DiscordConfig>(file).ok()?;
@@ -26,14 +16,13 @@ pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<Strin
     }) else {
         return Ok(toml::to_string_pretty(settings)?);
     };
-    // Settings a new file leaves unstated, spelt out as a file may state them.
-    let unstated = Table::from_iter([(
+    let skipped_defaults = Table::from_iter([(
         "module".to_owned(),
         Value::Table(Table::try_from(ModuleSetting::default())?),
     )]);
     let stated = |settings: &DiscordConfig| -> Result<Table> {
         let mut table = Table::try_from(settings)?;
-        for (key, value) in &unstated {
+        for (key, value) in &skipped_defaults {
             table.entry(key).or_insert_with(|| value.clone());
         }
         Ok(table)
@@ -42,7 +31,7 @@ pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<Strin
         document.as_table_mut(),
         &stated(&previous)?,
         &stated(settings)?,
-        Some(&unstated),
+        Some(&skipped_defaults),
     );
     let text = document.to_string();
     Ok(if file.is_some_and(|file| file.contains("\r\n")) {
@@ -52,10 +41,12 @@ pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<Strin
     })
 }
 
-/// Edits `file`, which says `previous`, to say `next`. A value or table
-/// that comes to say what `unstated` holds for it goes, as a new file
-/// leaves it unstated, unless a comment remains on it.
-fn edit(file: &mut dyn TableLike, previous: &Table, next: &Table, unstated: Option<&Table>) {
+fn edit(
+    file: &mut dyn TableLike,
+    previous: &Table,
+    next: &Table,
+    skipped_defaults: Option<&Table>,
+) {
     for key in previous.keys().filter(|key| !next.contains_key(*key)) {
         file.remove(key);
     }
@@ -68,19 +59,25 @@ fn edit(file: &mut dyn TableLike, previous: &Table, next: &Table, unstated: Opti
             file.insert(key, fresh_item(after));
             continue;
         };
-        let unstated = unstated.and_then(|unstated| unstated.get(key));
-        edit_item(item, before, after, unstated.and_then(Value::as_table));
-        if unstated == Some(after) && !commented(item) {
+        let default = skipped_defaults.and_then(|defaults| defaults.get(key));
+        edit_item(item, before, after, default.and_then(Value::as_table));
+        let left_as_a_new_file_would = default == Some(after) && !commented(item);
+        if left_as_a_new_file_would {
             file.remove(key);
         }
     }
 }
 
-fn edit_item(item: &mut Item, before: Option<&Value>, after: &Value, unstated: Option<&Table>) {
+fn edit_item(
+    item: &mut Item,
+    before: Option<&Value>,
+    after: &Value,
+    skipped_defaults: Option<&Table>,
+) {
     match (before, after) {
         (Some(Value::Table(before)), Value::Table(after)) => {
             if let Some(table) = item.as_table_like_mut() {
-                return edit(table, before, after, unstated);
+                return edit(table, before, after, skipped_defaults);
             }
         }
         (Some(Value::Array(before)), Value::Array(after)) => {
@@ -101,42 +98,40 @@ fn edit_item(item: &mut Item, before: Option<&Value>, after: &Value, unstated: O
     }
 }
 
-/// One edit of an array's elements: removals come first, from the end,
-/// then each element of the new array in order, kept or inserted.
-enum Step<'a> {
-    Remove(usize),
-    Keep {
+struct Steps<'a> {
+    removed_from_the_end: Vec<usize>,
+    placed: Vec<Placed<'a>>,
+}
+
+enum Placed<'a> {
+    Kept {
         index: usize,
         before: &'a Value,
         after: &'a Value,
     },
-    Insert(usize, &'a Value),
+    Inserted(usize, &'a Value),
 }
 
-/// What an element is known by: a route by its channel, any other element
-/// by its value.
 fn identity(value: &Value) -> &Value {
     value.get("channel_id").unwrap_or(value)
 }
 
-/// The steps that turn the elements `before` into `after`, or none when
-/// `after` reorders the elements it keeps.
-fn steps<'a>(before: &'a [Value], after: &'a [Value]) -> Option<Vec<Step<'a>>> {
+fn steps<'a>(before: &'a [Value], after: &'a [Value]) -> Option<Steps<'a>> {
     let among = |value: &Value, values: &[Value]| {
         values
             .iter()
             .any(|other| identity(other) == identity(value))
     };
-    let mut steps: Vec<Step<'_>> = (0..before.len())
+    let removed_from_the_end = (0..before.len())
         .rev()
         .filter(|index| !among(&before[*index], after))
-        .map(Step::Remove)
         .collect();
+    let mut placed = Vec::new();
     let mut kept = before.iter().filter(|value| among(value, after)).peekable();
     for (index, value) in after.iter().enumerate() {
         match kept.peek() {
             Some(before) if identity(before) == identity(value) => {
-                steps.push(Step::Keep {
+                placed.push(Placed::Kept {
                     index,
                     before,
                     after: value,
@@ -144,26 +139,28 @@ fn steps<'a>(before: &'a [Value], after: &'a [Value]) -> Option<Vec<Step<'a>>> {
                 kept.next();
             }
             _ if among(value, before) => return None,
-            _ => steps.push(Step::Insert(index, value)),
+            _ => placed.push(Placed::Inserted(index, value)),
         }
     }
-    kept.next().is_none().then_some(steps)
+    kept.next().is_none().then_some(Steps {
+        removed_from_the_end,
+        placed,
+    })
 }
 
-/// Edits each `[[table]]` in place, matched as [`steps`] matches them.
 fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> bool {
     let Some(steps) = steps(before, after)
         .filter(|_| file.len() == before.len() && after.iter().all(Value::is_table))
     else {
         return false;
     };
-    for step in steps {
-        match step {
-            Step::Remove(index) => {
-                file.remove(index);
-            }
-            Step::Insert(index, Value::Table(table)) => file.insert(index, fresh_table(table)),
-            Step::Keep {
+    for index in steps.removed_from_the_end {
+        file.remove(index);
+    }
+    for placed in steps.placed {
+        match placed {
+            Placed::Inserted(index, Value::Table(table)) => file.insert(index, fresh_table(table)),
+            Placed::Kept {
                 index,
                 before: Value::Table(before),
                 after: Value::Table(after),
@@ -172,23 +169,23 @@ fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> b
                     edit(table, before, after, None);
                 }
             }
-            Step::Insert(..) | Step::Keep { .. } => {}
+            Placed::Inserted(..) | Placed::Kept { .. } => {}
         }
     }
     true
 }
 
-/// Edits each element in place, matched as [`steps`] matches them, so each
-/// keeps its line and the comments on it.
 fn edit_array(file: &mut Array, before: &[Value], after: &[Value]) -> bool {
     let Some(steps) = steps(before, after).filter(|_| file.len() == before.len()) else {
         return false;
     };
-    for step in steps {
-        match step {
-            Step::Remove(index) => remove_element(file, index),
-            Step::Insert(index, value) => insert_element(file, index, fresh(value)),
-            Step::Keep {
+    for index in steps.removed_from_the_end {
+        remove_element(file, index);
+    }
+    for placed in steps.placed {
+        match placed {
+            Placed::Inserted(index, value) => insert_element(file, index, fresh_value(value)),
+            Placed::Kept {
                 index,
                 before: Value::Table(before),
                 after: Value::Table(after),
@@ -200,7 +197,7 @@ fn edit_array(file: &mut Array, before: &[Value], after: &[Value]) -> bool {
                     edit(table, before, after, None);
                 }
             }
-            Step::Keep { .. } => {}
+            Placed::Kept { .. } => {}
         }
     }
     true
@@ -210,8 +207,6 @@ fn edit_array(file: &mut Array, before: &[Value], after: &[Value]) -> bool {
 // newline, then the element's own lines up to it. The text after the last
 // element is the trailing text, or its suffix without a trailing comma.
 
-/// Removes the element at `index` with its own line: the comment that ends
-/// the line before stays, and the one that ends its own line goes.
 fn remove_element(array: &mut Array, index: usize) {
     let last = index + 1 == array.len();
     let removed = array.remove(index);
@@ -223,13 +218,7 @@ fn remove_element(array: &mut Array, index: usize) {
     } else {
         raw(removed.decor().suffix()).to_owned()
     };
-    let (line, _) = split_line(prefix);
-    let (rest_of_line, rest) = split_line(&following);
-    let joined = if rest_of_line.is_empty() && index == 0 {
-        prefix.to_owned()
-    } else {
-        format!("{line}{rest}")
-    };
+    let joined = keep_the_line_before(prefix, &following, index == 0);
     if !last {
         set_prefix(array, index, joined);
     } else if array.trailing_comma() {
@@ -239,8 +228,16 @@ fn remove_element(array: &mut Array, index: usize) {
     }
 }
 
-/// Inserts `value` at `index`: on a line of its own, indented like its
-/// neighbour, when the array lists one element a line.
+fn keep_the_line_before(removed_prefix: &str, following: &str, first: bool) -> String {
+    let (end_of_line_before, _) = split_after_newline(removed_prefix);
+    let (end_of_own_line, rest) = split_after_newline(following);
+    if end_of_own_line.is_empty() && first {
+        removed_prefix.to_owned()
+    } else {
+        format!("{end_of_line_before}{rest}")
+    }
+}
+
 fn insert_element(array: &mut Array, index: usize, mut value: toml_edit::Value) {
     let Some(last) = array.len().checked_sub(1) else {
         array.push(value);
@@ -248,7 +245,7 @@ fn insert_element(array: &mut Array, index: usize, mut value: toml_edit::Value) 
     };
     if index <= last {
         let next = prefix_of(array, index);
-        let (line, rest) = split_line(&next);
+        let (line, rest) = split_after_newline(&next);
         let (own, next) = match (line.is_empty(), index) {
             (true, 0) => (next.clone(), " ".to_owned()),
             (true, _) => (" ".to_owned(), " ".to_owned()),
@@ -273,7 +270,7 @@ fn insert_element(array: &mut Array, index: usize, mut value: toml_edit::Value) 
             })
             .unwrap_or_default()
     };
-    let (line, rest) = split_line(&following);
+    let (line, rest) = split_after_newline(&following);
     let (own, following) = match (line.is_empty(), previous.contains('\n')) {
         (true, false) => (" ".to_owned(), following.clone()),
         (true, true) => (format!("\n{}", indent(&previous)), following.clone()),
@@ -314,19 +311,15 @@ fn raw(text: Option<&RawString>) -> &str {
     text.and_then(RawString::as_str).unwrap_or_default()
 }
 
-/// `text` split after its first newline; all of it is the second part when
-/// it has none.
-fn split_line(text: &str) -> (&str, &str) {
+fn split_after_newline(text: &str) -> (&str, &str) {
     text.find('\n')
         .map_or(("", text), |end| text.split_at(end + 1))
 }
 
-/// The indentation that ends `prefix`.
 fn indent(prefix: &str) -> &str {
     prefix.rsplit('\n').next().unwrap_or_default()
 }
 
-/// Whether the owner commented `item`, or any value in it.
 fn commented(item: &Item) -> bool {
     let decor = match item {
         Item::Table(table) => Some(table.decor()),
@@ -350,8 +343,6 @@ fn has_comment(decor: &Decor) -> bool {
         .any(|text| raw(text).contains('#'))
 }
 
-/// Writes `after` in place of `value`, keeping its spacing and comment, and
-/// its single quotes when `after` can be written in them.
 fn replace(value: &mut toml_edit::Value, after: &Value) {
     let literal = match (&*value, after) {
         (toml_edit::Value::String(before), Value::String(after))
@@ -364,12 +355,11 @@ fn replace(value: &mut toml_edit::Value, after: &Value) {
         }
         _ => None,
     };
-    let mut new = literal.unwrap_or_else(|| fresh(after));
+    let mut new = literal.unwrap_or_else(|| fresh_value(after));
     *new.decor_mut() = value.decor().clone();
     *value = new;
 }
 
-/// `value` as a new file writes it inside a table.
 fn fresh_item(value: &Value) -> Item {
     match value {
         Value::Table(table) => Item::Table(fresh_table(table)),
@@ -382,7 +372,7 @@ fn fresh_item(value: &Value) -> Item {
                     .collect(),
             )
         }
-        value => Item::Value(fresh(value)),
+        value => Item::Value(fresh_value(value)),
     }
 }
 
@@ -393,18 +383,17 @@ fn fresh_table(table: &Table) -> toml_edit::Table {
         .collect()
 }
 
-/// `value` as a new file writes it inside a value.
-fn fresh(value: &Value) -> toml_edit::Value {
+fn fresh_value(value: &Value) -> toml_edit::Value {
     match value {
         Value::String(text) => text.into(),
         Value::Integer(number) => (*number).into(),
         Value::Float(number) => (*number).into(),
         Value::Boolean(flag) => (*flag).into(),
         Value::Datetime(datetime) => (*datetime).into(),
-        Value::Array(values) => values.iter().map(fresh).collect::<Array>().into(),
+        Value::Array(values) => values.iter().map(fresh_value).collect::<Array>().into(),
         Value::Table(table) => table
             .iter()
-            .map(|(key, value)| (key, fresh(value)))
+            .map(|(key, value)| (key, fresh_value(value)))
             .collect::<InlineTable>()
             .into(),
     }
