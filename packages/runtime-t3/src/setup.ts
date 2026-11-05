@@ -194,11 +194,15 @@ export async function configure(
   const line = await modelLine(ledger, offer.catalogue, choice.agentId);
   // Choosing the model again keeps the options chosen for it.
   if (line.value?.kind !== "one" || line.value.id !== model)
-    await ledger.change(offer.catalogue, { kind: "agent", agent_id: choice.agentId }, {
-      setting: "model",
-      value: { kind: "one", id: model },
-      expected: line.revision,
-    });
+    await ledger.change(
+      offer.catalogue,
+      { kind: "agent", agent_id: choice.agentId },
+      {
+        setting: "model",
+        value: { kind: "one", id: model },
+        expected: line.revision,
+      },
+    );
   await publishSettings(installation, endpoint, existing, {
     ...existing?.agents,
     [choice.agentId]: { project_id: project.id },
