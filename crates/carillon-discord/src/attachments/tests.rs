@@ -211,13 +211,14 @@ pub(crate) fn described(port: u16, id: &str, name: &str, size: u64, path: &str) 
 fn plan(attachments: Vec<SourceAttachment>) -> MessagePlan {
     MessagePlan {
         message_id: "500".to_owned(),
-        guild_id: "100".to_owned(),
+        guild_id: Some("100".to_owned()),
         user_id: "200".to_owned(),
         agent_id: "default".to_owned(),
         channel_id: "300".to_owned(),
         route_channel_id: "300".to_owned(),
         content: String::new(),
         attachments,
+        reference: None,
         create_thread: false,
         adopt_thread: false,
         native: Value::Null,

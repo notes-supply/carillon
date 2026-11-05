@@ -2,7 +2,9 @@
 //! route, then the lines of the runtime serving the route's agent, read and
 //! changed through core. The route lines change through the provider's one
 //! writer of its settings file; an unrouted channel's page has only its
-//! Agent line, and choosing an agent creates the route. The provider builds
+//! Agent line, and choosing an agent creates the route. Direct messages
+//! have a page of their own under [`DIRECT_MESSAGES`], whose only route line
+//! is their agent. The provider builds
 //! the channel's subject itself from the route, whoever asks, so a caller
 //! can only ever reach the channels this provider routes.
 
@@ -23,7 +25,8 @@ use crate::{
     InterfaceError,
     client::{CoreClient, RUNTIME_LATE},
     config::{
-        DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, Refused, Writer,
+        DIRECT_MESSAGES, DirectMessages, DiscordActivation, DiscordConfig, DiscordConversation,
+        DiscordRoute, Refused, Writer,
     },
 };
 
@@ -33,6 +36,9 @@ pub(crate) enum Routing {
     Routed(DiscordRoute),
     /// A channel of the configured guild no route names yet.
     Unrouted(String),
+    /// Direct messages, with the agent that answers them once one is
+    /// chosen.
+    Direct(Option<String>),
 }
 
 impl Routing {
@@ -40,17 +46,34 @@ impl Routing {
         match self {
             Self::Routed(route) => &route.channel_id,
             Self::Unrouted(channel_id) => channel_id,
+            Self::Direct(_) => DIRECT_MESSAGES,
         }
     }
 
     pub(crate) const fn route(&self) -> Option<&DiscordRoute> {
         match self {
             Self::Routed(route) => Some(route),
+            Self::Unrouted(_) | Self::Direct(_) => None,
+        }
+    }
+
+    fn agent(&self) -> Option<&str> {
+        match self {
+            Self::Routed(route) => Some(&route.agent),
+            Self::Direct(agent) => agent.as_deref(),
             Self::Unrouted(_) => None,
         }
     }
 
     pub(crate) fn of(discord: &DiscordConfig, channel_id: &str) -> Self {
+        if channel_id == DIRECT_MESSAGES {
+            return Self::Direct(
+                discord
+                    .direct_messages
+                    .as_ref()
+                    .map(|direct| direct.agent.clone()),
+            );
+        }
         discord
             .routes
             .iter()
@@ -60,13 +83,15 @@ impl Routing {
                 |route| Self::Routed(route.clone()),
             )
     }
-}
 
-pub(crate) fn subject(core: &CoreClient, route: &DiscordRoute) -> Subject {
-    Subject::Channel {
-        interface_id: core.provider_id().to_owned(),
-        channel_id: route.channel_id.clone(),
-        agent_id: route.agent.clone(),
+    /// Whose settings the page shows: the channel's under its agent, once
+    /// it has one.
+    fn subject(&self, core: &CoreClient) -> Option<Subject> {
+        Some(Subject::Channel {
+            interface_id: core.provider_id().to_owned(),
+            channel_id: self.channel_id().to_owned(),
+            agent_id: self.agent()?.to_owned(),
+        })
     }
 }
 
@@ -78,10 +103,10 @@ pub(crate) async fn page(
     title: String,
     until: Instant,
 ) -> Page {
-    let runtime = match routing.route() {
-        Some(route) => {
+    let runtime = match routing.subject(core) {
+        Some(subject) => {
             let read = SettingsRequest {
-                subject: subject(core, route),
+                subject,
                 change: None,
             };
             Some(runtime(core, &read, until).await)
@@ -107,14 +132,14 @@ pub(crate) async fn change(
         let routing = reroute(core, writer, routing.channel_id(), change, until).await?;
         return Ok(page(core, writer, &routing, title, until).await);
     }
-    let Some(route) = routing.route() else {
+    let Some(subject) = routing.subject(core) else {
         return Err(InterfaceError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             message: "This channel has no agent yet; choose one first.".to_owned(),
         });
     };
     let request = SettingsRequest {
-        subject: subject(core, route),
+        subject,
         change: Some(change),
     };
     let runtime = runtime(core, &request, until).await?;
@@ -125,8 +150,9 @@ pub(crate) async fn change(
 /// the line is still at the revision the change was drawn from in the file
 /// and no other change holds the file until `until`. Choosing the agent of
 /// an unrouted channel creates its route, answering only when mentioned, a
-/// thread per conversation. A change whose file is in place but not
-/// confirmed durable serves, and is reported as an error.
+/// thread per conversation; choosing the agent of direct messages admits
+/// them. A change whose file is in place but not confirmed durable serves,
+/// and is reported as an error.
 async fn reroute(
     core: &CoreClient,
     writer: &Writer,
@@ -138,18 +164,8 @@ async fn reroute(
     let agents = &writer.installation().value.agents;
     let written = writer
         .change(until, |discord| {
-            let index = discord
-                .routes
-                .iter()
-                .position(|route| route.channel_id == channel_id);
-            let lines = route_lines(
-                interface_id,
-                agents,
-                &index.map_or_else(
-                    || Routing::Unrouted(channel_id.to_owned()),
-                    |index| Routing::Routed(discord.routes[index].clone()),
-                ),
-            );
+            let routing = Routing::of(discord, channel_id);
+            let lines = route_lines(interface_id, agents, &routing);
             let line = lines
                 .iter()
                 .find(|line| line.id == change.setting)
@@ -176,17 +192,29 @@ async fn reroute(
                     )));
                 }
             };
-            let Some(index) = index else {
-                let route = DiscordRoute {
-                    channel_id: channel_id.to_owned(),
-                    agent: chosen.clone(),
-                    activation: DiscordActivation::Mention,
-                    conversation: DiscordConversation::Thread,
-                };
-                discord.routes.push(route.clone());
-                return Ok(route);
+            let route = match routing {
+                Routing::Direct(_) => {
+                    discord.direct_messages = Some(DirectMessages {
+                        agent: chosen.clone(),
+                    });
+                    return Ok(Routing::Direct(Some(chosen.clone())));
+                }
+                Routing::Unrouted(_) => {
+                    let route = DiscordRoute {
+                        channel_id: channel_id.to_owned(),
+                        agent: chosen.clone(),
+                        activation: DiscordActivation::Mention,
+                        conversation: DiscordConversation::Thread,
+                    };
+                    discord.routes.push(route.clone());
+                    return Ok(Routing::Routed(route));
+                }
+                Routing::Routed(_) => discord
+                    .routes
+                    .iter_mut()
+                    .find(|route| route.channel_id == channel_id)
+                    .ok_or_else(|| Refused::Invalid("This channel has no agent yet.".to_owned()))?,
             };
-            let route = &mut discord.routes[index];
             match (line.id.as_str(), chosen.as_str()) {
                 (AGENT, agent) => agent.clone_into(&mut route.agent),
                 (LISTENS, MENTION) => route.activation = DiscordActivation::Mention,
@@ -194,7 +222,7 @@ async fn reroute(
                 (REPLIES, THREAD) => route.conversation = DiscordConversation::Thread,
                 (_, _) => route.conversation = DiscordConversation::Channel,
             }
-            Ok(route.clone())
+            Ok(Routing::Routed(route.clone()))
         })
         .await?;
     if let Some(error) = written.unsynced {
@@ -203,7 +231,7 @@ async fn reroute(
             message: format!("Changed, but a system crash may undo it: {error:#}"),
         });
     }
-    Ok(Routing::Routed(written.value))
+    Ok(written.value)
 }
 
 /// How long before the end of a card's calls a change gives up, or half the
@@ -267,7 +295,7 @@ fn composed(
 ) -> Page {
     Page {
         title,
-        subject: routing.route().map(|route| subject(core, route)),
+        subject: routing.subject(core),
         interface: route_lines(
             core.provider_id(),
             &writer.installation().value.agents,
@@ -291,8 +319,9 @@ const MENTION: &str = "mention";
 const THREAD: &str = "thread";
 
 /// The route's agent, when it answers and where it replies, each offering
-/// its choices under the names the page shows; an unrouted channel has only
-/// the agent line, without a value.
+/// its choices under the names the page shows. An unrouted channel has only
+/// the agent line, without a value; direct messages only the agent line,
+/// as they are always answered, in one conversation per person.
 fn route_lines(interface_id: &str, agents: &[AgentConfig], routing: &Routing) -> Vec<Setting> {
     let choices = |choices: &[(&str, &str)]| {
         choices
@@ -319,7 +348,7 @@ fn route_lines(interface_id: &str, agents: &[AgentConfig], routing: &Routing) ->
         .map(|agent| (agent.id.as_str(), agent.id.as_str()))
         .collect();
     let Routing::Routed(route) = routing else {
-        return vec![line(AGENT, "Agent", choices(&agents), None)];
+        return vec![line(AGENT, "Agent", choices(&agents), routing.agent())];
     };
     vec![
         line(AGENT, "Agent", choices(&agents), Some(&route.agent)),
@@ -351,7 +380,7 @@ fn revision(setting: &str, interface_id: &str, routing: &Routing, value: Option<
         "channel",
         interface_id,
         routing.channel_id(),
-        routing.route().map(|route| &route.agent)
+        routing.agent()
     ]);
     let digest = Sha256::digest(json!([setting, key, value]).to_string());
     match Revision::try_from(hex::encode(digest)) {

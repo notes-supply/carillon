@@ -58,14 +58,14 @@ pub(crate) const REFUSALS: usize = 4;
 
 /// What a conversation's lane holds, in arrival order.
 pub(crate) enum Queued {
-    Message(QueuedMessage),
+    Message(Box<QueuedMessage>),
     /// A `/command` submission, waiting for its conversation's turn.
     Submission(Submission),
 }
 
 impl From<QueuedMessage> for Queued {
     fn from(message: QueuedMessage) -> Self {
-        Self::Message(message)
+        Self::Message(Box::new(message))
     }
 }
 
@@ -165,7 +165,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     }
                     // A refused submission is dropped: its command is not sent.
                     if let Queued::Message(message) = queued {
-                        refuse_overloaded(&ingress, message);
+                        refuse_overloaded(&ingress, *message);
                     }
                     continue;
                 }
@@ -216,7 +216,7 @@ fn start(
 ) {
     match queue.front_mut() {
         Some(Queued::Message(head)) => {
-            let (ingress, head) = (ingress.clone(), head.clone());
+            let (ingress, head) = (ingress.clone(), QueuedMessage::clone(head));
             running.spawn(async move {
                 let dispatch = head.dispatch;
                 let prepared = prepare(&ingress, head).await;

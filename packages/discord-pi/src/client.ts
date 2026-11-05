@@ -6,7 +6,7 @@ import { Check } from "typebox/value";
 
 const id = Type.String({ pattern: "^[1-9][0-9]{0,19}$" });
 const Origin = Type.Object({
-  guild_id: id,
+  guild_id: Type.Optional(Type.Union([id, Type.Null()])),
   channel_id: id,
   source_channel_id: id,
   message_id: id,

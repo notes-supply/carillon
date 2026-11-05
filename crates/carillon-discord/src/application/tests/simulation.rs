@@ -547,3 +547,155 @@ async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Res
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_reply_or_forward_opens_with_a_quote_of_the_message_it_points_at() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    let message = |id: &str, content: &str, reference: Value| {
+        json!({
+            "event_id": id, "guild_id": "100", "user_id": "200", "channel_id": "300",
+            "content": content, "attachments": [], "reference": reference,
+        })
+    };
+    let reply = json!({
+        "kind": "reply", "author": "agent", "sent_at": "2026-11-05T14:03:00+00:00",
+        "content": "Shall I book the 9:40 train?\nIt arrives at noon.",
+        "files": ["timetable.pdf"],
+    });
+    let (status, body) = simulate_message(&state, &message("1", "Yes, book it.", reply)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let named = json!({
+        "kind": "reply", "author": {"person": "Ada"}, "sent_at": "2026-11-05T14:00:00+00:00",
+        "content": "lunch?",
+    });
+    let (status, body) = simulate_message(&state, &message("2", "Count me in", named)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let forward = json!({
+        "kind": "forward", "sent_at": "2026-11-04T09:00:00+00:00",
+        "content": "x".repeat(400), "files": ["voice-message.ogg"],
+    });
+    let (status, body) = simulate_message(&state, &message("3", "", forward)).await?;
+    assert_eq!(status, StatusCode::OK, "a bare forward is answered: {body}");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let contents: Vec<&str> = core
+        .events
+        .iter()
+        .map(|event| event.content.as_str())
+        .collect();
+    assert_eq!(
+        contents[..2],
+        [
+            "> In reply to your message, sent 2026-11-05T14:03:00+00:00:\n\
+             > Shall I book the 9:40 train?\n\
+             > It arrives at noon.\n\
+             > Files: timetable.pdf\n\
+             \n\
+             Yes, book it.",
+            "> In reply to Ada, sent 2026-11-05T14:00:00+00:00:\n> lunch?\n\nCount me in",
+        ]
+    );
+    assert_eq!(
+        contents[2],
+        format!(
+            "> Forwarding a message, sent 2026-11-04T09:00:00+00:00:\n> {}…\n> Files: voice-message.ogg",
+            "x".repeat(300)
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_allowlisted_persons_direct_messages_are_one_conversation_with_their_agent()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    let direct = |id: &str, user: &str| {
+        json!({
+            "event_id": id, "user_id": user, "channel_id": "900",
+            "content": "<@201> what's next?", "attachments": [],
+        })
+    };
+    let (status, _) = simulate_message(&state, &direct("1", "200")).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "direct messages are not routed yet"
+    );
+    restarted(&mut state, |settings| {
+        settings.direct_messages = Some(crate::config::DirectMessages {
+            agent: "default".to_owned(),
+        });
+    });
+    for id in ["2", "3"] {
+        let (status, body) = simulate_message(&state, &direct(id, "200")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["conversation_id"], "discord-dm-900");
+    }
+    let (status, _) = simulate_message(&state, &direct("4", "250")).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "250 is not allowlisted");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    assert_eq!(core.events.len(), 2);
+    for event in &core.events {
+        assert_eq!(event.agent_id, "default");
+        assert_eq!(event.audience_id, "discord-dm-900");
+        assert_eq!(event.channel_id, "dm");
+        assert_eq!(event.delivery_target_id, "900");
+        assert_eq!(event.content, "what's next?");
+        assert_eq!(event.native["origin"]["channel_id"], "900");
+        assert_eq!(event.native["origin"]["guild_id"], Value::Null);
+        assert_eq!(event.native["origin"]["parent_channel_id"], Value::Null);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_voice_message_reaches_core_as_its_unconverted_audio_file() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let staging = directory.path().join("staging");
+    let audio = b"OggS\0\x02voice frames".to_vec();
+    let (cdn, _log) = serve_cdn(HashMap::from([(
+        "/attachments/300/700/voice-message.ogg".to_owned(),
+        Serve::Bytes(audio.clone()),
+    )]))
+    .await?;
+    let (core_address, core) = simulated_core(staging.clone()).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    state.downloads = Arc::new(
+        Downloads::open(staging, state.settings.current().attachments)?.with_fixture_cdn(cdn),
+    );
+    let voice = crate::conversations::SourceAttachment {
+        content_type: Some("audio/ogg".to_owned()),
+        ..attachment(cdn, "700", "voice-message.ogg", audio.len().try_into()?)
+    };
+    let (status, body) = simulate(&state, "1", "200", &[voice]).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let [event] = core.events.as_slice() else {
+        anyhow::bail!("expected the voice message to be accepted");
+    };
+    assert_eq!(event.content, "");
+    let files = &event.attachments.as_ref().context("no files")?.files;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "voice-message.ogg");
+    assert_eq!(files[0].content_type.as_deref(), Some("audio/ogg"));
+    assert_eq!(core.staged, vec![vec![audio]]);
+    Ok(())
+}

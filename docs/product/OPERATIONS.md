@@ -229,6 +229,14 @@ route is not changed. The page says to run `carillon discord settings
 apply` first, or `carillon restart` when one of those changes needs a
 restart. `/settings` cannot remove a route.
 
+Direct messages have one page of their own, `dm`, at the terminal only:
+Discord offers Carillon's commands in the server, not in direct messages.
+Its only route line is Agent, the agent that answers allowlisted people's
+direct messages to the bot; its model lines apply to every person's direct
+messages. Until an agent is chosen, direct messages are refused and
+`carillon settings` doesn't list the page. Setup chooses the assistant when
+the installation has it.
+
 The terminal shows the same pages:
 
 ```sh
@@ -237,6 +245,7 @@ carillon settings CHANNEL_ID                   # that channel's page
 carillon settings CHANNEL_ID thinking=high     # change lines, left to right
 carillon settings CHANNEL_ID reset model       # take the agent's model again
 carillon settings CHANNEL_ID agent=t3-carillon-t3-code listens=mention
+carillon settings dm agent=assistant           # who answers direct messages
 carillon settings --agent assistant            # the agent's own values
 carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 ```
@@ -288,9 +297,17 @@ carillon discord settings apply    # serve the file's live changes
 
 `--route` only creates the first routes. Once the settings route channels,
 setup refuses other routes and leaves the file as it is; change a route
-with `carillon settings` or `/settings`.
+with `carillon settings` or `/settings`. When the settings name no agent
+for direct messages, setup names the assistant, if the installation has
+it:
 
-Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
+```toml
+# providers/discord-private.toml
+[direct_messages]
+agent = "assistant"
+```
+
+Users, routes, `direct_messages`, `typing`, `reactions` with their emoji, `activity_markers`
 and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
 settings it was admitted with. While the provider runs, it is the only
@@ -465,7 +482,38 @@ decisions`. Plain `/command` lists them.
 
 Both commands are admitted like messages: only in the guild, from allowlisted
 users, in a routed channel or a thread under a thread route. `/settings`
-also opens in a channel of the guild with no route, to route it.
+also opens in a channel of the guild with no route, to route it. Neither
+runs in direct messages.
+
+### Direct messages
+
+An allowlisted person can message the bot directly. Their direct messages
+are one rolling conversation with the agent the settings name for direct
+messages ([Settings](#settings)); there are no threads. Messages from anyone
+else, or while no agent is named, are dropped before core sees them, as in
+an unrouted channel. Files and reactions work as in a channel. The agent can
+also write to an allowlisted person first with its
+[Discord tools](#agent-discord-tools); the person's reply arrives in that
+conversation, quoting what it answers.
+
+### Replies and forwards
+
+A message that replies to another, or forwards one, reaches the agent with
+a quote of that message before the person's own words:
+
+```text
+> In reply to your message, sent 2026-11-05T14:03:00+00:00:
+> Shall I book the 9:40 train?
+> Files: timetable.pdf
+
+Yes, book it.
+```
+
+The quote names who wrote the message, or says the agent did, when it was
+sent, its first 300 characters and its files' names. Discord doesn't say
+who wrote a forwarded message, so its quote doesn't either. A forward with
+no words of its own is answered where a message would be. Only the new
+message carries the quote: the conversation before it is unchanged.
 
 ### Reactions
 
@@ -502,7 +550,10 @@ downloaded or kept gets a short reply saying why. Core keeps accepted files
 read-only under `state/attachments` with the turn, and checks each one's
 digest before the turn runs. The agent sees every file in its working tools,
 and suitable images (PNG, JPEG, WebP, GIF) are also given to the model as
-images. Nothing is extracted, converted or executed on arrival.
+images. A voice message arrives as its audio file, usually
+`voice-message.ogg`. Nothing is extracted, converted, transcribed or
+executed on arrival; an agent that should transcribe needs a tool for it,
+with your own transcription key.
 
 The agent can send files with its answer. On Pi it attaches them with its
 `attach` tool. T3 answers are text only. A file goes with the answer of the
@@ -650,7 +701,9 @@ send them again.
 ### Agent Discord tools
 
 The [Discord tools](../../packages/discord-pi/README.md) let the assistant
-read and manage the Discord server with the bot's permissions. On Pi they
+read and manage the Discord server with the bot's permissions, and read and
+send direct messages with allowlisted people, so it can, for example, tell
+you about work in a `#home` thread directly. On Pi they
 are a built-in extension the assistant selects by default; remove it in the
 assistant's `settings.json` to turn them off:
 

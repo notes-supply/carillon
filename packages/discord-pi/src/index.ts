@@ -60,7 +60,8 @@ export function createDiscordExtension(options: DiscordOptions): Extension {
         const operation: Record<string, unknown> = { ...args.operation };
         if (
           channelActions.has(String(operation["action"])) &&
-          operation["channel_id"] === undefined
+          operation["channel_id"] === undefined &&
+          operation["user_id"] === undefined
         ) {
           if (!client.origin)
             throw new Error("There is no admitted Discord origin. Supply channel_id explicitly.");

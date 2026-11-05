@@ -653,3 +653,68 @@ async fn a_module_change_in_place_but_not_synced_serves_its_file_and_says_so() -
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn the_operator_routes_direct_messages_on_their_own_page() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, requests, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let read = |uri: &'static str| operator(&state, Method::GET, uri, "operator", None);
+
+    let (status, page) = read("/v1/channels/dm/settings").await?;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["title"], "Direct messages");
+    assert_eq!(page["subject"], Value::Null);
+    let lines = page["interface"].as_array().context("no route lines")?;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["id"], "agent");
+    assert_eq!(lines[0]["value"], Value::Null);
+    let (_, listed) = read("/v1/channels").await?;
+    assert_eq!(
+        listed.as_array().map(Vec::len),
+        Some(1),
+        "unrouted direct messages are not listed"
+    );
+    assert!(
+        requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .iter()
+            .all(|request| serde_json::to_value(&request.subject)
+                .is_ok_and(|subject| subject["channel_id"] == "300"))
+    );
+
+    let choose = json!({
+        "setting": "agent",
+        "value": {"kind": "one", "id": "default"},
+        "expected": lines[0]["revision"],
+    });
+    let (status, page) = operator(
+        &state,
+        Method::PUT,
+        "/v1/channels/dm/settings",
+        "operator",
+        Some(choose),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(
+        page["subject"],
+        json!({"kind": "channel", "interface_id": "discord", "channel_id": "dm", "agent_id": "default"})
+    );
+    assert_eq!(page["interface"][0]["value"]["id"], "default");
+    assert_eq!(page["runtime"]["settings"][0]["id"], "model.thinking");
+    let routed = Some(crate::config::DirectMessages {
+        agent: "default".to_owned(),
+    });
+    assert_eq!(
+        DiscordConfig::read(&state.installation, "discord")?.direct_messages,
+        routed
+    );
+    assert_eq!(state.settings.current().direct_messages, routed);
+    let (_, listed) = read("/v1/channels").await?;
+    assert_eq!(listed[1]["title"], "Direct messages");
+    assert_eq!(listed[1]["subject"]["channel_id"], "dm");
+    server.abort();
+    Ok(())
+}

@@ -291,6 +291,24 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
     Ok(())
 }
 
+/// A message in route channel 100 that opens a thread.
+fn thread_plan() -> MessagePlan {
+    MessagePlan {
+        message_id: "200".to_owned(),
+        guild_id: Some("1".to_owned()),
+        user_id: "2".to_owned(),
+        agent_id: "agent".to_owned(),
+        channel_id: "100".to_owned(),
+        route_channel_id: "100".to_owned(),
+        content: "hello".to_owned(),
+        attachments: Vec::new(),
+        reference: None,
+        create_thread: true,
+        adopt_thread: false,
+        native: Value::Null,
+    }
+}
+
 #[tokio::test]
 async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -304,19 +322,7 @@ async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> a
             .path()
             .join("components/custom-discord/participation.json"),
     )?);
-    let plan = MessagePlan {
-        message_id: "200".to_owned(),
-        guild_id: "1".to_owned(),
-        user_id: "2".to_owned(),
-        agent_id: "agent".to_owned(),
-        channel_id: "100".to_owned(),
-        route_channel_id: "100".to_owned(),
-        content: "hello".to_owned(),
-        attachments: Vec::new(),
-        create_thread: true,
-        adopt_thread: false,
-        native: Value::Null,
-    };
+    let plan = thread_plan();
     let creates = Arc::new(AtomicUsize::new(0));
     let get_creates = creates.clone();
     let post_creates = creates.clone();
@@ -408,19 +414,7 @@ async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<
             .build();
         let mut services = tokio::task::JoinSet::new();
         services.spawn(async move { axum::serve(listener, app).await });
-        let plan = MessagePlan {
-            message_id: "200".to_owned(),
-            guild_id: "1".to_owned(),
-            user_id: "2".to_owned(),
-            agent_id: "agent".to_owned(),
-            channel_id: "100".to_owned(),
-            route_channel_id: "100".to_owned(),
-            content: "hello".to_owned(),
-            attachments: Vec::new(),
-            create_thread: true,
-            adopt_thread: false,
-            native: Value::Null,
-        };
+        let plan = thread_plan();
         let failure = tokio::time::timeout(
             Duration::from_secs(3),
             crate::conversations::create_conversation_thread(&http, &plan),
@@ -994,6 +988,7 @@ async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow
             parent_channel_id: None,
             content: "hello".to_owned(),
             attachments: Vec::new(),
+            reference: None,
         },
         native: Value::Null,
         settings: Arc::new(discord_config(

@@ -95,6 +95,7 @@ pub(crate) fn hello(ingress: &super::Ingress) -> super::QueuedMessage {
             parent_channel_id: None,
             content: "hello".to_owned(),
             attachments: Vec::new(),
+            reference: None,
         },
         native: Value::Null,
         settings: ingress.reactions.settings().current(),
@@ -381,7 +382,6 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
     let participation = Arc::new(Participation::load(participation)?);
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
-    config.failed_emoji = "❌".to_owned();
     let mut services = tokio::task::JoinSet::new();
     services.spawn(async move { axum::serve(listener, app).await });
     let (send, receive) = tokio::sync::mpsc::channel(2);
@@ -397,6 +397,7 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
                     parent_channel_id: None,
                     content: "hello".to_owned(),
                     attachments: Vec::new(),
+                    reference: None,
                 },
                 native: Value::Null,
                 settings: Arc::new(config.clone()),

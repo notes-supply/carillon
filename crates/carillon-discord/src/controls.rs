@@ -10,7 +10,8 @@ use twilight_model::gateway::GatewayReaction;
 use crate::{client::CoreClient, config::DiscordConfig, conversations::admit_identity};
 
 /// The control a reaction asks for: one the settings name, added by an
-/// allowlisted person in the guild, never by the bot itself.
+/// allowlisted person in the guild or their routed direct messages, never
+/// by the bot itself.
 pub(crate) fn admitted(
     settings: &DiscordConfig,
     reaction: &GatewayReaction,

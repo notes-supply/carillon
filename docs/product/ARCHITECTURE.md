@@ -130,10 +130,15 @@ work.
 
 The Discord provider (`carillon-discord`) admits messages and interactions by
 guild, user and route, each route a channel, by ID, and the agent that
-answers there; downloads attachments after admission; uploads an answer's
-files with it, from core's copies; creates and
-adopts threads; and owns typing, reactions, mention-free delivery and slash
-command registration. It also owns one card per job, drawn from core's
+answers there. Allowlisted people's direct messages to the bot have a route
+of their own, under the channel `dm`, when the settings name its agent; a
+person's direct messages are one conversation, and commands are not
+offered there. The provider downloads attachments after admission; uploads
+an answer's files with it, from core's copies; creates and adopts threads;
+and owns typing, reactions, mention-free delivery and slash command
+registration. A message that replies to or forwards another reaches core
+with a short quote of that message, from what Discord sent with it, before
+its own text. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
 best-effort and never decides delivery. While a message's turn is in a
 runtime that offers controls, it offers them as reactions (steer,
@@ -167,7 +172,8 @@ limits and suppresses mentions when it sends them.
 
 The Discord provider's operator API also runs typed operations
 (`POST /v1/operations`) with the bot's own credential, within its guild and
-Discord's permissions. The [`discord-pi`](../../packages/discord-pi/README.md)
+Discord's permissions; message operations also reach allowlisted people's
+direct messages. The [`discord-pi`](../../packages/discord-pi/README.md)
 tools expose them to the Pi runtime's agents, and its skill and
 `carillon discord call` to other local agents. Uncertain writes are
 reported, not retried.
@@ -266,7 +272,7 @@ what the owners return and defines no setting of its own.
 
 - The interface owns a channel's route: its agent, whether the agent
   answers every message or only mentions, and whether it replies in threads
-  or in the channel. The Discord provider keeps routes in its settings file,
+  or in the channel. Direct messages' route has only its agent. The Discord provider keeps routes in its settings file,
   and while it runs it is that file's only writer: route changes, setup and
   module changes reach it, and one at a time it reads the file, refuses it
   when it differs from what serves, checks the change's revision, validates,
@@ -302,7 +308,8 @@ leaves the route lines on the page, still editable, so a channel can move
 off a broken runtime. A re-route shows the new agent's runtime lines. In a
 channel of the guild with no route, the page has only the Agent line and no
 subject; choosing an agent creates the route, and no runtime is asked
-before it exists.
+before it exists. Direct messages' page, for the operator only, works the
+same way under the channel `dm`.
 
 A turn takes its channel's unit, else its agent's, when the runtime admits
 it. Core records each conversation's channel with its first admitted

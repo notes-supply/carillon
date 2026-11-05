@@ -48,6 +48,8 @@ const EVENTS: EventTypeFlags = EventTypeFlags::MESSAGE_CREATE
 const INTENTS: Intents = Intents::GUILDS
     .union(Intents::GUILD_MESSAGES)
     .union(Intents::GUILD_MESSAGE_REACTIONS)
+    .union(Intents::DIRECT_MESSAGES)
+    .union(Intents::DIRECT_MESSAGE_REACTIONS)
     .union(Intents::MESSAGE_CONTENT);
 /// How long a stop waits for Discord to close the connection.
 const CLOSE_BOUND: Duration = Duration::from_secs(5);

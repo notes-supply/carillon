@@ -38,6 +38,7 @@ fn message(id: &str, channel: &str, parent: Option<&str>, content: &str) -> Inco
         parent_channel_id: parent.map(str::to_owned),
         content: content.into(),
         attachments: Vec::new(),
+        reference: None,
     }
 }
 

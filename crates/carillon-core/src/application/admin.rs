@@ -16,6 +16,7 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
+pub(super) use carillon_installation::config::ASSISTANT;
 use carillon_installation::config::{
     AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, LoadedConfig, Provider,
     ProviderRole, RELEASE_VERSION, attachment_staging, hash_token, new_token,
@@ -150,9 +151,6 @@ pub(super) fn initialize(
     }
     Ok(target.join("carillon.toml"))
 }
-
-/// The ID of Carillon's own assistant, on Pi with the installation's resources.
-pub(super) const ASSISTANT: &str = "assistant";
 
 #[must_use]
 pub(super) fn assistant(workspace: &Path) -> AgentConfig {

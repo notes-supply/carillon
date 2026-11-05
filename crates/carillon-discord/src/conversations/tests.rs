@@ -32,6 +32,7 @@ fn participation_persistence_retries_without_bypassing_activation() -> Result<()
             parent_channel_id: recovered.parent_route("400"),
             content: "continue without a mention".to_owned(),
             attachments: Vec::new(),
+            reference: None,
         },
         serde_json::json!({}),
         &recovered.lock(),
@@ -201,7 +202,7 @@ fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
 fn titled(content: &str, files: &[&str]) -> MessagePlan {
     MessagePlan {
         message_id: "500".to_owned(),
-        guild_id: "100".to_owned(),
+        guild_id: Some("100".to_owned()),
         user_id: "200".to_owned(),
         agent_id: "default".to_owned(),
         channel_id: "300".to_owned(),
@@ -217,6 +218,7 @@ fn titled(content: &str, files: &[&str]) -> MessagePlan {
                 url: "https://cdn.discordapp.com/attachments/300/600/file".to_owned(),
             })
             .collect(),
+        reference: None,
         create_thread: true,
         adopt_thread: false,
         native: Value::Null,
@@ -397,6 +399,7 @@ pub(crate) fn discord_config(
             activation,
             conversation,
         }],
+        direct_messages: None,
         typing: true,
         activity: true,
         activity_markers: crate::config::ActivityMarkers::default(),
@@ -432,6 +435,7 @@ fn request(channel_id: &str, parent_channel_id: Option<&str>, content: &str) -> 
         parent_channel_id: parent_channel_id.map(str::to_owned),
         content: content.to_owned(),
         attachments: Vec::new(),
+        reference: None,
     }
 }
 
@@ -446,4 +450,148 @@ pub(crate) fn interaction(channel_id: &str, parent_channel_id: Option<&str>) -> 
         values: Vec::new(),
         options: Value::Null,
     }
+}
+
+/// A message as Discord's gateway sends it, by its fields beside the
+/// defaults of a plain text message.
+fn gateway(fields: &Value) -> Result<Message> {
+    let mut message = json!({
+        "id": "500", "channel_id": "300", "guild_id": "100",
+        "author": {"id": "200", "username": "sender", "discriminator": "0"},
+        "content": "", "attachments": [], "embeds": [], "mention_everyone": false,
+        "mention_roles": [], "mentions": [], "pinned": false, "tts": false, "type": 0,
+        "timestamp": "2026-11-05T15:00:00.000000+00:00",
+    });
+    for (key, value) in fields.as_object().context("fields are an object")? {
+        message[key] = value.clone();
+    }
+    Ok(serde_json::from_value(message)?)
+}
+
+fn sent(id: &str, author: &Value, content: &str, files: &Value) -> Value {
+    json!({
+        "id": id, "channel_id": "300", "author": author, "content": content,
+        "attachments": files, "embeds": [], "mention_everyone": false, "mention_roles": [],
+        "mentions": [], "pinned": false, "tts": false, "type": 0,
+        "timestamp": "2026-11-05T14:03:27.123000+00:00",
+    })
+}
+
+#[test]
+fn gateway_messages_carry_what_they_reply_to_or_forward() -> Result<()> {
+    let bot = json!({"id": "201", "username": "carillon", "discriminator": "0", "bot": true});
+    let ada = json!({"id": "202", "username": "ada", "global_name": "Ada", "discriminator": "0"});
+    let file = json!([{"id": "600", "filename": "plan.pdf", "size": 3,
+        "url": "https://cdn.discordapp.com/attachments/300/600/plan.pdf?hm=signed",
+        "proxy_url": "https://media.discordapp.net/attachments/300/600/plan.pdf"}]);
+    let reply = |to: Value| {
+        gateway(&json!({
+            "type": 19, "content": "agreed",
+            "message_reference": {"type": 0, "channel_id": "300", "message_id": "499"},
+            "referenced_message": to,
+        }))
+    };
+
+    let received = IncomingMessage::received(&reply(sent("499", &bot, "Ship it?", &file))?, "201");
+    assert_eq!(
+        received.reference,
+        Some(Reference {
+            kind: ReferenceKind::Reply,
+            author: Some(Author::Agent),
+            sent_at: "2026-11-05T14:03:27+00:00".to_owned(),
+            content: "Ship it?".to_owned(),
+            files: vec!["plan.pdf".to_owned()],
+        })
+    );
+    assert_eq!(received.content, "agreed");
+    let received =
+        IncomingMessage::received(&reply(sent("499", &ada, "lunch?", &json!([])))?, "201");
+    assert_eq!(
+        received.reference.and_then(|reference| reference.author),
+        Some(Author::Person("Ada".to_owned()))
+    );
+    let deleted = reply(Value::Null)?;
+    assert_eq!(IncomingMessage::received(&deleted, "201").reference, None);
+
+    let forward = gateway(&json!({
+        "message_reference": {"type": 1, "channel_id": "800", "message_id": "799"},
+        "message_snapshots": [{"message": {
+            "content": "the original words", "attachments": [], "embeds": [],
+            "edited_timestamp": null, "type": 0,
+            "timestamp": "2026-11-04T09:00:00.000000+00:00",
+        }}],
+    }))?;
+    assert_eq!(
+        IncomingMessage::received(&forward, "201").reference,
+        Some(Reference {
+            kind: ReferenceKind::Forward,
+            author: None,
+            sent_at: "2026-11-04T09:00:00+00:00".to_owned(),
+            content: "the original words".to_owned(),
+            files: Vec::new(),
+        })
+    );
+    let pinned = gateway(&json!({
+        "type": 6,
+        "message_reference": {"type": 0, "channel_id": "300", "message_id": "499"},
+    }))?;
+    assert_eq!(
+        IncomingMessage::received(&pinned, "201").reference,
+        None,
+        "a pin notice replies to nothing"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_gateway_voice_message_is_admitted_with_its_audio_file() -> Result<()> {
+    let voice = gateway(&json!({
+        "flags": 8192,
+        "attachments": [{
+            "id": "700", "filename": "voice-message.ogg", "size": 9120,
+            "content_type": "audio/ogg", "duration_secs": 4.2, "waveform": "AAAA",
+            "url": "https://cdn.discordapp.com/attachments/300/700/voice-message.ogg?hm=signed",
+            "proxy_url": "https://media.discordapp.net/attachments/300/700/voice-message.ogg",
+        }],
+    }))?;
+    let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    let plan = accepted(resolve_message(
+        &config,
+        IncomingMessage::received(&voice, "201"),
+        Value::Null,
+        &ParticipationState::default(),
+    ))?;
+    assert_eq!(plan.content, "");
+    assert_eq!(plan.reference, None);
+    assert_eq!(
+        plan.attachments,
+        [SourceAttachment {
+            id: "700".to_owned(),
+            filename: "voice-message.ogg".to_owned(),
+            size: 9120,
+            content_type: Some("audio/ogg".to_owned()),
+            url: "https://cdn.discordapp.com/attachments/300/700/voice-message.ogg?hm=signed"
+                .to_owned(),
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn direct_messages_never_run_commands_even_when_admitted() -> Result<()> {
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.direct_messages = Some(crate::config::DirectMessages {
+        agent: "default".to_owned(),
+    });
+    let refused = admit_interaction(
+        &config,
+        InteractionSource {
+            guild_id: None,
+            ..interaction("900", None)
+        },
+    )
+    .err()
+    .context("a direct message ran a command")?;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    Ok(())
 }

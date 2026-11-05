@@ -32,7 +32,7 @@ fn unicode(name: &str) -> EmojiReactionType {
 }
 
 #[test]
-fn only_an_allowlisted_persons_control_in_the_guild_is_admitted() {
+fn only_an_allowlisted_persons_control_in_the_guild_or_their_direct_messages_is_admitted() {
     let mut settings = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     for (case, reaction, wanted) in [
         (
@@ -70,7 +70,11 @@ fn only_an_allowlisted_persons_control_in_the_guild_is_admitted() {
             reaction(200, Some(101), unicode("🛑")),
             None,
         ),
-        ("a direct message", reaction(200, None, unicode("🛑")), None),
+        (
+            "a direct message, before they are routed",
+            reaction(200, None, unicode("🛑")),
+            None,
+        ),
         (
             "an emoji no control names",
             reaction(200, Some(100), unicode("👍")),
@@ -84,6 +88,12 @@ fn only_an_allowlisted_persons_control_in_the_guild_is_admitted() {
     ] {
         assert_eq!(admitted(&settings, &reaction), wanted, "{case}");
     }
+    settings.direct_messages = Some(crate::config::DirectMessages {
+        agent: "default".to_owned(),
+    });
+    let direct = |user| reaction(user, None, unicode("🛑"));
+    assert_eq!(admitted(&settings, &direct(200)), Some(ControlAction::Stop));
+    assert_eq!(admitted(&settings, &direct(202)), None);
     // Controls follow the settings serving, a custom emoji by its ID.
     settings.stop_emoji = "halt:123456789012345678".to_owned();
     let custom = |id| EmojiReactionType::Custom {

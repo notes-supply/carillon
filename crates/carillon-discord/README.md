@@ -24,8 +24,11 @@ configured model badges, and their custom IDs.
   declares included, when every difference applies live. Each admitted
   message keeps the snapshot it was admitted with.
 - [`conversations`](src/conversations.rs): admission, activation, thread
-  participation and conversation identity. `prepare_conversation` creates or
+  participation and conversation identity, including allowlisted people's
+  direct messages, one conversation each. `prepare_conversation` creates or
   adopts threads; one provider process owns the participation file.
+  [`reference`](src/conversations/reference.rs) quotes the message a new
+  one replies to or forwards before its text.
 - [`client`](src/client.rs): authenticated requests to core, with bounded
   waits.
 - [`channels`](src/channels.rs): a routed channel's settings page. It joins
@@ -33,7 +36,8 @@ configured model badges, and their custom IDs.
   and changed through core for a channel subject the provider builds from
   the route. `/settings` draws it titled `<#channel>`, and the operator reads
   and changes it on `GET /v1/channels` and `GET|PUT
-  /v1/channels/{channel_id}/settings`, titled `#name`.
+  /v1/channels/{channel_id}/settings`, titled `#name`. Direct messages'
+  page is `dm`, with only the Agent line.
 - [`inbound`](src/inbound.rs): settles each admitted message. It asks core
   whether it already holds the message, downloads files
   ([`attachments`](src/attachments.rs)), shows feedback and submits with
@@ -52,7 +56,7 @@ configured model badges, and their custom IDs.
   and shows its reaction; a turn without a message behind it, which its
   runtime opened, gets none.
 - [`controls`](src/controls.rs): admits a control reaction as a message is
-  admitted, by guild and user, maps its emoji to steer, interrupt or stop,
+  admitted, by guild or routed direct messages and user, maps its emoji to steer, interrupt or stop,
   and has core relay it to the runtime holding the message's turn.
 - [`activity`](src/activity.rs): one card per job, drawn by the module from
   core's record of the job, kept as a summary or removed when the job ends,
@@ -75,7 +79,8 @@ configured model badges, and their custom IDs.
   graceful stop leaves so the next start can resume and have Discord replay
   what it missed.
 - [`operations`](src/operations.rs): typed actions for agents, with the bot's
-  credential, independent of admission and delivery.
+  credential, independent of admission and delivery, in the guild and in
+  allowlisted people's direct messages.
 - [`application`](src/application.rs) assembles the operator server and the
   gateway; [`cli`](src/cli.rs) supplies installation paths and credentials.
   Importing the library starts nothing.

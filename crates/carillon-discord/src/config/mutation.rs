@@ -41,6 +41,10 @@ pub(crate) enum FileChange {
         bot_token_file: Option<PathBuf>,
         allowed_user_ids: Vec<String>,
         routes: Routes,
+        /// The agent that answers direct messages, unless the settings
+        /// already name one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct_messages: Option<String>,
     },
     /// Whether the custom module serves, and its file when given; without
     /// one the file keeps the path it declares.
@@ -77,6 +81,7 @@ impl FileChange {
                 bot_token_file,
                 allowed_user_ids,
                 routes,
+                direct_messages,
             } => {
                 let routes = match routes {
                     Routes::Answered(routes) => {
@@ -106,6 +111,10 @@ impl FileChange {
                 discord.allowed_user_ids =
                     in_order_of(allowed_user_ids, &discord.allowed_user_ids, PartialEq::eq);
                 discord.routes = routes;
+                if discord.direct_messages.is_none() {
+                    discord.direct_messages =
+                        direct_messages.map(|agent| super::DirectMessages { agent });
+                }
             }
             Self::Module { enabled, path } => {
                 discord.module.enabled = enabled;

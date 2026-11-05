@@ -9,8 +9,9 @@ new interface or runtime doesn't mean rebuilding the rest.
 
 1. Install Carillon as an ordinary Unix user.
 2. Configure a Discord server, allowlisted users and routed channels.
-3. Talk to the agent in channels or threads, with files and images, and
-   receive the files it makes with its answers.
+3. Talk to the agent in channels, threads and direct messages to the bot,
+   with files, images and voice messages, and receive the files it makes
+   with its answers.
 4. Let the agent use its runtime's native tools, extensions and skills with
    the owner's authority, and watch a running turn on a Discord card.
 5. Route each channel to an agent: Carillon's assistant, on Pi, or plain T3
@@ -49,12 +50,20 @@ native state between engines or T3 projects.
 
 ## Behaviour
 
-- **Admission.** Discord refuses direct messages and anything outside its
-  guild, allowlist and routes before core sees it. Repeating the same event
-  never starts a second turn.
+- **Admission.** Discord refuses anything outside its guild, allowlist and
+  routes before core sees it. Direct messages to the bot are admitted only
+  from allowlisted people, and only while the Discord settings name the
+  agent that answers them; each person's direct messages are one rolling
+  conversation with it. Repeating the same event never starts a second
+  turn.
+- **Replies and forwards.** A message that replies to another, or forwards
+  one, reaches the agent opening with a short quote of that message: who
+  wrote it, or that the agent did, when, how it began and its files' names.
+  Only the new message carries the quote; nothing earlier changes.
 - **Files.** A message is accepted with all its files or not at all. Files
-  are kept with the turn and checked before it runs; nothing is extracted or
-  executed on arrival. An answer can carry files too: on Pi the agent
+  are kept with the turn and checked before it runs; nothing is extracted,
+  converted, transcribed or executed on arrival. A voice message reaches the
+  agent as its audio file. An answer can carry files too: on Pi the agent
   attaches them, and core keeps a copy of each with the answer, which
   Discord uploads with it. A file that can't be kept or sent never fails
   the answer; the answer names it and where it is. Files attached while the

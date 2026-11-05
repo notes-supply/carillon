@@ -7,6 +7,7 @@ use axum::{
     http::{Method, StatusCode, Uri},
     response::IntoResponse as _,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -53,7 +54,13 @@ impl Mock {
     }
     async fn execute(&self, operation: Value) -> anyhow::Result<Result<Value, OperationError>> {
         Ok(serde_json::from_value::<Operation>(operation)?
-            .execute(&self.http, Id::new(1))
+            .execute(
+                &self.http,
+                &Scope {
+                    guild: Id::new(1),
+                    people: vec![Id::new(3)],
+                },
+            )
             .await)
     }
     fn bodies(&self) -> anyhow::Result<Vec<Value>> {
@@ -351,6 +358,77 @@ async fn project_channel_role_thread_and_member_workflow() -> anyhow::Result<()>
     assert_eq!(bodies[2], json!({"topic":"Work"}));
     assert_eq!(bodies[5], json!({"color":42}));
     assert_eq!(bodies[12], json!({"archived":true}));
+    Ok(())
+}
+
+/// The bot's direct-message channel 9 with `person`.
+fn direct_fixture(person: &str) -> Value {
+    json!({"id":"9","type":1,"recipients":[{"id":person,"username":"person","discriminator":"0"}]})
+}
+
+#[tokio::test]
+async fn message_operations_reach_allowlisted_peoples_direct_messages_only() -> anyhow::Result<()> {
+    let server = Mock::new(vec![
+        Step {
+            method: Method::POST,
+            path: "/api/v10/users/@me/channels",
+            status: StatusCode::OK,
+            body: direct_fixture("3"),
+        },
+        Step {
+            method: Method::POST,
+            path: "/api/v10/channels/9/messages",
+            status: StatusCode::OK,
+            body: message_fixture("7"),
+        },
+    ])
+    .await?;
+    let sent = server
+        .execute(json!({"action":"messages.send","user_id":"3","content":"An update."}))
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert_eq!(sent["url"], "https://discord.com/channels/@me/9/7");
+    assert_eq!(server.bodies()?[0], json!({"recipient_id":"3"}));
+    server.finished()?;
+
+    let server = Mock::new(vec![
+        get("/api/v10/channels/9", direct_fixture("3")),
+        get("/api/v10/channels/9/messages?limit=30", json!([])),
+    ])
+    .await?;
+    server
+        .execute(json!({"action":"messages.list","channel_id":"9"}))
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    server.finished()?;
+
+    for (operation, steps) in [
+        (
+            json!({"action":"messages.send","user_id":"4","content":"hello"}),
+            vec![],
+        ),
+        (
+            json!({"action":"messages.send","channel_id":"9","user_id":"3","content":"hello"}),
+            vec![],
+        ),
+        (
+            json!({"action":"messages.list","channel_id":"9"}),
+            vec![get("/api/v10/channels/9", direct_fixture("4"))],
+        ),
+        (
+            json!({"action":"channels.delete","channel_id":"9"}),
+            vec![get("/api/v10/channels/9", direct_fixture("3"))],
+        ),
+    ] {
+        let server = Mock::new(steps).await?;
+        let refused = server
+            .execute(operation.clone())
+            .await?
+            .err()
+            .with_context(|| format!("{operation} was not refused"))?;
+        assert_eq!(refused.outcome, "rejected", "{operation}");
+        server.finished()?;
+    }
     Ok(())
 }
 

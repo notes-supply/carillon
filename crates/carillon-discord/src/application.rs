@@ -6,7 +6,7 @@ mod interactions;
 use interactions::interaction_source;
 use interactions::{handle_interaction, run_interaction};
 
-use crate::conversations::{InteractionSource, SourceAttachment, admit_interaction};
+use crate::conversations::{InteractionSource, admit_interaction};
 use crate::{
     attachments::Downloads,
     gateway::{Dispatch, Gateway, Identity, record_path, take_record},
@@ -31,6 +31,7 @@ use crate::{
         self as discord_module, Declared, DiscordApp, Module, ModuleFiles, Refusal, Registration,
         Status, answer::answer,
     },
+    operations::{Operation, Scope},
 };
 #[cfg(test)]
 use crate::{
@@ -448,15 +449,24 @@ async fn discord_operation(
             status: StatusCode::PAYLOAD_TOO_LARGE,
             message: "Discord operation exceeds 6 MiB; nothing was changed".to_owned(),
         })?;
-    let operation: crate::operations::Operation =
-        serde_json::from_slice(&bytes).map_err(|_| InterfaceError {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid Discord operation; check the action and its fields".to_owned(),
-        })?;
+    let operation: Operation = serde_json::from_slice(&bytes).map_err(|_| InterfaceError {
+        status: StatusCode::BAD_REQUEST,
+        message: "Invalid Discord operation; check the action and its fields".to_owned(),
+    })?;
     let Some(app) = state.app() else {
         return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"outcome":"unavailable","message":"Discord operations require a connected provider; deterministic mode does not call Discord."}))).into_response());
     };
-    Ok(match operation.execute(&app.http, app.guild_id).await {
+    let scope = Scope {
+        guild: app.guild_id,
+        people: state
+            .settings
+            .current()
+            .allowed_user_ids
+            .iter()
+            .filter_map(|person| person.parse().ok())
+            .collect(),
+    };
+    Ok(match operation.execute(&app.http, &scope).await {
         Ok(result) => Json(result).into_response(),
         Err(failure) => {
             let status = match failure.outcome {
@@ -889,25 +899,7 @@ fn take_event(
             {
                 return None;
             }
-            let request = IncomingMessage {
-                event_id: message.id.to_string(),
-                guild_id: guild,
-                user_id: message.author.id.to_string(),
-                channel_id: message.channel_id.to_string(),
-                parent_channel_id: None,
-                content: message.content.clone(),
-                attachments: message
-                    .attachments
-                    .iter()
-                    .map(|attachment| SourceAttachment {
-                        id: attachment.id.to_string(),
-                        filename: attachment.filename.clone(),
-                        size: attachment.size,
-                        content_type: attachment.content_type.clone(),
-                        url: attachment.url.clone(),
-                    })
-                    .collect(),
-            };
+            let request = IncomingMessage::received(&message, &settings.bot_user_id);
             Some(QueuedMessage {
                 request,
                 native: native_message(&message),

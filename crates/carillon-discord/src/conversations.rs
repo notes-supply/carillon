@@ -2,7 +2,7 @@
 use crate::{
     InterfaceError,
     channels::Routing,
-    config::{DiscordActivation, DiscordConfig, DiscordConversation},
+    config::{DIRECT_MESSAGES, DiscordActivation, DiscordConfig, DiscordConversation},
 };
 use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
@@ -22,13 +22,19 @@ use twilight_http::{
     response::StatusCode as DiscordStatusCode,
 };
 use twilight_model::{
-    channel::ChannelType,
+    channel::{ChannelType, message::Message},
     id::{
         Id,
         marker::{ChannelMarker, MessageMarker},
     },
 };
+
+mod reference;
+
+pub use reference::{Author, Reference, ReferenceKind};
+
 /// An incoming Discord message, shared by gateway and simulation adapters.
+/// Without a guild it is a direct message to the bot.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct IncomingMessage {
     pub event_id: String,
@@ -42,6 +48,35 @@ pub struct IncomingMessage {
     /// fetched for them before the message is admitted and activated.
     #[serde(default)]
     pub attachments: Vec<SourceAttachment>,
+    /// The message it replies to or forwards.
+    #[serde(default)]
+    pub reference: Option<Reference>,
+}
+
+impl IncomingMessage {
+    /// A message as the gateway delivers it.
+    pub(crate) fn received(message: &Message, bot_user_id: &str) -> Self {
+        Self {
+            event_id: message.id.to_string(),
+            guild_id: message.guild_id.map(|id| id.to_string()),
+            user_id: message.author.id.to_string(),
+            channel_id: message.channel_id.to_string(),
+            parent_channel_id: None,
+            content: message.content.clone(),
+            attachments: message
+                .attachments
+                .iter()
+                .map(|attachment| SourceAttachment {
+                    id: attachment.id.to_string(),
+                    filename: attachment.filename.clone(),
+                    size: attachment.size,
+                    content_type: attachment.content_type.clone(),
+                    url: attachment.url.clone(),
+                })
+                .collect(),
+            reference: Reference::of(message, bot_user_id),
+        }
+    }
 }
 
 /// What Discord says about a file uploaded with a message.
@@ -152,16 +187,18 @@ impl Participation {
 pub struct MessagePlan {
     /// The Discord message ID, which is also the provider event ID.
     pub(crate) message_id: String,
-    pub(crate) guild_id: String,
+    /// `None` for a direct message.
+    pub(crate) guild_id: Option<String>,
     pub(crate) user_id: String,
     pub(crate) agent_id: String,
     /// The channel or thread the message arrived in.
     pub(crate) channel_id: String,
     /// The configured route channel that admitted it (the parent channel for
-    /// thread children).
+    /// thread children), or [`DIRECT_MESSAGES`].
     pub(crate) route_channel_id: String,
     pub(crate) content: String,
     pub(crate) attachments: Vec<SourceAttachment>,
+    pub(crate) reference: Option<Reference>,
     pub(crate) create_thread: bool,
     pub(crate) adopt_thread: bool,
     pub(crate) native: Value,
@@ -183,51 +220,70 @@ fn resolve_message(
     native: Value,
     participation: &ParticipationState,
 ) -> Result<Option<MessagePlan>, InterfaceError> {
-    let (route, child) = if let Some(route) = config
-        .routes
-        .iter()
-        .find(|route| route.channel_id == request.channel_id)
-    {
-        (route, false)
-    } else if let Some(route) = request.parent_channel_id.as_deref().and_then(|parent| {
-        config.routes.iter().find(|route| {
-            route.channel_id == parent && route.conversation == DiscordConversation::Thread
-        })
-    }) {
-        (route, true)
-    } else {
-        return Err(InterfaceError {
-            status: StatusCode::FORBIDDEN,
-            message: "channel is not configured as a Discord route".to_owned(),
-        });
-    };
     let (mentioned, content) = strip_bot_mention(&request.content, &config.bot_user_id);
-    let adopted = child
-        && participation
-            .threads
-            .get(&request.channel_id)
-            .is_some_and(|parent| parent == &route.channel_id);
-    let activated = match route.activation {
-        DiscordActivation::Always => true,
-        DiscordActivation::Mention => mentioned || adopted,
+    let unrouted = || InterfaceError {
+        status: StatusCode::FORBIDDEN,
+        message: "channel is not configured as a Discord route".to_owned(),
     };
-    if !activated || (content.is_empty() && request.attachments.is_empty()) {
+    let (agent_id, route_channel_id, activated, create_thread, adopt_thread) =
+        if request.guild_id.is_none() {
+            let direct = config.direct_messages.as_ref().ok_or_else(unrouted)?;
+            (
+                direct.agent.clone(),
+                DIRECT_MESSAGES.to_owned(),
+                true,
+                false,
+                false,
+            )
+        } else {
+            let (route, child) = if let Some(route) = config
+                .routes
+                .iter()
+                .find(|route| route.channel_id == request.channel_id)
+            {
+                (route, false)
+            } else if let Some(route) = request.parent_channel_id.as_deref().and_then(|parent| {
+                config.routes.iter().find(|route| {
+                    route.channel_id == parent && route.conversation == DiscordConversation::Thread
+                })
+            }) {
+                (route, true)
+            } else {
+                return Err(unrouted());
+            };
+            let adopted = child
+                && participation
+                    .threads
+                    .get(&request.channel_id)
+                    .is_some_and(|parent| parent == &route.channel_id);
+            (
+                route.agent.clone(),
+                route.channel_id.clone(),
+                match route.activation {
+                    DiscordActivation::Always => true,
+                    DiscordActivation::Mention => mentioned || adopted,
+                },
+                !child && route.conversation == DiscordConversation::Thread,
+                child && route.activation == DiscordActivation::Mention && mentioned && !adopted,
+            )
+        };
+    if !activated
+        || (content.is_empty() && request.attachments.is_empty() && request.reference.is_none())
+    {
         return Ok(None);
     }
     Ok(Some(MessagePlan {
         message_id: request.event_id,
-        guild_id: request.guild_id.unwrap_or_default(),
+        guild_id: request.guild_id,
         user_id: request.user_id,
-        agent_id: route.agent.clone(),
+        agent_id,
         channel_id: request.channel_id,
-        route_channel_id: route.channel_id.clone(),
+        route_channel_id,
         content,
         attachments: request.attachments,
-        create_thread: !child && route.conversation == DiscordConversation::Thread,
-        adopt_thread: child
-            && route.activation == DiscordActivation::Mention
-            && mentioned
-            && !adopted,
+        reference: request.reference,
+        create_thread,
+        adopt_thread,
         native,
     }))
 }
@@ -337,7 +393,8 @@ pub(crate) async fn create_conversation_thread(
         .to_string())
 }
 
-/// The message's words, or for a file-only message the first file's name.
+/// The message's words, for a file-only message the first file's name, or
+/// for a bare forward the forwarded words.
 fn thread_title(plan: &MessagePlan) -> String {
     let words = |text: &str| -> String {
         text.split_whitespace()
@@ -351,22 +408,41 @@ fn thread_title(plan: &MessagePlan) -> String {
     if !title.is_empty() {
         return title;
     }
-    match plan.attachments.first().map(|file| words(&file.filename)) {
-        Some(name) if !name.is_empty() => name,
-        _ => "Attachment".to_owned(),
-    }
+    [
+        plan.attachments.first().map(|file| words(&file.filename)),
+        plan.reference
+            .as_ref()
+            .map(|reference| words(&reference.content)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|title| !title.is_empty())
+    .unwrap_or_else(|| "Attachment".to_owned())
 }
 
+/// A guild conversation is its channel or thread; a direct message's is the
+/// person's one conversation with the bot.
 fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
-    let conversation_id = format!("discord-{}-{target}", plan.guild_id);
+    let (conversation_id, parent) = match &plan.guild_id {
+        Some(guild) => (
+            format!("discord-{guild}-{target}"),
+            (target != plan.route_channel_id).then_some(&plan.route_channel_id),
+        ),
+        None => (format!("discord-dm-{target}"), None),
+    };
     let origin = json!({
         "guild_id": plan.guild_id,
         "channel_id": target,
         "source_channel_id": plan.channel_id,
         "message_id": plan.message_id,
         "user_id": plan.user_id,
-        "parent_channel_id": if target == plan.route_channel_id { None } else { Some(&plan.route_channel_id) },
+        "parent_channel_id": parent,
     });
+    let content = match &plan.reference {
+        Some(reference) if plan.content.is_empty() => reference.quote(),
+        Some(reference) => format!("{}\n\n{}", reference.quote(), plan.content),
+        None => plan.content,
+    };
     ResolvedMessage {
         event: ExternalEvent {
             event_id: plan.message_id.clone(),
@@ -376,7 +452,7 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
             channel_id: plan.route_channel_id.clone(),
             delivery_target_id: target,
             feedback_target_id: format!("{}:{}", plan.channel_id, plan.message_id),
-            content: plan.content,
+            content,
             native: json!({
                 "origin": origin,
                 "discord": plan.native,
@@ -427,32 +503,31 @@ pub(crate) async fn discord_parent_channel(
     }
     Ok(channel.parent_id.map(|parent| parent.to_string()))
 }
-/// Fail-closed identity admission: the configured guild and an allowlisted
-/// user, before any further handling.
+/// Fail-closed identity admission: an allowlisted user, in the configured
+/// guild or, while the settings route them, in a direct message, before any
+/// further handling.
 pub(crate) fn admit_identity(
     config: &DiscordConfig,
     guild_id: Option<&str>,
     user_id: &str,
 ) -> Result<(), InterfaceError> {
-    let guild = guild_id.ok_or_else(|| InterfaceError {
+    let refused = |message: &str| InterfaceError {
         status: StatusCode::FORBIDDEN,
-        message: "direct messages are not accepted".to_owned(),
-    })?;
-    if guild != config.guild_id {
-        return Err(InterfaceError {
-            status: StatusCode::FORBIDDEN,
-            message: "guild is not configured".to_owned(),
-        });
+        message: message.to_owned(),
+    };
+    match guild_id {
+        None if config.direct_messages.is_none() => {
+            return Err(refused("direct messages are not accepted"));
+        }
+        Some(guild) if guild != config.guild_id => return Err(refused("guild is not configured")),
+        _ => {}
     }
     if !config
         .allowed_user_ids
         .iter()
         .any(|allowed| allowed == user_id)
     {
-        return Err(InterfaceError {
-            status: StatusCode::FORBIDDEN,
-            message: "user is not allowlisted".to_owned(),
-        });
+        return Err(refused("user is not allowlisted"));
     }
     Ok(())
 }
@@ -460,7 +535,8 @@ pub(crate) fn admit_identity(
 /// Apply guild/user admission and conversation activation without a gateway.
 ///
 /// # Errors
-/// Rejects direct messages, unconfigured guilds/routes, and users outside the allowlist.
+/// Rejects unconfigured guilds/routes, direct messages without a
+/// direct-message route, and users outside the allowlist.
 pub fn admit_message(
     config: &DiscordConfig,
     participation: &Participation,
@@ -516,14 +592,19 @@ pub struct InteractionOrigin {
 /// is the one messages there would belong to.
 ///
 /// # Errors
-/// Rejects unconfigured guilds, users outside the allowlist, and threads
-/// outside a thread route's channel.
+/// Rejects direct messages, unconfigured guilds, users outside the
+/// allowlist, and threads outside a thread route's channel.
 pub fn admit_interaction(
     config: &DiscordConfig,
     source: InteractionSource,
 ) -> Result<AdmittedInteraction, InterfaceError> {
-    admit_identity(config, source.guild_id.as_deref(), &source.user_id)?;
-    let guild_id = source.guild_id.unwrap_or_default();
+    let Some(guild_id) = source.guild_id else {
+        return Err(InterfaceError {
+            status: StatusCode::FORBIDDEN,
+            message: "commands are not accepted in direct messages".to_owned(),
+        });
+    };
+    admit_identity(config, Some(&guild_id), &source.user_id)?;
     let (audience_id, routing) = if let Some(route) = config
         .routes
         .iter()

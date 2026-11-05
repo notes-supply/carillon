@@ -43,6 +43,10 @@ pub struct DiscordConfig {
     pub(crate) allowed_user_ids: Vec<String>,
     #[serde(default)]
     pub(crate) routes: Vec<DiscordRoute>,
+    /// The agent that answers allowlisted people's direct messages to the
+    /// bot; without it, direct messages are refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) direct_messages: Option<DirectMessages>,
     #[serde(default = "enabled")]
     pub(crate) typing: bool,
     /// Show a card of what each job is doing, kept as its summary.
@@ -285,6 +289,18 @@ pub struct DiscordRoute {
     pub conversation: DiscordConversation,
 }
 
+/// The direct-message route: each allowlisted person's direct messages to
+/// the bot are one rolling conversation with `agent`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DirectMessages {
+    pub agent: String,
+}
+
+/// The direct-message route's channel, where core and the runtimes keep it
+/// as they keep a routed channel. No Discord channel ID takes this form.
+pub(crate) const DIRECT_MESSAGES: &str = "dm";
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscordActivation {
@@ -390,6 +406,7 @@ impl DiscordConfig {
             bot_token_file: None,
             allowed_user_ids,
             routes,
+            direct_messages: None,
             typing: enabled(),
             activity: enabled(),
             activity_markers: ActivityMarkers::default(),
@@ -592,6 +609,12 @@ impl DiscordConfig {
                 .agent(&route.agent)
                 .with_context(|| format!("route {} names an unknown agent", route.channel_id))?;
         }
+        if let Some(direct) = &self.direct_messages {
+            config
+                .value
+                .agent(&direct.agent)
+                .context("direct_messages names an unknown agent")?;
+        }
         Ok(())
     }
 }
@@ -643,6 +666,7 @@ impl Difference {
             bot_token_file,
             allowed_user_ids,
             routes,
+            direct_messages,
             typing,
             activity,
             activity_markers,
@@ -676,6 +700,11 @@ impl Difference {
                 true,
             ),
             (*routes != serving.routes, "routes", true),
+            (
+                *direct_messages != serving.direct_messages,
+                "direct_messages",
+                true,
+            ),
             (*typing != serving.typing, "typing", true),
             (
                 *activity_markers != serving.activity_markers,

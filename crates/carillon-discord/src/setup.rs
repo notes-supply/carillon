@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
-    config::{AgentConfig, LoadedConfig, ProviderRole, read_token_file},
+    config::{ASSISTANT, AgentConfig, LoadedConfig, ProviderRole, read_token_file},
     filesystem::publish,
     maintenance::MaintenanceLock,
     prompt::Questions,
@@ -192,6 +192,7 @@ pub(crate) async fn setup(
         bot_token_file: token_file.clone(),
         allowed_user_ids: users,
         routes: Routes::Answered(routes.clone()),
+        direct_messages: assistant(loaded),
     };
     change
         .clone()
@@ -259,11 +260,22 @@ pub(crate) async fn unattended(
             bot_token_file: None,
             allowed_user_ids,
             routes: Routes::First(routes),
+            direct_messages: assistant(loaded),
         },
     )
     .await?;
     println!("{}", loaded.provider_config_path(provider)?.display());
     Ok(())
+}
+
+/// Carillon's assistant, which answers direct messages unless the settings
+/// name another agent, when the installation has it.
+fn assistant(loaded: &LoadedConfig) -> Option<String> {
+    loaded
+        .value
+        .agent(ASSISTANT)
+        .is_ok()
+        .then(|| ASSISTANT.to_owned())
 }
 
 /// A route per chosen channel, in their order. Who answers is asked for each

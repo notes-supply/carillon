@@ -201,11 +201,16 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) -> Pr
     let discord = &*settings;
     let http = &ingress.http;
     let channel = &inbound.request.channel_id;
-    let route = ingress
-        .retry(Some(deadline), "resolve a Discord message route", || {
-            discord_parent_channel(http, discord, &ingress.participation, channel)
-        })
-        .await;
+    let route = match inbound.request.guild_id {
+        Some(_) => {
+            ingress
+                .retry(Some(deadline), "resolve a Discord message route", || {
+                    discord_parent_channel(http, discord, &ingress.participation, channel)
+                })
+                .await
+        }
+        None => Some(Ok(None)),
+    };
     inbound.request.parent_channel_id = match route {
         Some(Ok(parent)) => parent,
         Some(Err(failure)) => {

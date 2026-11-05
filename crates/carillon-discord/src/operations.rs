@@ -1,5 +1,5 @@
-//! Agent operations: one guild, the existing Discord client, no participation changes.
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+//! Agent operations: one guild and its allowlisted people's direct
+//! messages, the existing Discord client, no participation changes.
 use clap::{ArgAction, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -10,10 +10,7 @@ use twilight_http::{
 use twilight_model::{
     channel::{Channel, ChannelType, message::AllowedMentions},
     guild::Permissions,
-    http::{
-        attachment::Attachment,
-        permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
-    },
+    http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
     id::{
         Id,
         marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker, UserMarker},
@@ -21,8 +18,14 @@ use twilight_model::{
     util::Timestamp,
 };
 
+mod direct;
 #[cfg(test)]
 mod tests;
+mod upload;
+
+pub(crate) use direct::Scope;
+use upload::uploads;
+pub(crate) use upload::{ATTACHMENT_BYTES, ATTACHMENT_COUNT, Upload, too_large, too_many};
 
 type ChannelId = Id<ChannelMarker>;
 type MessageId = Id<MessageMarker>;
@@ -151,8 +154,11 @@ pub(crate) enum Threads {
 pub(crate) enum Messages {
     #[serde(rename = "messages.list")]
     List {
-        #[arg(long)]
-        channel_id: ChannelId,
+        #[arg(long, required_unless_present = "user_id")]
+        channel_id: Option<ChannelId>,
+        /// An allowlisted person, for your direct messages with them.
+        #[arg(long, conflicts_with = "channel_id")]
+        user_id: Option<UserId>,
         #[arg(long)]
         before: Option<MessageId>,
         #[arg(long, default_value_t = page_size())]
@@ -168,8 +174,11 @@ pub(crate) enum Messages {
     },
     #[serde(rename = "messages.send")]
     Send {
-        #[arg(long)]
-        channel_id: ChannelId,
+        #[arg(long, required_unless_present = "user_id")]
+        channel_id: Option<ChannelId>,
+        /// An allowlisted person, to message directly.
+        #[arg(long, conflicts_with = "channel_id")]
+        user_id: Option<UserId>,
         #[arg(long)]
         content: String,
         #[arg(long)]
@@ -316,36 +325,6 @@ pub(crate) enum Members {
         banned: bool,
     },
 }
-/// The most files one sent message may carry.
-pub(crate) const ATTACHMENT_COUNT: usize = 10;
-/// The most bytes the files of one sent message may hold together.
-pub(crate) const ATTACHMENT_BYTES: usize = 4 * 1024 * 1024;
-
-/// A file to attach to a sent message: a plain filename and its bytes,
-/// base64-encoded on the wire.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Upload {
-    filename: String,
-    data: String,
-}
-
-impl Upload {
-    /// # Errors
-    /// Rejects a name that is not a plain filename, or more bytes than one
-    /// message may carry.
-    pub(crate) fn new(filename: String, bytes: &[u8]) -> Result<Self, OperationError> {
-        plain_filename(&filename)?;
-        if bytes.len() > ATTACHMENT_BYTES {
-            return Err(too_large());
-        }
-        Ok(Self {
-            filename,
-            data: STANDARD.encode(bytes),
-        })
-    }
-}
-
 const fn page_size() -> u16 {
     30
 }
@@ -424,10 +403,10 @@ impl Operation {
     pub(crate) async fn execute(
         self,
         http: &Client,
-        guild: Id<GuildMarker>,
+        scope: &Scope,
     ) -> Result<Value, OperationError> {
         let mutates = self.mutates();
-        let result = tokio::time::timeout(Duration::from_secs(30), self.run(http, guild))
+        let result = tokio::time::timeout(Duration::from_secs(30), self.run(http, scope))
             .await
             .unwrap_or_else(|_| Err(OperationError::uncertain()));
         // The result goes to the model, which gets no signed attachment address.
@@ -445,12 +424,13 @@ impl Operation {
         })
     }
 
-    async fn run(self, http: &Client, guild: Id<GuildMarker>) -> Result<Value, OperationError> {
+    async fn run(self, http: &Client, scope: &Scope) -> Result<Value, OperationError> {
+        let guild = scope.guild;
         match self {
             Self::Server(operation) => operation.run(http, guild).await,
             Self::Channels(operation) => operation.run(http, guild).await,
             Self::Threads(operation) => operation.run(http, guild).await,
-            Self::Messages(operation) => operation.run(http, guild).await,
+            Self::Messages(operation) => operation.run(http, scope).await,
             Self::Roles(operation) => operation.run(http, guild).await,
             Self::Members(operation) => operation.run(http, guild).await,
         }
@@ -694,14 +674,17 @@ impl Messages {
         clippy::too_many_lines,
         reason = "direct dispatch over the resource-specific Discord operations"
     )]
-    async fn run(self, http: &Client, guild: Id<GuildMarker>) -> Result<Value, OperationError> {
+    async fn run(self, http: &Client, scope: &Scope) -> Result<Value, OperationError> {
         match self {
             Self::List {
                 channel_id,
+                user_id,
                 before,
                 limit,
             } => {
-                channel(http, guild, channel_id).await?;
+                let channel_id = direct::destination(http, scope, channel_id, user_id)
+                    .await?
+                    .id;
                 validate_limit(limit)?;
                 let request = http.channel_messages(channel_id);
                 let response = if let Some(before) = before {
@@ -726,11 +709,12 @@ impl Messages {
                 channel_id,
                 message_id,
             } => {
-                channel(http, guild, channel_id).await?;
+                direct::conversation(http, scope, channel_id).await?;
                 decoded(http.message(channel_id, message_id).await?).await
             }
             Self::Send {
                 channel_id,
+                user_id,
                 content,
                 reply_to,
                 mention_users,
@@ -744,7 +728,8 @@ impl Messages {
                         "A message needs content or attachments.",
                     ));
                 }
-                channel(http, guild, channel_id).await?;
+                let target = direct::destination(http, scope, channel_id, user_id).await?;
+                let channel_id = target.id;
                 if let Some(message) = reply_to {
                     http.message(channel_id, message).await?;
                 }
@@ -765,8 +750,7 @@ impl Messages {
                 }
                 let mut result = decoded(request.await?).await?;
                 if let Some(id) = result.get("id").and_then(Value::as_str) {
-                    let url = format!("https://discord.com/channels/{guild}/{channel_id}/{id}");
-                    result["url"] = json!(url);
+                    result["url"] = json!(target.link(scope, id));
                 }
                 Ok(result)
             }
@@ -775,7 +759,7 @@ impl Messages {
                 message_id,
                 content,
             } => {
-                channel(http, guild, channel_id).await?;
+                direct::conversation(http, scope, channel_id).await?;
                 decoded(
                     http.update_message(channel_id, message_id)
                         .content(Some(&content))
@@ -788,7 +772,7 @@ impl Messages {
                 channel_id,
                 message_id,
             } => {
-                channel(http, guild, channel_id).await?;
+                direct::conversation(http, scope, channel_id).await?;
                 http.delete_message(channel_id, message_id).await?;
                 Ok(json!({ "message_id": message_id, "deleted": true }))
             }
@@ -797,7 +781,7 @@ impl Messages {
                 message_id,
                 pinned,
             } => {
-                channel(http, guild, channel_id).await?;
+                direct::conversation(http, scope, channel_id).await?;
                 if pinned {
                     http.create_pin(channel_id, message_id).await?;
                 } else {
@@ -811,7 +795,7 @@ impl Messages {
                 emoji,
                 add,
             } => {
-                channel(http, guild, channel_id).await?;
+                direct::conversation(http, scope, channel_id).await?;
                 if emojis::get(&emoji).is_none() {
                     return Err(OperationError::invalid(
                         "Use a Unicode emoji for reactions.",
@@ -960,50 +944,6 @@ impl Members {
             }
         }
     }
-}
-
-fn uploads(input: Vec<Upload>) -> Result<Vec<Attachment>, OperationError> {
-    if input.len() > ATTACHMENT_COUNT {
-        return Err(too_many());
-    }
-    let mut size = 0;
-    input
-        .into_iter()
-        .enumerate()
-        .map(|(index, Upload { filename, data })| {
-            plain_filename(&filename)?;
-            let bytes = STANDARD
-                .decode(data)
-                .map_err(|_| OperationError::invalid("Attachment data must be base64."))?;
-            size += bytes.len();
-            if size > ATTACHMENT_BYTES {
-                return Err(too_large());
-            }
-            Ok(Attachment::from_bytes(filename, bytes, index as u64))
-        })
-        .collect()
-}
-
-fn plain_filename(filename: &str) -> Result<(), OperationError> {
-    if filename.is_empty() || filename.contains(['/', '\\', '\0']) {
-        return Err(OperationError::invalid(
-            "Attachment filename must be a plain filename.",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn too_many() -> OperationError {
-    OperationError::invalid(&format!(
-        "At most {ATTACHMENT_COUNT} attachments are supported."
-    ))
-}
-
-pub(crate) fn too_large() -> OperationError {
-    OperationError::invalid(&format!(
-        "Attachments exceed the {} MiB per-message limit.",
-        ATTACHMENT_BYTES >> 20
-    ))
 }
 
 /// Remove signed addresses from every attachment list, including those of
