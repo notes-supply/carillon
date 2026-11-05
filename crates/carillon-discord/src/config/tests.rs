@@ -81,6 +81,11 @@ pub(crate) fn installation(
     Ok(config)
 }
 
+/// A deadline no test reaches.
+pub(crate) fn later() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(60)
+}
+
 /// The writer of a complete installation's Discord settings, serving them
 /// as written, with a second agent, `other`, to route to; the installation
 /// lives as long as the directory returned.
@@ -640,7 +645,7 @@ async fn the_writer_refuses_a_hand_edit_nobody_applied() -> anyhow::Result<()> {
     edited.write(writer.installation(), "discord-private")?;
     let before = settings_file(&writer)?;
     let refused = writer
-        .change(|discord| {
+        .change(later(), |discord| {
             discord.typing = !discord.typing;
             Ok(())
         })
@@ -668,7 +673,7 @@ async fn a_stale_change_writes_nothing_and_is_a_conflict() -> anyhow::Result<()>
     let (_installation, writer) = writer()?;
     let before = settings_file(&writer)?;
     let refused = writer
-        .change(|discord| {
+        .change(later(), |discord| {
             discord.typing = !discord.typing;
             Err::<(), _>(super::Refused::Stale)
         })
@@ -689,7 +694,7 @@ async fn a_valid_change_is_written_privately_and_served() -> anyhow::Result<()> 
 
     let (_installation, writer) = writer()?;
     let written = writer
-        .change(|discord| {
+        .change(later(), |discord| {
             discord.routes[0].activation = DiscordActivation::Mention;
             Ok(discord.routes[0].clone())
         })
@@ -707,7 +712,7 @@ async fn a_valid_change_is_written_privately_and_served() -> anyhow::Result<()> 
 
     let before = settings_file(&writer)?;
     let refused = writer
-        .change(|discord| {
+        .change(later(), |discord| {
             discord.routes[0].agent = "nobody".to_owned();
             Ok(())
         })
@@ -725,11 +730,11 @@ async fn concurrent_changes_to_other_routes_both_survive() -> anyhow::Result<()>
     let first = writer.clone();
     let second = writer.clone();
     let (one, two) = tokio::join!(
-        first.change(|discord| {
+        first.change(later(), |discord| {
             discord.routes[0].conversation = DiscordConversation::Thread;
             Ok(())
         }),
-        second.change(|discord| {
+        second.change(later(), |discord| {
             discord.routes.push(
                 "301:mention:thread:other"
                     .parse()
@@ -746,3 +751,131 @@ async fn concurrent_changes_to_other_routes_both_survive() -> anyhow::Result<()>
     assert_eq!(file.routes, writer.current().routes);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_change_and_its_undo_leave_the_owners_file_as_it_was() -> anyhow::Result<()> {
+    let (_installation, writer) = writer()?;
+    let path = writer
+        .installation()
+        .provider_config_path("discord-private")?;
+    let owned = r#"# The team's Discord settings, kept by hand.
+allowed_user_ids = ["200"] # who may talk to agents
+guild_id = "100"
+bot_user_id = "101"
+
+# The support channel.
+[[routes]]
+channel_id = "300"
+agent = "default"
+activation = "always" # everyone, not only mentions
+conversation = "channel"
+"#;
+    fs::write(&path, owned)?;
+    let listens = |activation| {
+        writer.change(later(), move |discord| {
+            discord.routes[0].activation = activation;
+            Ok(())
+        })
+    };
+    listens(DiscordActivation::Mention)
+        .await
+        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert_eq!(
+        fs::read_to_string(&path)?,
+        owned.replace(r#"activation = "always""#, r#"activation = "mention""#)
+    );
+    assert_eq!(
+        writer.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
+    listens(DiscordActivation::Always)
+        .await
+        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert_eq!(fs::read_to_string(&path)?, owned);
+    Ok(())
+}
+
+#[test]
+fn settings_written_over_the_owners_file_change_only_what_differs() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = installation(directory.path(), "discord", 47_200)?;
+    let path = config.provider_config_path("discord")?;
+    let owned = r#"guild_id = "100" # our server
+bot_user_id = "101"
+allowed_user_ids = ["200"]
+typing = false # quiet, please
+
+[[routes]] # support
+channel_id = "300"
+agent = "default"
+activation = "always"
+conversation = "channel"
+"#;
+    fs::write(&path, owned)?;
+    let original = DiscordConfig::load(&config, "discord")?;
+    let mut changed = original.clone();
+    changed.routes.push("301:mention:thread:default".parse()?);
+    changed.module.enabled = true;
+    changed.module.path = Some("custom.wasm".into());
+    changed.write(&config, "discord")?;
+    let written = fs::read_to_string(&path)?;
+    assert!(written.starts_with(owned), "{written}");
+    let reread = DiscordConfig::load(&config, "discord")?;
+    assert_eq!(reread.routes, changed.routes);
+    assert_eq!(reread.module, changed.module);
+    assert!(!reread.typing);
+    original.write(&config, "discord")?;
+    assert_eq!(fs::read_to_string(&path)?, owned);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_module_committed_in_place_but_not_synced_serves_its_file() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_installation, writer) = writer()?;
+    let path = writer
+        .installation()
+        .provider_config_path("discord-private")?;
+    let providers = path.parent().context("settings directory")?;
+    // Writable but not readable: the new file is renamed into place, and
+    // the directory cannot be opened to sync it.
+    fs::set_permissions(providers, fs::Permissions::from_mode(0o300))?;
+    let written = writer
+        .declare(
+            |discord| {
+                discord.routes[0].activation = DiscordActivation::Mention;
+                Ok(())
+            },
+            |_, commit| async move {
+                commit.write().map_err(crate::module::ChangeError::Commit)?;
+                let summary = crate::module::ModuleSummary {
+                    source: crate::module::Source::Bundled,
+                    commands: Vec::new(),
+                    digest: String::new(),
+                };
+                Ok(crate::module::Change {
+                    serving: summary.clone(),
+                    previous: summary,
+                    discord: crate::module::Registration::NotConnected,
+                })
+            },
+        )
+        .await;
+    fs::set_permissions(providers, fs::Permissions::from_mode(0o700))?;
+    let written = written.map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert!(written.unsynced.is_some());
+    let file = DiscordConfig::load(writer.installation(), "discord-private")?;
+    assert_eq!(file.routes[0].activation, DiscordActivation::Mention);
+    assert_eq!(file.routes, writer.current().routes);
+    // What serves is the file, so the next change builds on it.
+    writer
+        .change(later(), |discord| {
+            discord.routes[0].activation = DiscordActivation::Always;
+            Ok(())
+        })
+        .await
+        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    Ok(())
+}
+mod owners_file;

@@ -595,3 +595,61 @@ async fn a_module_change_that_cannot_be_written_serves_nothing_new() -> anyhow::
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn a_module_change_in_place_but_not_synced_serves_its_file_and_says_so() -> anyhow::Result<()>
+{
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir()?;
+    let (core, _, server) = settings_core(None).await?;
+    let state = discord_state(core, directory.path()).await?;
+    let custom = directory.path().join("custom.wasm");
+    std::fs::write(&custom, variant(&["settings", "other"], "replacement")?)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut operator = state.installation.as_ref().clone();
+    operator
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord")
+        .context("no discord provider")?
+        .url = format!("http://{}", listener.local_addr()?);
+    let provider = tokio::spawn({
+        let router = discord_router(state.clone(), false);
+        async move { axum::serve(listener, router).await }
+    });
+    let path = state.installation.provider_config_path("discord")?;
+    let parent = path.parent().context("no providers directory")?;
+    // Writable but not readable: the new file is renamed into place, and
+    // the directory cannot be opened to sync it.
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o300))?;
+    let delivered = crate::cli::deliver(
+        &operator,
+        "discord",
+        crate::config::FileChange::Module {
+            enabled: true,
+            path: Some(custom),
+        },
+    )
+    .await;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    let error = format!(
+        "{:#}",
+        delivered
+            .err()
+            .context("an unsynced write was confirmed durable")?
+    );
+    assert!(
+        error.contains("the change is made and a system crash may undo it"),
+        "{error}"
+    );
+    assert!(!error.contains("settings file is unchanged"), "{error}");
+    let file = DiscordConfig::read(&state.installation, "discord")?;
+    assert!(file.module.enabled);
+    assert_eq!(file.module, state.settings.current().module);
+    assert_eq!(state.module.serving().commands, ["settings", "other"]);
+    provider.abort();
+    server.abort();
+    Ok(())
+}

@@ -1189,7 +1189,7 @@ fn edit_settings(
 ) -> anyhow::Result<()> {
     let mut file = DiscordConfig::clone(&state.settings.current());
     change(&mut file);
-    file.write(&state.installation, "discord")
+    Ok(file.write(&state.installation, "discord")?)
 }
 
 mod channels;

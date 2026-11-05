@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{
     LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
 };
-use carillon_installation::filesystem::atomic_write;
+use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::turns::ControlAction;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -480,16 +480,40 @@ impl DiscordConfig {
     }
 
     /// Writes the file for a registered interface provider, readable only by
-    /// the installation owner like the rest of the installation.
-    pub(crate) fn write(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
+    /// the installation owner like the rest of the installation. An existing
+    /// file is edited where it says otherwise, keeping the rest as written.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file is as it was, or that the new file is in place
+    /// but not confirmed durable.
+    pub(crate) fn write(&self, config: &LoadedConfig, provider_id: &str) -> Result<(), WriteError> {
         self.validate(config, provider_id)?;
         let path = config.provider_config_path(provider_id)?;
+        let text = self.text_at(&path)?;
+        publish(&path, text.as_bytes(), 0o600).map_err(|error| {
+            let unsynced = matches!(error, PublishError::Unsynced(_));
+            let error = anyhow::Error::new(error).context(format!("write {}", path.display()));
+            if unsynced {
+                WriteError::Unsynced(error)
+            } else {
+                WriteError::NotWritten(error)
+            }
+        })
+    }
+
+    /// The text of these settings at `path`, as an edit of the file there.
+    fn text_at(&self, path: &Path) -> Result<String> {
         let parent = path
             .parent()
             .context("provider configuration has no parent")?;
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        atomic_write(&path, toml::to_string_pretty(self)?.as_bytes(), 0o600)
-            .with_context(|| format!("write {}", path.display()))
+        let file = match fs::read_to_string(path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        edit::text(self, file.as_deref())
     }
 
     pub(crate) fn validate(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
@@ -568,6 +592,32 @@ impl DiscordConfig {
         Ok(())
     }
 }
+
+/// Why [`DiscordConfig::write`] did not confirm the file.
+#[derive(Debug)]
+pub(crate) enum WriteError {
+    /// The file is as it was.
+    NotWritten(anyhow::Error),
+    /// The new file is in place, but its directory did not sync, so a system
+    /// crash may still bring back the previous one.
+    Unsynced(anyhow::Error),
+}
+
+impl From<anyhow::Error> for WriteError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::NotWritten(error)
+    }
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotWritten(error) | Self::Unsynced(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
 
 /// How a settings file differs from the settings that serve, by field:
 /// what an apply would change, and what only a restart applies.
@@ -834,9 +884,12 @@ fn valid_snowflake(value: &str) -> bool {
         .is_ok_and(|id| id != 0 && id.to_string() == value)
 }
 
+mod edit;
 mod mutation;
 
-pub(crate) use mutation::{FileChange, Refused, Routes, Writer, file_or_defaults, module_refusal};
+pub(crate) use mutation::{
+    FileChange, Refused, Routes, Writer, Written, file_or_defaults, module_refusal,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;

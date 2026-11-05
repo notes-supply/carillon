@@ -296,8 +296,49 @@ and the [module](#discord-module) apply live. The guild, bot user, bot token fil
 settings it was admitted with. While the provider runs, it is the only
 program that writes its settings file: setup, `carillon discord module` and
 route changes send their change to it, and it writes and serves the file.
-It writes the whole file in its own layout, so comments in the file don't
-survive a change.
+It writes only the values that a change alters, each in its place. The file
+keeps its comments, its order and its line endings. A missing final newline
+stays missing, and defaults the file leaves unstated stay unstated.
+
+Routes are matched by channel and users by ID. Each keeps its line and its
+comments. A removed one goes with its line and the comments above it. Comments
+a blank line sets off from it stay. A removed one that shares its line with
+another goes alone. Setup answers that list routes or users in another order
+change nothing. New ones are added at the end.
+
+A changed string keeps its single quotes when the new value fits in them,
+which means it holds no single quote and no line break. Other changed values
+are written in their plain form. A plain string is in double quotes. It is in
+single quotes when it holds a `"` or a backslash but no single quote. It is
+in `"""` when it holds a line break.
+
+A change and its undo leave the file byte for byte as it was, except in these
+cases:
+
+- A user or route the change removed comes back without its comments, and
+  setup adds it at the end of its list. In a list written over several
+  lines, a line the removed user shared with another can come back split in
+  two.
+- The comments a blank line sets off above a `[[routes]]` table go with it
+  when a change removes that route and every route after it, and adds none
+  after them.
+- `carillon discord module disable` keeps the module's path, so a module
+  enabled with a path the file lacked, then disabled, leaves `[module]` with
+  `enabled = false` and that path.
+- Module settings that the undo leaves at their defaults, disabled with no
+  path, go unless a comment is on or above them, as a new file leaves them
+  unstated.
+- A changed string comes back in its plain form, unless it was in single
+  quotes and both values fit in them. So `'''x'''` comes back as `'x'` when
+  both fit, `"\u0061"` as `"a"`, and `'x'` as `"x"` when the change's value
+  held a single quote.
+- A user list that names a user twice is written again whole, on one line,
+  when a change drops one of them.
+- A file with CRLF line endings anywhere comes back with CRLF throughout.
+
+A change whose file is in place but whose folder could not be synced
+serves, and is reported as made but not confirmed durable: a system crash
+could still bring back the previous file.
 It refuses a change while the file has edits nobody applied. A change to
 what only a restart applies is written and served at the next restart;
 until then, setup can change the file again, and route and module changes
