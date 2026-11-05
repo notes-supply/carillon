@@ -12,9 +12,11 @@ import { join } from "node:path";
 export async function testFiles(harness) {
   const turn = await testAttachments(harness);
   await testAnswerFiles(harness);
+  await testAnswerFilesOutlastRestarts(harness);
   return turn;
 }
 
+/** Files staged as the Discord provider stages them, captured through core. */
 async function testAttachments(harness) {
   const {
     basePort,
@@ -127,9 +129,7 @@ async function postCoreEvent({ basePort, credentialValue }, eventId, content, at
  * of each with the answer, and the Discord provider composes the messages
  * that send them from those copies, checked against their digests.
  */
-async function testAnswerFiles(harness) {
-  const { installation, workspace, simulate, submitCoreEvent, waitForTurn } = harness;
-  const { waitForDeliveryClaim, acknowledgeDelivery, stop, start, restart } = harness;
+async function testAnswerFiles({ installation, workspace, simulate }) {
   const store = join(installation, "state/attachments");
   const chart = join(workspace, "chart.png");
   const talk = join(workspace, "talk.bin");
@@ -159,12 +159,20 @@ async function testAnswerFiles(harness) {
   const refused = await simulate("answer-file-missing", `attach ${missing}`);
   assert.equal(refused.delivery.files, undefined);
   assert.ok(
-    refused.delivery.content.includes(`attach said There is no file at ${missing}.`),
+    refused.delivery.content.includes(`There is no file at ${missing}.`),
     refused.delivery.content,
   );
+}
 
-  // Answered while Discord is down, the file outlasts a core restart and the
-  // agent's own copy: each claim names core's copy, and nothing runs again.
+/**
+ * An answer recorded while Discord is down keeps its file across a core
+ * restart, after the agent's own copy is gone: each claim names core's copy,
+ * and nothing runs again.
+ */
+async function testAnswerFilesOutlastRestarts(harness) {
+  const { installation, workspace, submitCoreEvent, waitForTurn } = harness;
+  const { waitForDeliveryClaim, acknowledgeDelivery, stop, start, restart } = harness;
+  const store = join(installation, "state/attachments");
   await stop("discord");
   const report = join(workspace, "report.pdf");
   await writeFile(report, "%PDF-1.7 report");

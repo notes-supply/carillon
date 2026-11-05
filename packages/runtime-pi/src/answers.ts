@@ -13,10 +13,6 @@ import { basename, resolve } from "node:path";
 import { Type } from "typebox";
 import { Attached } from "./documents.ts";
 
-/**
- * Adds a file to the answer. A subagent's conversation is not offered it:
- * its answer goes to the agent that started it.
- */
 export const ATTACH = defineTool({
   name: "attach",
   description:
@@ -25,7 +21,6 @@ export const ATTACH = defineTool({
     { path: Type.String({ minLength: 1, description: "The file to attach." }) },
     { additionalProperties: false },
   ),
-  // A file is recorded once by its path, so running again attaches nothing twice.
   replay: "safe",
   async execute({ path }, api, context) {
     const file = resolve(api.env?.cwd ?? "/", path);

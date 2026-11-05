@@ -297,7 +297,8 @@ pub struct Delivery {
 /// A file core keeps with an answer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AnswerFile {
-    /// Core's read-only copy: an absolute path on this host.
+    /// Where core keeps it, relative to the installation's attachment store;
+    /// never an absolute path.
     pub path: String,
     /// The file's name where the agent made it: display text, never a path.
     pub name: String,

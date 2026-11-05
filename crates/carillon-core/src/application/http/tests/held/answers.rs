@@ -65,7 +65,6 @@ async fn an_answers_files_are_kept_before_it_is_recorded_and_sent_from_the_copie
         1,
         "the same outcome copies once"
     );
-    // The agent's files may change or go: what is sent is core's copy.
     fs::write(&chart, b"redrawn")?;
     fs::remove_file(&table)?;
     let claimed = claim(&state.core, "instance")?;
@@ -93,7 +92,6 @@ async fn an_answers_files_are_kept_before_it_is_recorded_and_sent_from_the_copie
             "kept copies are read-only"
         );
     }
-    // A claim whose answer the interface lost names the same copies again.
     assert_eq!(claim(&state.core, "instance")?.files, claimed.files);
     let inspected = state
         .core
@@ -152,21 +150,32 @@ async fn files_core_cannot_keep_are_named_in_the_answer_and_the_rest_sent() -> R
         sent(&store, &claimed)?,
         [("notes.txt".to_owned(), source(&kept), b"kept".to_vec())]
     );
-    // An answer none of whose files core keeps is recorded all the same.
-    let next = ok(submit(&state, "send it", "conversation").await)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_answer_whose_files_core_cannot_keep_is_recorded_with_its_text() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let gone = directory.path().join("gone.png");
+    let receipt = ok(submit(&state, "send it", "conversation").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
-    let missing = json!({"outcome": "answered", "output": "Sent.", "files": [gone]});
+    let answer = json!({"outcome": "answered", "output": "Sent.", "files": [gone]});
     assert_eq!(
-        settle(&state, RUNTIME, &next.turn_id, &missing).await?,
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
         StatusCode::NO_CONTENT
     );
-    let claimed = claim(&state.core, "other")?;
+    let claimed = claim(&state.core, "instance")?;
     assert!(claimed.files.is_empty());
-    assert!(
-        claimed
-            .content
-            .ends_with("gone.png: there is no such file.")
+    assert_eq!(
+        claimed.content,
+        format!(
+            "Sent.\n\nCould not attach {}: there is no such file.",
+            source(&gone)
+        )
     );
+    assert!(!fixture.config.value.data_dir.join("attachments").exists());
     Ok(())
 }
 
@@ -180,7 +189,6 @@ async fn kept_files_outlast_a_stop_while_copying_and_a_restart_before_delivery()
     let receipt = ok(submit(&state, "chart it", "conversation").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     let answer = json!({"outcome": "answered", "output": "Here.", "files": [chart]});
-    // A stopping core keeps nothing and records nothing: the runtime asks again.
     state.core.stop_capturing();
     assert_eq!(
         settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,

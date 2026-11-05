@@ -4,7 +4,9 @@
 //! Discord takes files of up to 20 MiB by default, from everyone, at most 10
 //! and 25 MiB in all per message
 //! (<https://docs.discord.com/developers/reference#uploading-files>,
-//! <https://docs.discord.com/developers/resources/message#create-message>).
+//! <https://docs.discord.com/developers/resources/message#create-message>,
+//! and error 30015 of
+//! <https://docs.discord.com/developers/topics/opcodes-and-status-codes>).
 //! A server's boosts can raise the limit for one file, but only interactions
 //! report a server's limit in bytes (`attachment_size_limit`), and a
 //! message's request stays within 25 MiB, so the default is the limit here.

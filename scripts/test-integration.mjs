@@ -1657,8 +1657,6 @@ async function interact(channelId, parentChannelId, kind, name, values = [], opt
   return JSON.parse(body);
 }
 
-/** A reply as a person reads it: its text, then its embeds' notes, sections and hints. */
-/** Files staged as the Discord provider stages them, captured through core. */
 async function submitCoreEvent(eventId, content, channel = "300") {
   const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
     method: "POST",

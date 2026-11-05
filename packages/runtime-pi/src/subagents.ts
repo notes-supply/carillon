@@ -170,8 +170,8 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
 /**
  * The child conversation `owner` owns, created once as a copy of the
  * agent of `parent`, its conversation, that cannot start subagents or
- * schedules, or attach files to an answer. It serves the parent's Carillon conversation, so tools such as
- * Discord's find its interface and origin.
+ * schedules, or attach files to an answer. It serves the parent's Carillon
+ * conversation, so tools such as Discord's find its interface and origin.
  */
 async function childOf(tx: Tx, owner: TaskId, parent: ConversationId): Promise<ConversationId> {
   const [existing] = (await tx.scanConversations({ ownerTaskId: owner }, 1)).items;

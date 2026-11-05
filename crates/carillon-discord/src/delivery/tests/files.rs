@@ -200,8 +200,6 @@ async fn an_answers_files_reach_discord_with_its_text_once_a_lost_claim_is_taken
         ],
         ..answer(1, TurnState::Completed)
     };
-    // The first claim's answer is lost: core may hold it for this provider,
-    // which takes it up again from core's copies.
     let (messages, acks) = upload(vec![None, Some(delivery)], store.path()).await?;
     assert_eq!(
         messages,
@@ -260,12 +258,12 @@ async fn a_copy_that_changed_after_it_was_kept_is_never_sent() -> anyhow::Result
     Ok(())
 }
 
+fn names(files: &[&AnswerFile]) -> Vec<String> {
+    files.iter().map(|file| file.name.clone()).collect()
+}
+
 #[test]
-fn files_fill_each_message_as_far_as_discord_takes_them() {
-    let names = |files: &[&AnswerFile]| -> Vec<String> {
-        files.iter().map(|file| file.name.clone()).collect()
-    };
-    // Ten files to a message.
+fn a_message_carries_at_most_ten_files() {
     let small = (0..12)
         .map(|index| listed(&format!("{index}.txt"), 1))
         .collect::<Vec<_>>();
@@ -273,23 +271,26 @@ fn files_fill_each_message_as_far_as_discord_takes_them() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].content, "Here.");
     assert_eq!(names(&messages[0].files).len(), 10);
-    assert_eq!(names(&messages[1].files), ["10.txt", "11.txt"]);
     assert!(messages[1].content.is_empty());
-    // Within 25 MiB a message, each file whole.
+    assert_eq!(names(&messages[1].files), ["10.txt", "11.txt"]);
+}
+
+#[test]
+fn a_message_carries_whole_files_within_its_request_limit() {
     let large = (0..4)
         .map(|index| listed(&format!("{index}.bin"), 10 * MIB))
         .collect::<Vec<_>>();
-    let messages = compose("Here.", &large);
-    let sizes = messages
+    let sizes = compose("Here.", &large)
         .iter()
         .map(|message| message.files.iter().map(|file| file.size).sum::<u64>())
         .collect::<Vec<_>>();
     assert_eq!(sizes, [20 * MIB, 20 * MIB]);
-    // A file of exactly Discord's limit is sent; the text's last message
-    // carries the first files.
-    let long = "a ".repeat(1_500);
+}
+
+#[test]
+fn a_file_at_discords_limit_goes_on_the_last_message_of_a_long_answer() {
     let edge = [listed("edge.bin", 20 * MIB)];
-    let messages = compose(&long, &edge);
+    let messages = compose(&"a ".repeat(1_500), &edge);
     assert_eq!(messages.len(), 2);
     assert!(messages[0].files.is_empty());
     assert_eq!(names(&messages[1].files), ["edge.bin"]);

@@ -27,7 +27,6 @@ function attaching(...paths: string[]) {
   );
 }
 
-/** A model answer that repeats what the last tool round said. */
 const reporting: FauxResponseFactory = (context) => {
   const results = context.messages.filter((message) => message.role === "toolResult");
   return fauxAssistantMessage(`Tools: ${results.flatMap(textsOf).join(" | ")}`);
@@ -49,7 +48,6 @@ it("sends the files the agent attached with its answer, in order and once each",
     output: "Here is the chart.",
     files: [join(agent.workspace, "out/chart.png"), join(agent.workspace, "data set.csv")],
   });
-  // The next answer carries only what is attached for it.
   agent.model.setResponses([fauxAssistantMessage("Nothing else.")]);
   await agent.runtime.turns.submit(agent.turn("turn-2", "Anything else?"));
   expect(await agent.outcome("turn-2")).not.toHaveProperty("files");
