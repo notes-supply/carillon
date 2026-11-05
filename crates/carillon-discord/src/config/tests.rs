@@ -863,7 +863,8 @@ async fn a_module_committed_in_place_but_not_synced_serves_its_file() -> anyhow:
         )
         .await;
     fs::set_permissions(providers, fs::Permissions::from_mode(0o700))?;
-    written.map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    let written = written.map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert!(written.unsynced.is_some());
     let file = DiscordConfig::load(writer.installation(), "discord-private")?;
     assert_eq!(file.routes[0].activation, DiscordActivation::Mention);
     assert_eq!(file.routes, writer.current().routes);
