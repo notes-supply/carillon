@@ -297,8 +297,24 @@ settings it was admitted with. While the provider runs, it is the only
 program that writes its settings file: setup, `carillon discord module` and
 route changes send their change to it, and it writes and serves the file.
 It writes only the values a change makes differ, each in its place, so the
-file keeps its comments, its order and the defaults it leaves unstated, and
-a change and its undo leave it as it was.
+file keeps its comments, its order, its line endings and the defaults it
+leaves unstated. Routes are matched by channel and users by ID, each keeping
+its line and comments; setup answers that list them in another order change
+nothing, and new ones are added at the end. A changed string keeps its
+single quotes when the new value fits in them; other changed values are
+written in their plain form. A change and its undo leave the file byte for
+byte as it was, except that:
+
+- A user or route the change removed comes back without its comments.
+- A value or `[module]` table the change sets back to its default goes, as a
+  new file leaves it unstated, unless a comment is on it. An uncommented
+  `enabled = false` goes when a module is enabled and then disabled.
+- A string written over several lines comes back on one line, and an
+  escaped character comes back as itself.
+- A user list that names a user twice, when a change drops one of them, is
+  written again whole, on one line.
+- A file with CRLF line endings anywhere comes back with CRLF throughout.
+
 A change whose file is in place but whose folder could not be synced
 serves, and is reported as made but not confirmed durable: a system crash
 could still bring back the previous file.

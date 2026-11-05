@@ -75,11 +75,16 @@ impl FileChange {
                 guild_id,
                 bot_user_id,
                 bot_token_file,
-                allowed_user_ids,
+                mut allowed_user_ids,
                 routes,
             } => {
                 let routes = match routes {
-                    Routes::Answered(routes) => routes,
+                    Routes::Answered(mut routes) => {
+                        in_order_of(&mut routes, &discord.routes, |one, other| {
+                            one.channel_id == other.channel_id
+                        });
+                        routes
+                    }
                     Routes::First(routes) if discord.routes.is_empty() => routes,
                     Routes::First(routes) if same_routes(&discord.routes, &routes) => {
                         discord.routes.clone()
@@ -99,6 +104,11 @@ impl FileChange {
                 if bot_token_file.is_some() {
                     discord.bot_token_file = bot_token_file;
                 }
+                in_order_of(
+                    &mut allowed_user_ids,
+                    &discord.allowed_user_ids,
+                    PartialEq::eq,
+                );
                 discord.allowed_user_ids = allowed_user_ids;
                 discord.routes = routes;
             }
@@ -135,6 +145,17 @@ impl FileChange {
                 WriteError::Unsynced(error) => error,
             })
     }
+}
+
+/// Sorts `answered` into the order the settings list them in, new ones
+/// last as answered, so answers that only reorder them change nothing.
+fn in_order_of<T>(answered: &mut [T], settings: &[T], same: impl Fn(&T, &T) -> bool) {
+    answered.sort_by_key(|answer| {
+        settings
+            .iter()
+            .position(|kept| same(kept, answer))
+            .unwrap_or(usize::MAX)
+    });
 }
 
 fn same_routes(left: &[DiscordRoute], right: &[DiscordRoute]) -> bool {
