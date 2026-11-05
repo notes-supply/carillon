@@ -314,8 +314,9 @@ that:
   setup adds it at the end of its list. In a list written over several
   lines, a line the removed user shared with another can come back split in
   two.
-- The comments a blank line sets off above the last `[[routes]]` table go
-  with it when a change removes that route and adds none after it.
+- The comments a blank line sets off above a `[[routes]]` table go with it
+  when a change removes that route and every route after it, and adds none
+  after them.
 - `carillon discord module disable` keeps the module's path, so a module
   enabled with a path the file lacked, then disabled, leaves `[module]` with
   `enabled = false` and that path.
