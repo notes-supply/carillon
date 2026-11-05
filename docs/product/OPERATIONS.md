@@ -538,7 +538,7 @@ concurrent_messages = 2   # messages downloading at once
 staging_mib = 2048
 
 # carillon.toml, the Discord provider's [[providers]] entry
-max_upload_mib = 20       # the largest file it uploads; at most 24
+max_upload_mib = 20       # the largest file it uploads: 20 when unset, at most 24
 
 # carillon.toml
 [core.attachments]

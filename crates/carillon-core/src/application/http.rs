@@ -83,7 +83,8 @@ pub(super) fn core_options(config: &LoadedConfig) -> CoreOptions {
             .value
             .providers
             .iter()
-            .filter_map(|provider| Some((provider.id.clone(), provider.max_upload_mib?)))
+            .filter(|provider| provider.role == ProviderRole::Interface)
+            .map(|provider| (provider.id.clone(), provider.upload_mib()))
             .collect(),
         runtimes: runtime_facts(config),
     }

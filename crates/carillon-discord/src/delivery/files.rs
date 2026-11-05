@@ -23,19 +23,19 @@ const FILES_PER_MESSAGE: usize = 10;
 /// the request's framing.
 const MESSAGE_FILE_BYTES: u64 = 25 * MIB - 64 * 1024;
 
-/// Requires the provider's registry entry to declare an upload limit that
-/// one message can carry.
+/// Requires the provider's upload limit to fit in one message.
 /// # Errors
-/// Returns which limit to declare when it is missing or larger.
+/// Returns the largest limit one message carries when it is larger.
 pub(crate) fn require_upload_limit(provider: &Provider) -> Result<()> {
     let most = MESSAGE_FILE_BYTES / MIB;
-    match provider.max_upload_mib {
-        Some(mib) if mib <= most => Ok(()),
-        _ => bail!(
-            "carillon.toml must declare max_upload_mib of at most {most} for {}",
+    let mib = provider.upload_mib();
+    if mib > most {
+        bail!(
+            "max_upload_mib for {} is {mib}, but one Discord message carries at most {most}",
             provider.id
-        ),
+        );
     }
+    Ok(())
 }
 
 /// One Discord message of a delivery: its text, possibly empty, and the

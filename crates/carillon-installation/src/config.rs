@@ -78,6 +78,12 @@ impl Default for AttachmentLimits {
 
 /// One MiB, the unit of configured attachment sizes.
 pub const MIB: u64 = 1024 * 1024;
+/// The largest file an interface uploads when its entry names none:
+/// Discord's default for every server
+/// (<https://docs.discord.com/developers/reference#uploading-files>). A
+/// server's boosts can raise it, but only interactions report a server's
+/// limit, and a message request stays within 25 MiB.
+pub const DEFAULT_UPLOAD_MIB: u64 = 20;
 
 impl AttachmentLimits {
     fn is_default(&self) -> bool {
@@ -206,6 +212,13 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// The largest file this interface uploads, [`DEFAULT_UPLOAD_MIB`] unless
+    /// its entry says otherwise.
+    #[must_use]
+    pub fn upload_mib(&self) -> u64 {
+        self.max_upload_mib.unwrap_or(DEFAULT_UPLOAD_MIB)
+    }
+
     /// The loopback socket address behind the provider's URL.
     ///
     /// # Errors

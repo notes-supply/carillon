@@ -17,8 +17,9 @@ use tar::{Archive, Builder};
 use uuid::Uuid;
 
 use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    RELEASE_VERSION, attachment_staging, hash_token, new_token, validate_provider_identity,
+    AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, LoadedConfig, Provider,
+    ProviderRole, RELEASE_VERSION, attachment_staging, hash_token, new_token,
+    validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 use carillon_installation::maintenance::ServiceLock;
@@ -212,12 +213,6 @@ pub(super) fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result
     write_config(&config_path, &config)
 }
 
-/// Discord's default upload limit, which applies to every server
-/// (<https://docs.discord.com/developers/reference#uploading-files>). A
-/// server's boosts can raise it, but only interactions report a server's
-/// limit, and a message request stays within 25 MiB.
-const DISCORD_UPLOAD_MIB: u64 = 20;
-
 fn default_providers(
     base_port: u16,
     discord_token: &str,
@@ -232,7 +227,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
-            max_upload_mib: Some(DISCORD_UPLOAD_MIB),
+            max_upload_mib: Some(DEFAULT_UPLOAD_MIB),
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])

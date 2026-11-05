@@ -357,7 +357,7 @@ fn a_file_at_discords_limit_goes_on_the_last_message_of_a_long_answer() {
 }
 
 #[test]
-fn discord_needs_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
+fn discord_takes_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
     let provider = |max_upload_mib| Provider {
         id: "discord-private".to_owned(),
         role: ProviderRole::Interface,
@@ -367,17 +367,18 @@ fn discord_needs_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
         enabled: true,
         max_upload_mib,
     };
-    require_upload_limit(&provider(Some(20)))?;
-    for refused in [None, Some(25)] {
-        assert_eq!(
-            require_upload_limit(&provider(refused))
-                .err()
-                .map(|error| error.to_string()),
-            Some(
-                "carillon.toml must declare max_upload_mib of at most 24 for discord-private"
-                    .to_owned()
-            )
-        );
+    for accepted in [None, Some(20), Some(24)] {
+        require_upload_limit(&provider(accepted))?;
     }
+    assert_eq!(provider(None).upload_mib(), 20);
+    assert_eq!(
+        require_upload_limit(&provider(Some(25)))
+            .err()
+            .map(|error| error.to_string()),
+        Some(
+            "max_upload_mib for discord-private is 25, but one Discord message carries at most 24"
+                .to_owned()
+        )
+    );
     Ok(())
 }
