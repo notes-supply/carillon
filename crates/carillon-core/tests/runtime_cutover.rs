@@ -58,6 +58,7 @@ async fn answer_next(core: &Core, runtime: &str) -> Result<Option<String>> {
     let answer = TurnOutcome::Answered {
         output: "answer".to_owned(),
         activity: None,
+        files: Vec::new(),
     };
     assert_eq!(core.settle(runtime, &turn, answer)?, Settled::Recorded);
     Ok(Some(turn))

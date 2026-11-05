@@ -129,6 +129,7 @@ fn echo(request: &RuntimeTurnRequest) -> Result<TurnOutcome> {
     Ok(TurnOutcome::Answered {
         output: format!("{} — {captured}", request.input),
         activity: None,
+        files: Vec::new(),
     })
 }
 

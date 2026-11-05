@@ -537,3 +537,5 @@ async fn controls_reach_the_runtime_holding_a_running_turn_and_its_answer_comes_
     assert_eq!(runtime.controlled().len(), 2);
     Ok(())
 }
+
+mod answers;

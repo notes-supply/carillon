@@ -26,7 +26,7 @@ use std::{
 };
 
 /// The answer of turn `turn-{id}`, a message turn of its own job, to channel 300.
-fn answer(id: i64, turn_state: TurnState) -> Delivery {
+pub(crate) fn answer(id: i64, turn_state: TurnState) -> Delivery {
     Delivery {
         turn_state,
         id,
@@ -39,6 +39,7 @@ fn answer(id: i64, turn_state: TurnState) -> Delivery {
             turn_id: format!("turn-{id}"),
             accepted_at: 1_790_000_000,
         },
+        files: Vec::new(),
     }
 }
 

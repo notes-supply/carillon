@@ -69,6 +69,7 @@ impl SimulatedCore {
                     turn_id: format!("turn-{}", event.event_id),
                     accepted_at: 1_790_000_000,
                 },
+                files: Vec::new(),
             },
             false,
         ));

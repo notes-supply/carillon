@@ -699,17 +699,13 @@ fn config(typing: bool) -> DiscordConfig {
 /// The answer to a turn of the job `origin`, in channel 300.
 fn answer(id: i64, turn_id: &str, origin: &str, turn_state: TurnState) -> Delivery {
     Delivery {
-        turn_state,
-        id,
         turn_id: turn_id.to_owned(),
-        target_id: "300".to_owned(),
-        feedback_target_id: "300:400".to_owned(),
         content: "answer".to_owned(),
-        silence: None,
         origin: Origin {
             turn_id: origin.to_owned(),
             accepted_at: now() - 60,
         },
+        ..crate::delivery::tests::answer(id, turn_state)
     }
 }
 

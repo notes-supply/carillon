@@ -236,7 +236,7 @@ impl Intake {
     /// writes, as on Btrfs until a transaction commits. The budget counts kept
     /// bytes exactly; the floor uses reported availability and may still lag
     /// a completed capture after its reservation is released.
-    fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
+    pub(crate) fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
         let mut reserved = lock(&self.reserved);
         let kept = core.database.captured_bytes()?;
         let budget = self.limits.storage_bytes();
@@ -281,7 +281,7 @@ fn earlier_capture(
 }
 
 /// Bytes held against the budget; released exactly once, on drop.
-struct Reservation {
+pub(crate) struct Reservation {
     reserved: Arc<Mutex<u64>>,
     bytes: u64,
 }

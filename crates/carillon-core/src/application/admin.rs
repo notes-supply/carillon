@@ -1338,11 +1338,10 @@ mod tests {
         }
         core.dispatch_next("runtime-pi", &CancellationToken::new(), async |_| Ok(()))
             .await?;
-        let answer = carillon_protocol::turns::TurnOutcome::Answered {
-            output: "read it".to_owned(),
-            activity: None,
-        };
-        core.settle("runtime-pi", &turns[0], answer)?;
+        let made = directory.path().join("made.txt");
+        fs::write(&made, b"made file")?;
+        let answer = serde_json::json!({"outcome": "answered", "output": "read", "files": [made]});
+        core.settle("runtime-pi", &turns[0], serde_json::from_value(answer)?)?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
         let store = config.value.data_dir.join("attachments");
@@ -1369,7 +1368,7 @@ mod tests {
                 .iter()
                 .filter(|name| name.starts_with("state/attachments/") && name.ends_with("/0"))
                 .count(),
-            2
+            3
         );
         // Backup reconciled under exclusive ownership, like core startup.
         assert!(!orphan.exists());

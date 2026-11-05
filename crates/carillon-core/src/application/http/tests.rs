@@ -114,8 +114,7 @@ async fn hand_next(core: &Core, runtime_id: &str) -> Result<Option<RuntimeTurnRe
     Ok(handed)
 }
 
-/// Settles a turn `runtime_id` holds as answered, with a reply to its input
-/// and `activity` as its report.
+/// Settles a held turn as answered: a reply to its input, `activity` its report.
 fn answer(
     core: &Core,
     runtime_id: &str,
@@ -125,6 +124,7 @@ fn answer(
     let answer = TurnOutcome::Answered {
         output: format!("reply to {}", request.input),
         activity,
+        files: Vec::new(),
     };
     let settled = core.settle(runtime_id, &request.correlation_id, answer)?;
     anyhow::ensure!(settled == Settled::Recorded, "the answer was {settled:?}");

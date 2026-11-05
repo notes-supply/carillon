@@ -31,7 +31,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::attachment_staging;
+use carillon_installation::config::{attachment_staging, attachment_store};
 use carillon_protocol::model::{StagedAttachments, TurnAttachment};
 use rustix::fs::{CWD, Mode, OFlags, RenameFlags, ResolveFlags};
 use sha2::{Digest as _, Sha256};
@@ -41,7 +41,7 @@ const CHUNK: usize = 1024 * 1024;
 const PARTIAL: &str = ".partial-";
 
 pub(crate) fn store(data_directory: &Path) -> PathBuf {
-    data_directory.join("attachments")
+    attachment_store(data_directory)
 }
 
 /// A published capture: one directory holding a turn's files by ordinal.
@@ -136,10 +136,11 @@ pub(crate) fn valid_batch(batch: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// A staged batch opened for capture: each file with its declared length.
-/// The capture reads these files, not the staged names, which the interface
-/// may remove at any time, as it does when it restarts.
-pub(crate) struct Sources(Vec<(fs::File, u64)>);
+/// Files opened for capture, each with its expected length: a staged batch,
+/// or an answer's files. The capture reads these files, not their names,
+/// which may be removed at any time, as an interface's staging is when it
+/// restarts.
+pub(crate) struct Sources(pub(crate) Vec<(fs::File, u64)>);
 
 /// Open every file of the staged batch of `interface`, beneath the
 /// interface's staging directory and without following any link. Each must

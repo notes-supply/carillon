@@ -288,6 +288,24 @@ pub struct Delivery {
     /// The turn ended with nothing to send; `content` is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silence: Option<Silence>,
+    /// The files core keeps with the answer, to send with it, in the order
+    /// the agent attached them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AnswerFile>,
+}
+
+/// A file core keeps with an answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AnswerFile {
+    /// Core's read-only copy: an absolute path on this host.
+    pub path: String,
+    /// The file's name where the agent made it: display text, never a path.
+    pub name: String,
+    /// Where the agent made it, for a person to find it.
+    pub source: String,
+    pub size: u64,
+    /// Lowercase hexadecimal SHA-256 of the kept bytes.
+    pub sha256: String,
 }
 
 /// Where a turn's work began, which names its job: the turn itself.
@@ -732,6 +750,9 @@ pub struct TurnInspection {
     /// The files captured with the turn, in message order.
     #[serde(default)]
     pub attachments: Vec<TurnAttachment>,
+    /// The files core keeps with the turn's answer, in the order attached.
+    #[serde(default)]
+    pub answer_files: Vec<AnswerFile>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

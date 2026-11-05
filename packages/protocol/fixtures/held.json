@@ -22,6 +22,11 @@
       }
     },
     {
+      "outcome": "answered",
+      "output": "Here is the chart.",
+      "files": ["/home/owner/out/chart.png", "/tmp/data set.csv"]
+    },
+    {
       "outcome": "failed"
     },
     {
@@ -85,6 +90,20 @@
     },
     {
       "output": "Done."
+    },
+    {
+      "outcome": "answered",
+      "output": "Here.",
+      "files": ["out/chart.png"]
+    },
+    {
+      "outcome": "answered",
+      "output": "Here.",
+      "files": [""]
+    },
+    {
+      "outcome": "failed",
+      "files": ["/tmp/chart.png"]
     }
   ],
   "openings": [

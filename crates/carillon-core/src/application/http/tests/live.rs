@@ -118,6 +118,7 @@ pub(super) fn answer_held(state: &AppState) -> Result<()> {
         let answer = TurnOutcome::Answered {
             output: format!("reply to {}", running.request.input),
             activity: None,
+            files: Vec::new(),
         };
         state
             .core

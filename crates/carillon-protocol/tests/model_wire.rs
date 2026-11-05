@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result};
 use carillon_protocol::{
     model::{CommandCatalog, ExternalEvent, OpenedTurn, RuntimeTurnRequest, TurnActivity},
     settings::{Page, RuntimeSettings, SettingsRequest, Subject, Value as SettingValue},
-    turns::{RunningTurn, RuntimeTurnControl, TurnOpening, TurnOutcome},
+    turns::{ANSWER_FILE_LIMIT, RunningTurn, RuntimeTurnControl, TurnOpening, TurnOutcome},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -234,7 +234,9 @@ fn an_invalid_final_report_never_invalidates_the_answer() -> Result<()> {
         );
     }
     for value in &fixtures.invalid_activities {
-        let TurnOutcome::Answered { output, activity } = serde_json::from_value(answer(value))?
+        let TurnOutcome::Answered {
+            output, activity, ..
+        } = serde_json::from_value(answer(value))?
         else {
             anyhow::bail!("an answer read as another outcome");
         };
@@ -307,4 +309,17 @@ fn shared_held_turn_wire_fixtures() -> Result<()> {
         refused::<RunningTurn>(value)?;
     }
     Ok(())
+}
+
+#[test]
+fn an_answer_names_at_most_its_limit_of_files() -> Result<()> {
+    let answer = |count: usize| {
+        serde_json::json!({
+            "outcome": "answered",
+            "output": "Here.",
+            "files": vec!["/tmp/chart.png"; count],
+        })
+    };
+    round_trip::<TurnOutcome>(&answer(ANSWER_FILE_LIMIT))?;
+    refused::<TurnOutcome>(&answer(ANSWER_FILE_LIMIT + 1))
 }

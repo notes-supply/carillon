@@ -148,6 +148,14 @@ pub fn attachment_staging(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("incoming")
 }
 
+/// Where core keeps the files it captured with messages and answers, each
+/// capture a directory of files by ordinal. Interfaces read an answer's
+/// files here, by the relative paths core names.
+#[must_use]
+pub fn attachment_store(data_dir: &Path) -> PathBuf {
+    data_dir.join("attachments")
+}
+
 /// An agent: who answers a conversation an interface routes to it, on which
 /// runtime, in which workspace. Its runtime may hold further settings of
 /// its own for it, keyed by its ID.
