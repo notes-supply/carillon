@@ -21,7 +21,10 @@ use tokio::sync::{Mutex, watch};
 use twilight_model::channel::message::EmojiReactionType;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
-use crate::module::{Change, ChangeError, Source};
+use crate::{
+    delivery::require_upload_limit,
+    module::{Change, ChangeError, Source},
+};
 
 /// The provider's settings file. It rejects fields it does not define, so a
 /// misspelt setting fails validation instead of being dropped.
@@ -582,7 +585,7 @@ impl DiscordConfig {
         self.attachments
             .validate()
             .context("invalid Discord attachments settings")?;
-        config.provider(provider_id, ProviderRole::Interface)?;
+        require_upload_limit(config.provider(provider_id, ProviderRole::Interface)?)?;
         for route in &self.routes {
             config
                 .value

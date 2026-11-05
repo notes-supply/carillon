@@ -5,6 +5,7 @@ import {
   defineDoc,
   defineDocFamily,
   type ConversationId,
+  type SubmissionId,
   type TaskId,
 } from "@earendil-works/pi-durable";
 
@@ -34,6 +35,21 @@ export const ConversationInfo = defineDoc<{
   history: "latest",
   fork: "current",
   initial: () => ({ interface_id: "", agent_id: "", audience_id: "" }),
+  checkpointWhen: () => true,
+});
+
+/**
+ * The files the agent attached in a conversation that no answer has taken
+ * yet, in order, each with the run that attached it, named by the run's
+ * first input.
+ */
+export const Attached = defineDoc<{ files: { path: string; run: SubmissionId }[] }>({
+  kind: "carillon.attached",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ files: [] }),
   checkpointWhen: () => true,
 });
 

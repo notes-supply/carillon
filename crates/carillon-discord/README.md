@@ -41,7 +41,8 @@ configured model badges, and their custom IDs.
   conversation's messages and `/command` submissions in arrival order, with
   bounded queues.
 - [`delivery`](src/delivery.rs): sends answers (split at Discord's limit, with
-  mentions disabled) from core's outbox, and owns the bot's reactions as
+  mentions disabled) from core's outbox, with their files read from core's
+  copies ([`files`](src/delivery/files.rs)), and owns the bot's reactions as
   best-effort feedback: a message's processing and outcome reactions and the
   controls it offers. From a message's admission, or its first offer of
   controls, until its outcome, it records the control emoji the message may

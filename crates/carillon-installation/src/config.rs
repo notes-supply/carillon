@@ -78,6 +78,12 @@ impl Default for AttachmentLimits {
 
 /// One MiB, the unit of configured attachment sizes.
 pub const MIB: u64 = 1024 * 1024;
+/// The largest file an interface uploads when its entry names none:
+/// Discord's default for every server
+/// (<https://docs.discord.com/developers/reference#uploading-files>). A
+/// server's boosts can raise it, but only interactions report a server's
+/// limit, and a message request stays within 25 MiB.
+pub const DEFAULT_UPLOAD_MIB: u64 = 20;
 
 impl AttachmentLimits {
     fn is_default(&self) -> bool {
@@ -148,6 +154,14 @@ pub fn attachment_staging(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("incoming")
 }
 
+/// Where core keeps the files it captured with messages and answers, each
+/// capture a directory of files by ordinal. Interfaces read an answer's
+/// files here, by the relative paths core names.
+#[must_use]
+pub fn attachment_store(data_dir: &Path) -> PathBuf {
+    data_dir.join("attachments")
+}
+
 /// An agent: who answers a conversation an interface routes to it, on which
 /// runtime, in which workspace. Its runtime may hold further settings of
 /// its own for it, keyed by its ID.
@@ -190,9 +204,21 @@ pub struct Provider {
     pub url: String,
     pub token_hash: String,
     pub enabled: bool,
+    /// The largest file an interface uploads to its platform. Core keeps no
+    /// larger file an agent attaches to an answer for it, and names it in
+    /// the answer instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_upload_mib: Option<u64>,
 }
 
 impl Provider {
+    /// The largest file this interface uploads, [`DEFAULT_UPLOAD_MIB`] unless
+    /// its entry says otherwise.
+    #[must_use]
+    pub fn upload_mib(&self) -> u64 {
+        self.max_upload_mib.unwrap_or(DEFAULT_UPLOAD_MIB)
+    }
+
     /// The loopback socket address behind the provider's URL.
     ///
     /// # Errors
@@ -452,6 +478,14 @@ impl Config {
             if !provider_ids.insert(&provider.id) {
                 bail!("provider ID {} is configured more than once", provider.id);
             }
+        }
+        if let Some(provider) = self.providers.iter().find(|provider| {
+            provider.role == ProviderRole::Runtime && provider.max_upload_mib.is_some()
+        }) {
+            bail!(
+                "max_upload_mib applies only to interface providers; remove it from runtime provider {}",
+                provider.id
+            );
         }
         let mut agent_ids = BTreeSet::new();
         for agent in &self.agents {

@@ -18,7 +18,7 @@
 //! them retries, and none overtakes the earlier message.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -60,6 +60,8 @@ pub(crate) struct Intake {
     pub(crate) reserved: Arc<Mutex<u64>>,
     /// Shared by every capture's signal; stopping it stops them all.
     pub(crate) signals: Cancel,
+    /// The turns whose answers' files core is keeping now.
+    pub(crate) keeping: Mutex<HashSet<String>>,
 }
 
 /// Check a manifest against core's own limits before anything is read.
@@ -113,7 +115,7 @@ fn total(staged: &StagedAttachments) -> u64 {
     staged.files.iter().map(|file| file.size).sum()
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -126,6 +128,7 @@ impl Intake {
             settled: Notify::new(),
             reserved: Arc::default(),
             signals: Cancel::default(),
+            keeping: Mutex::default(),
         }
     }
 
@@ -236,7 +239,7 @@ impl Intake {
     /// writes, as on Btrfs until a transaction commits. The budget counts kept
     /// bytes exactly; the floor uses reported availability and may still lag
     /// a completed capture after its reservation is released.
-    fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
+    pub(crate) fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
         let mut reserved = lock(&self.reserved);
         let kept = core.database.captured_bytes()?;
         let budget = self.limits.storage_bytes();
@@ -281,7 +284,7 @@ fn earlier_capture(
 }
 
 /// Bytes held against the budget; released exactly once, on drop.
-struct Reservation {
+pub(crate) struct Reservation {
     reserved: Arc<Mutex<u64>>,
     bytes: u64,
 }

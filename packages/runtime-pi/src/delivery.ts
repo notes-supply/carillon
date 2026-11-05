@@ -15,6 +15,7 @@ import {
   type RunningTask,
   type SettledSubmissionRecord,
   type SubmissionId,
+  type SubmissionRecord,
   type TaskId,
   type TaskRecord,
   type TaskRuntime,
@@ -27,6 +28,7 @@ import { diagnostic, displayableExplanation, redactCredentials } from "@carillon
 import { noModel } from "@carillon/runtime/settings";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import { runEnds, takeAttached, type RunEnds } from "./answers.ts";
 import { ConversationInfo, MESSAGE } from "./documents.ts";
 
 /**
@@ -75,6 +77,8 @@ type DeliveryState =
 export interface DeliveryHost {
   /** Resolves once the turn's message is answered or given up on. */
   wait(submission: SubmissionId, context: Context): Promise<SettledSubmissionRecord>;
+  /** The submission's record as it stands; undefined when there is none. */
+  status(submission: SubmissionId, context: Context): Promise<SubmissionRecord | undefined>;
   /** What the turn did, as far as this process watched it. */
   report(turn: string): TurnActivity | undefined;
   /** Whether the agent selects the extension; undefined while that is unknown. */
@@ -112,8 +116,9 @@ export function deliveryTask(host: DeliveryHost) {
           console.error(
             `turn ${task.input.turn} failed: ${redactCredentials(textOf(settled.detail))}`,
           );
+        const ends = await runEnds(runtime, host, task.input.conversation, context);
         await runtime.commit(async (tx) => {
-          const decided = await decide(tx, task.input, settled, host.report(task.input.turn));
+          const decided = await decide(tx, task.input, settled, ends, host.report(task.input.turn));
           // An answer can come before the opening stops a turn whose work ended.
           const outcome: TurnOutcome =
             decided.outcome === "answered" && (await ended(tx, task.input.needs))
@@ -166,16 +171,20 @@ export function deliveryTask(host: DeliveryHost) {
 /**
  * The turn's outcome from how its message settled. Steers placed into one
  * run settle with that run's answer; the newest of them carries it, and
- * the others were steered into it.
+ * the others were steered into it. The message that carries a run's
+ * answer takes the files the run attached, which go with it only when it
+ * is answered; a run that ended without an answer drops its files.
  */
 async function decide(
   tx: Tx,
   input: DeliveryInput,
   settled: SettledSubmissionRecord,
+  ends: RunEnds,
   watched: TurnActivity | undefined,
 ): Promise<TurnOutcome> {
   const activity = watched === undefined ? {} : { activity: finalReport(watched) };
   if (settled.status === "unanswered") {
+    await takeAttached(tx, input.conversation, ends, null);
     switch (settled.reason) {
       case "aborted":
       case "reset":
@@ -204,6 +213,7 @@ async function decide(
   if (settled.type !== "input") return { outcome: "failed", ...activity };
   if (await carriedLater(tx, input.conversation, settled.entry, settled.answer))
     return { outcome: "steered" };
+  const files = await takeAttached(tx, input.conversation, ends, settled.answer);
   const message = (await tx.entry(AssistantEntry, settled.answer))?.model?.[0];
   if (message?.role !== "assistant") return { outcome: "failed", ...activity };
   const text = message.content
@@ -213,9 +223,9 @@ async function decide(
     message.stopReason === "length"
       ? `${text}\n\n[The answer was cut off at the model's output limit.]`
       : text;
-  return output.trim().length === 0
-    ? { outcome: "failed", explanation: "The model gave no answer.", ...activity }
-    : { outcome: "answered", output, ...activity };
+  if (output.trim().length === 0)
+    return { outcome: "failed", explanation: "The model gave no answer.", ...activity };
+  return { outcome: "answered", output, ...(files.length === 0 ? {} : { files }), ...activity };
 }
 
 /** Whether a later message was placed into the run before its answer. */

@@ -16,6 +16,10 @@ async fn main() -> Result<()> {
     conversation().await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one conversation from acceptance to acknowledgement"
+)]
 async fn conversation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let resources = directory.path().join("resources");
@@ -35,6 +39,7 @@ async fn conversation() -> Result<()> {
             enabled: true,
         }],
         attachments: AttachmentLimits::default(),
+        uploads: std::collections::BTreeMap::new(),
     })?;
     // An application authenticates the caller before supplying this interface identity.
     let interface = SelectedProvider {
@@ -129,6 +134,7 @@ fn echo(request: &RuntimeTurnRequest) -> Result<TurnOutcome> {
     Ok(TurnOutcome::Answered {
         output: format!("{} — {captured}", request.input),
         activity: None,
+        files: Vec::new(),
     })
 }
 

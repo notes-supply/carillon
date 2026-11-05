@@ -237,10 +237,14 @@ export const RuntimeTurnRequestSchema = Type.Object({
 });
 export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;
 
+/** The most files one answer names. */
+export const ANSWER_FILE_LIMIT = 100;
+
 /**
- * How a runtime says a turn it holds ended. `steered` and `stopped`
- * send nothing to the conversation; a failure's `explanation` is shown as
- * given.
+ * How a runtime says a turn it holds ended. An answer's `files` are the
+ * absolute paths the agent attached, in order, which core keeps with it.
+ * `steered` and `stopped` send nothing to the conversation; a failure's
+ * `explanation` is shown as given.
  */
 export const TurnOutcomeSchema = Type.Union([
   Type.Object(
@@ -248,6 +252,9 @@ export const TurnOutcomeSchema = Type.Union([
       outcome: Type.Literal("answered"),
       output: Type.String({ pattern: "\\S" }),
       activity: Type.Optional(TurnActivitySchema),
+      files: Type.Optional(
+        Type.Array(Type.String({ pattern: "^/" }), { maxItems: ANSWER_FILE_LIMIT }),
+      ),
     },
     { additionalProperties: false },
   ),

@@ -504,6 +504,27 @@ digest before the turn runs. The agent sees every file in its working tools,
 and suitable images (PNG, JPEG, WebP, GIF) are also given to the model as
 images. Nothing is extracted, converted or executed on arrival.
 
+The agent can send files with its answer. On Pi it attaches them with its
+`attach` tool. T3 answers are text only. A file goes with the answer of the
+run that attached it. If that run is stopped, interrupted by a new message or
+fails, its files are dropped, and the agent attaches them again with a later
+answer.
+
+Before core records the answer, it copies each file Discord can upload into
+`state/attachments`, within the limits below, and keeps it with the turn.
+Those copies count against `storage_mib` with the files people send. Core
+keeps no copy of a file over Discord's upload limit, 20 MiB unless its
+`max_upload_mib` says otherwise, or of one that changed or couldn't be read
+while core copied it. The answer names each such
+file with where the agent had it and why, and the other files are kept.
+
+Discord takes at most 10 files and 25 MiB in one message. The answer's last
+message carries the first files, and the files that don't fit follow on more
+messages after it, so every file arrives. Delivery sends core's copies, so the
+agent's own files may change or go once the answer is recorded, and an answer
+that waits for Discord, even across restarts, never runs the model again. To
+post files elsewhere, the agent uses its [Discord tools](#agent-discord-tools).
+
 Limits, each applied when its service restarts:
 
 ```toml
@@ -516,11 +537,14 @@ max_message_mib = 2048
 concurrent_messages = 2   # messages downloading at once
 staging_mib = 2048
 
+# carillon.toml, the Discord provider's [[providers]] entry
+max_upload_mib = 20       # the largest file it uploads: 20 when unset, at most 24
+
 # carillon.toml
 [core.attachments]
-max_files = 10            # 0 refuses every attachment
+max_files = 10            # per message or answer; 0 refuses every file
 max_file_mib = 1024
-max_event_mib = 2048
+max_event_mib = 2048      # a message's or an answer's files together
 storage_mib = 10240       # all kept files together
 free_space_mib = 2048     # space a new file must leave free on the disk
 concurrent_captures = 2
@@ -646,9 +670,12 @@ the tools can administer the server.
   example), and never replays it: tools may already have run. Send another
   message to continue. `carillon inspect TURN_ID` and `carillon logs
   runtime-pi` show more.
-- **A reply may not have arrived.** Delivery has its own outbox: an answer
-  is never generated twice. If Discord crashed mid-send, the message gets the
-  uncertain reaction.
+- **A reply may not have arrived.** Delivery has its own outbox, so an
+  answer is never generated twice. Each message of an answer is sent once,
+  the messages that carry its extra files included. If Discord refuses one,
+  or the Discord provider crashes while it sends text or uploads a file,
+  nothing is sent again. The messages that went out stay, and the person's
+  message gets the uncertain reaction.
 - **A runtime crashes.** Its service restarts it. Pi finishes the answers it
   held: a model call it cut off counts as a failed attempt and is retried,
   and a tool call it cut off is reported to the model as interrupted rather

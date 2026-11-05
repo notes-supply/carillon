@@ -171,6 +171,7 @@ impl Difference {
             url,
             token_hash,
             enabled,
+            max_upload_mib,
         } = file;
         let mut changed = |changed: bool, field: &str, live: bool| {
             if changed {
@@ -186,6 +187,11 @@ impl Difference {
         changed(*version != serving.version, "version", false);
         changed(*url != serving.url, "url", false);
         changed(*token_hash != serving.token_hash, "token_hash", false);
+        changed(
+            *max_upload_mib != serving.max_upload_mib,
+            "max_upload_mib",
+            false,
+        );
         // An interface's flag decides whether its program serves at all, and
         // core refuses a disabled interface's calls: only a restart of both
         // changes it without stranding the deliveries it holds.

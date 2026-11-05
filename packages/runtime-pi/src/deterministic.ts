@@ -4,13 +4,15 @@
  * the conversation holds, the message, whether the agent's extension and
  * skill reached its prompt, the model and thinking level it ran with, and
  * the attachments its note listed. A message `hold <path>` is answered once
- * that file exists, so a test can keep a turn running.
+ * that file exists, so a test can keep a turn running, and one `attach
+ * <path>…` attaches each path first, its answer saying what `attach` said.
  */
 import {
   createFauxCore,
   createModels,
   createProvider,
   fauxAssistantMessage,
+  fauxToolCall,
   type FauxResponseFactory,
   type Message,
 } from "@earendil-works/pi-ai";
@@ -18,6 +20,7 @@ import { access } from "node:fs/promises";
 import type { PiCatalogue } from "./models.ts";
 
 const HOLD = /^hold (\S+)$/u;
+const ATTACH = /^attach (.+)$/u;
 const ATTACHMENT = /name: ("(?:[^"\\]|\\.)*"); size: ([^;]+);/gu;
 
 export function deterministicCatalogue(): PiCatalogue {
@@ -63,9 +66,19 @@ export function deterministicCatalogue(): PiCatalogue {
 
 const answer: FauxResponseFactory = async (context, options, _state, model) => {
   const users = context.messages.filter((message) => message.role === "user");
-  const texts = textsOf(users.at(-1));
+  const person = users.at(-1);
+  const texts = textsOf(person);
   // Carillon's own notes travel beside the person's text.
   const input = texts.find((text) => !text.startsWith("[Carillon")) ?? "";
+  const since =
+    person === undefined ? [] : context.messages.slice(context.messages.indexOf(person));
+  const results = since.filter((message) => message.role === "toolResult");
+  const attaching = ATTACH.exec(input)?.[1];
+  if (attaching !== undefined && results.length === 0)
+    return fauxAssistantMessage(
+      attaching.split(" ").map((path) => fauxToolCall("attach", { path })),
+      { stopReason: "toolUse" },
+    );
   const held = HOLD.exec(input)?.[1];
   while (held !== undefined && !(await exists(held))) {
     options?.signal?.throwIfAborted();
@@ -81,6 +94,7 @@ const answer: FauxResponseFactory = async (context, options, _state, model) => {
     ...[...texts.join("\n").matchAll(ATTACHMENT)].map(
       ([, name = '""', size = ""]) => `attachment ${String(JSON.parse(name))} ${size}`,
     ),
+    ...results.flatMap(textsOf).map((text) => `attach said ${text}`),
   ];
   return fauxAssistantMessage(
     `Local provider response ${String(users.length)}: ${input}. ${markers.join("; ")}.`,
@@ -88,7 +102,7 @@ const answer: FauxResponseFactory = async (context, options, _state, model) => {
 };
 
 function textsOf(message: Message | undefined): string[] {
-  if (message?.role !== "user") return [];
+  if (message?.role !== "user" && message?.role !== "toolResult") return [];
   if (typeof message.content === "string") return [message.content];
   return message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
 }

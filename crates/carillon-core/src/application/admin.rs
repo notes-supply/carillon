@@ -17,8 +17,9 @@ use tar::{Archive, Builder};
 use uuid::Uuid;
 
 use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    RELEASE_VERSION, attachment_staging, hash_token, new_token, validate_provider_identity,
+    AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, LoadedConfig, Provider,
+    ProviderRole, RELEASE_VERSION, attachment_staging, hash_token, new_token,
+    validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 use carillon_installation::maintenance::ServiceLock;
@@ -226,6 +227,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
+            max_upload_mib: Some(DEFAULT_UPLOAD_MIB),
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -239,6 +241,7 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
+        max_upload_mib: None,
     })
 }
 
@@ -1254,25 +1257,9 @@ mod tests {
     }
 
     fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
-        use carillon_installation::config::AttachmentLimits;
-        crate::Core::open(crate::CoreOptions {
-            data_directory: config.value.data_dir.clone(),
-            agents: vec![crate::AgentOptions {
-                id: super::ASSISTANT.to_owned(),
-                runtime: "runtime-pi".to_owned(),
-                resources: config.value.agent(super::ASSISTANT)?.resources.clone(),
-            }],
-            runtimes: vec![crate::RuntimeProvider {
-                id: "runtime-pi".to_owned(),
-                version: "test".to_owned(),
-                url: "http://127.0.0.1:1".to_owned(),
-                enabled: true,
-            }],
-            attachments: AttachmentLimits {
-                free_space_mib: 0,
-                ..AttachmentLimits::default()
-            },
-        })
+        let mut options = super::super::http::core_options(config);
+        options.attachments.free_space_mib = 0;
+        crate::Core::open(options)
     }
 
     #[tokio::test]
@@ -1338,11 +1325,10 @@ mod tests {
         }
         core.dispatch_next("runtime-pi", &CancellationToken::new(), async |_| Ok(()))
             .await?;
-        let answer = carillon_protocol::turns::TurnOutcome::Answered {
-            output: "read it".to_owned(),
-            activity: None,
-        };
-        core.settle("runtime-pi", &turns[0], answer)?;
+        let made = directory.path().join("made.txt");
+        fs::write(&made, b"made file")?;
+        let answer = serde_json::json!({"outcome": "answered", "output": "read", "files": [made]});
+        core.settle("runtime-pi", &turns[0], serde_json::from_value(answer)?)?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
         let store = config.value.data_dir.join("attachments");
@@ -1369,7 +1355,7 @@ mod tests {
                 .iter()
                 .filter(|name| name.starts_with("state/attachments/") && name.ends_with("/0"))
                 .count(),
-            2
+            3
         );
         // Backup reconciled under exclusive ownership, like core startup.
         assert!(!orphan.exists());

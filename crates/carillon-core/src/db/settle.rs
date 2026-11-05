@@ -3,6 +3,8 @@ use carillon_protocol::{
     turns::Silence,
 };
 
+use crate::answers::KeptFile;
+
 use super::{
     Database, OptionalExtension, Result, optional_state_column, params, report_json, state_column,
     timestamp, write_transaction,
@@ -11,10 +13,13 @@ use super::{
 /// How a turn a runtime holds ended, as core records it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Settlement<'a> {
-    /// Completed, its output delivered.
+    /// Completed, `content` delivered with the files kept for it: the
+    /// output, and a line for each file core could not keep.
     Answered {
         output: &'a str,
+        content: &'a str,
         activity: Option<&'a TurnActivity>,
+        files: &'a [KeptFile],
     },
     /// Interrupted, `notice` delivered and `error` kept for the operator.
     Failed {
@@ -51,6 +56,25 @@ pub enum Settled {
 }
 
 impl Database {
+    /// The interface whose conversation the turn answers, while
+    /// `runtime_id` holds it and it has not ended: a settlement now would
+    /// record it.
+    pub(crate) fn unsettled_interface(
+        &self,
+        runtime_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .connect()?
+            .query_row(
+                "SELECT interface_id FROM turns
+                 WHERE id = ?1 AND runtime_id = ?2 AND state IN ('queued', 'running')",
+                params![turn_id, runtime_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Ends a queued or running turn of `runtime_id` as `settlement` says,
     /// with its delivery, in one transaction. A queued one is settled too:
     /// the runtime may hold a turn whose handing over core never recorded.
@@ -80,9 +104,12 @@ impl Database {
             None => Settled::Unknown,
             Some((TurnState::Queued | TurnState::Running, _)) => {
                 let (output, error, notice, activity) = match settlement {
-                    Settlement::Answered { output, activity } => {
-                        (Some(output), None, output, activity)
-                    }
+                    Settlement::Answered {
+                        output,
+                        content,
+                        activity,
+                        ..
+                    } => (Some(output), None, content, activity),
                     Settlement::Failed {
                         error,
                         notice,
@@ -112,6 +139,24 @@ impl Database {
                      FROM turns WHERE id = ?1",
                     params![turn_id, notice, silence.map(Silence::as_str), now],
                 )?;
+                if let Settlement::Answered { files, .. } = settlement {
+                    for (ordinal, file) in files.iter().enumerate() {
+                        transaction.execute(
+                            "INSERT INTO answer_files(turn_id, ordinal, capture_id, name, source,
+                                 size, sha256)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                turn_id,
+                                u32::try_from(ordinal)?,
+                                file.capture,
+                                file.name,
+                                file.source,
+                                i64::try_from(file.size)?,
+                                file.sha256
+                            ],
+                        )?;
+                    }
+                }
                 Settled::Recorded
             }
             Some(ended) if ended == (state, silence) => Settled::Recorded,

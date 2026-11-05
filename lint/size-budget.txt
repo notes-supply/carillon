@@ -1,8 +1,8 @@
-1592 crates/carillon-core/src/application/admin.rs
+1578 crates/carillon-core/src/application/admin.rs
 1152 crates/carillon-core/src/application/http/tests.rs
-1129 crates/carillon-core/src/db.rs
-2339 crates/carillon-discord/src/activity/tests.rs
-1199 crates/carillon-discord/src/application/tests.rs
+1091 crates/carillon-core/src/db.rs
+2336 crates/carillon-discord/src/activity/tests.rs
+1120 crates/carillon-discord/src/application/tests.rs
 1769 crates/carillon-discord/src/inbound/tests/files.rs
 1114 crates/carillon-discord/src/operations.rs
 1039 crates/carillon-discord/src/setup/tests.rs
@@ -11,4 +11,4 @@
 3366 packages/runtime-t3/src/watch.test.ts
 1868 packages/runtime-t3/src/watch.ts
 1026 scripts/test-filesystem.mjs
-1919 scripts/test-integration.mjs
+1837 scripts/test-integration.mjs

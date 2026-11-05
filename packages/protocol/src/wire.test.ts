@@ -6,6 +6,7 @@ import held from "../fixtures/held.json" with { type: "json" };
 import settings from "../fixtures/settings.json" with { type: "json" };
 import turns from "../fixtures/turns.json" with { type: "json" };
 import {
+  ANSWER_FILE_LIMIT,
   CommandCatalogSchema,
   OpenedTurnSchema,
   RunningTurnSchema,
@@ -87,4 +88,14 @@ it("preserves the shared Rust/TypeScript held turn fixtures", () => {
     expect(Check(RuntimeTurnControlSchema, value)).toBe(false);
   for (const value of held.running) expect(Parse(RunningTurnSchema, value)).toEqual(value);
   for (const value of held.invalid_running) expect(Check(RunningTurnSchema, value)).toBe(false);
+});
+
+it("refuses an answer that names more files than its limit", () => {
+  const answer = (count: number) => ({
+    outcome: "answered",
+    output: "Here.",
+    files: Array.from({ length: count }, () => "/tmp/chart.png"),
+  });
+  expect(Check(TurnOutcomeSchema, answer(ANSWER_FILE_LIMIT))).toBe(true);
+  expect(Check(TurnOutcomeSchema, answer(ANSWER_FILE_LIMIT + 1))).toBe(false);
 });

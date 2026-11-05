@@ -14,7 +14,7 @@ on loopback HTTP; the `carillon` command forwards `carillon <provider> …` to
 share:
 
 - accepted events, with duplicate suppression and immutable copies of their
-  files;
+  files, and copies of the files answers carry;
 - the agents conversations belong to, each with the runtime its new
   conversations start on;
 - conversations, each with the channel its first message came from and the
@@ -52,7 +52,8 @@ rest, and a retired dispatcher ends its hand-over before it ends.
 3. The runtime's dispatcher hands it over, and the runtime holds it.
 4. The runtime runs it and settles it. Model and tool side effects are not
    guaranteed to happen exactly once.
-5. Core stores the outcome and a delivery intent in one transaction.
+5. Core copies the files an answer names, then stores the outcome, those
+   files and a delivery intent in one transaction.
 6. The interface claims the delivery, sends it and records the outcome.
 
 The dispatcher POSTs the turn to the runtime's `/v1/inbox`. On 202 the turn
@@ -129,7 +130,8 @@ work.
 
 The Discord provider (`carillon-discord`) admits messages and interactions by
 guild, user and route, each route a channel, by ID, and the agent that
-answers there; downloads attachments after admission; creates and
+answers there; downloads attachments after admission; uploads an answer's
+files with it, from core's copies; creates and
 adopts threads; and owns typing, reactions, mention-free delivery and slash
 command registration. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
@@ -176,7 +178,13 @@ A runtime receives a turn (agent, interface, audience, channel, input, captured
 resources, files by relative path and opaque interface metadata) and owns
 the conversation's native session. It keeps each turn core hands it at
 `POST /v1/inbox`, answering 202 once kept, and settles it later
-through core's `POST /v1/runtime/turns/{id}/outcome`. It opens turns of its
+through core's `POST /v1/runtime/turns/{id}/outcome`. An answer may name
+files by absolute path. Before it records the answer, core copies each into
+its attachment store with its digest, within its attachment limits and the
+largest file the conversation's interface uploads, and adds a line to the
+delivered text for each file it cannot keep. The same outcome again copies
+nothing; while the files are being copied, it is refused as unavailable, to
+be asked again. It opens turns of its
 own through `POST /v1/runtime/turns`, reads back the turns core records
 running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. A turn's activity snapshot lists the
@@ -209,7 +217,9 @@ message. Steers placed into one answer settle with it: the newest carries
 it. An agent's settings may select schedules, subagents and the MCP servers
 of `CARILLON_HOME/pi/mcp.json` as built-in extensions; a schedule's run and
 a background subagent's report come in turns Pi opens, in the channel core
-recorded for the conversation. Pi's sign-in and catalogue live in
+recorded for the conversation. The runtime's own `attach` tool records a file
+with the run that attached it. That run's answer takes the file, and a run
+that ends without an answer drops it. A subagent is not offered the tool. Pi's sign-in and catalogue live in
 `CARILLON_HOME/pi`, apart from `~/.pi`.
 See the [Pi guide](../../packages/runtime-pi/README.md).
 
@@ -240,7 +250,8 @@ fences that thread in the runtime's memory, and the runtime refuses a
 drained restart while any fence stands or a person's stop waits for T3.
 
 Its agents are plain T3 Code, given the person's text as written, their
-threads titled by T3; an agent with resources is refused. A turn takes the
+threads titled by T3; an agent with resources is refused. Its answers are
+text: T3 Code records its assistant messages without files. A turn takes the
 model of its channel once, before its first dispatch, and every dispatch of
 that turn names it, a reconnect's included. A channel change therefore
 reaches each of the channel's threads at its next turn. A model picked in
@@ -301,11 +312,11 @@ the turns a runtime opens included.
 ## Configuration
 
 `carillon.toml` declares providers by stable ID and role, with each one's
-address, credential hash, expected version and whether it's enabled, and the
-agents: each one's ID, name, runtime, workspace and, for Carillon's
-assistant on Pi, resources. Each provider owns `providers/ID.toml`, where a
-runtime keeps its own settings for its agents. Both files reject unknown
-fields.
+address, credential hash, expected version and whether it's enabled, with
+the largest file an interface uploads, and the agents: each one's ID, name,
+runtime, workspace and, for Carillon's assistant on Pi, resources. Each
+provider owns `providers/ID.toml`, where a runtime keeps its own settings for
+its agents. Both files reject unknown fields.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
 both. Pi runs Carillon's assistant whenever it is chosen. Each provider's

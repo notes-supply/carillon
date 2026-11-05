@@ -27,11 +27,13 @@
 //!   a stale caller fails instead of overwriting newer state.
 //! - A turn's attachment references commit with the turn, and only after the
 //!   capture they name is published and synced; a losing duplicate's capture
-//!   is never referenced.
+//!   is never referenced. An answer's file references commit with the
+//!   answer, the same way.
 
 mod admission;
 mod conversations;
 mod dispatch;
+mod files;
 mod jobs;
 mod opening;
 mod recovery;
@@ -39,6 +41,7 @@ mod settle;
 
 pub(crate) use admission::Admission;
 pub(crate) use dispatch::QueuedTurn;
+use files::{answer_files, captured_files};
 pub(crate) use jobs::JobPage;
 pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
 pub use settle::Settled;
@@ -190,43 +193,6 @@ impl Database {
         Ok(())
     }
 
-    /// Every committed attachment reference, for validating the store before
-    /// archiving or restoring.
-    pub(crate) fn captured_files(&self) -> Result<Vec<CapturedFile>> {
-        let connection =
-            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        captured_files(&connection, None)
-    }
-
-    /// The captures committed turns reference.
-    pub(crate) fn captures(&self) -> Result<std::collections::BTreeSet<String>> {
-        let connection = self.connect()?;
-        let mut statement =
-            connection.prepare("SELECT DISTINCT capture_id FROM turn_attachments")?;
-        let captures = statement
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        Ok(captures)
-    }
-
-    pub(crate) fn capture_referenced(&self, capture: &str) -> Result<bool> {
-        Ok(self.connect()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM turn_attachments WHERE capture_id = ?1)",
-            [capture],
-            |row| row.get(0),
-        )?)
-    }
-
-    /// Bytes kept by every committed capture.
-    pub(crate) fn captured_bytes(&self) -> Result<u64> {
-        let bytes: i64 = self.connect()?.query_row(
-            "SELECT COALESCE(SUM(size), 0) FROM turn_attachments",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(u64::try_from(bytes)?)
-    }
-
     fn initialize_connection(connection: &Connection) -> Result<()> {
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS turns (
@@ -287,6 +253,17 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS turn_attachments_capture
                 ON turn_attachments(capture_id);
+            CREATE TABLE IF NOT EXISTS answer_files (
+                turn_id TEXT NOT NULL REFERENCES turns(id),
+                ordinal INTEGER NOT NULL,
+                capture_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                PRIMARY KEY(turn_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS answer_files_capture ON answer_files(capture_id);
             CREATE TABLE IF NOT EXISTS conversations (
                 interface_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
@@ -376,7 +353,7 @@ impl Database {
     ) -> Result<Option<Delivery>> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
-        let delivery = transaction
+        let mut delivery = transaction
             .query_row(
                 "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
                         t.id, t.accepted_at, d.silence
@@ -400,11 +377,13 @@ impl Database {
                             accepted_at: row.get(7)?,
                         },
                         silence: optional_state_column(row, 8)?,
+                        files: Vec::new(),
                     })
                 },
             )
             .optional()?;
-        if let Some(value) = &delivery {
+        if let Some(value) = &mut delivery {
+            value.files = answer_files(&transaction, &value.turn_id)?;
             let changed = transaction.execute(
                 "UPDATE deliveries SET state = 'delivering', claim_owner = ?2, updated_at = ?3
                  WHERE id = ?1 AND state = 'pending'",
@@ -501,6 +480,7 @@ impl Database {
                         delivery_native_ref: row.get(10)?,
                         error: row.get(11)?,
                         attachments: Vec::new(),
+                        answer_files: Vec::new(),
                     })
                 },
             )
@@ -512,6 +492,7 @@ impl Database {
             .iter()
             .map(CapturedFile::wire)
             .collect();
+        inspection.answer_files = answer_files(&connection, turn_id)?;
         Ok(Some(inspection))
     }
 
@@ -654,27 +635,6 @@ fn conversation_runtime(
         .optional()?)
 }
 
-/// A turn's captured files in message order, or every committed reference.
-fn captured_files(connection: &Connection, turn_id: Option<&str>) -> Result<Vec<CapturedFile>> {
-    let mut statement = connection.prepare(
-        "SELECT capture_id, ordinal, name, size, content_type, sha256 FROM turn_attachments
-         WHERE ?1 IS NULL OR turn_id = ?1 ORDER BY turn_id, ordinal",
-    )?;
-    let files = statement.query_map([turn_id], |row| {
-        Ok(CapturedFile {
-            capture: row.get(0)?,
-            ordinal: row.get(1)?,
-            name: row.get(2)?,
-            size: u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(3, Type::Integer, Box::new(error))
-            })?,
-            content_type: row.get(4)?,
-            sha256: row.get(5)?,
-        })
-    })?;
-    files.collect::<Result<_, _>>().map_err(Into::into)
-}
-
 fn event_receipt(
     connection: &Connection,
     interface_id: &str,
@@ -761,7 +721,9 @@ mod tests {
             turn_id,
             Settlement::Answered {
                 output,
+                content: output,
                 activity: None,
+                files: &[],
             },
         )?;
         assert_eq!(settled, Settled::Recorded);

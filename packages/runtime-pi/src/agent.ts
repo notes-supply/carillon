@@ -123,6 +123,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       if (handle === undefined) throw new Error(`submission ${submission} does not exist`);
       return handle.wait(waiting);
     },
+    status: async (submission, reading) =>
+      (await harness.submission(submission, reading))?.status(reading),
     report: (turn) => {
       const input = held.get(turn);
       return input === undefined

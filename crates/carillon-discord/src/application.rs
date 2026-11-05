@@ -26,7 +26,7 @@ use crate::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
     },
-    delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
+    delivery::{Composed, Feedback, PROMPT_FEEDBACK, Reactions, compose, delivery_loop},
     module::{
         self as discord_module, Declared, DiscordApp, Module, ModuleFiles, Refusal, Registration,
         Status, answer::answer,
@@ -48,7 +48,8 @@ use axum::{
 };
 use carillon_discord_module::contract::{CardRequest, Reply};
 use carillon_installation::config::{
-    LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
+    LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, attachment_store,
+    read_token_file, token_matches,
 };
 use carillon_protocol::model::{
     Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, Job, TurnState,
@@ -82,6 +83,9 @@ struct SimulateResponse {
     pub card: Option<Embed>,
     pub conversation_id: String,
     pub feedback: Vec<String>,
+    /// The messages Discord would receive for the delivery, files included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Composed>,
 }
 
 impl IntoResponse for InterfaceError {
@@ -276,6 +280,7 @@ async fn connect(
         delivery_state.core,
         reactions.clone(),
         http,
+        attachment_store(&state.installation.value.data_dir),
         delivering,
         stopping.clone(),
     ));
@@ -722,6 +727,18 @@ async fn simulate(
     };
     let native_ref = format!("local:{}", resolved.event.event_id);
     let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
+    let messages = match &delivery {
+        Some(delivery) => compose(
+            &attachment_store(&state.installation.value.data_dir),
+            delivery,
+        )
+        .await
+        .map_err(|error| InterfaceError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("{error:#}"),
+        })?,
+        None => Vec::new(),
+    };
     if delivery.is_some() && settings.reactions {
         feedback.push("delivered".to_owned());
     }
@@ -743,6 +760,7 @@ async fn simulate(
         card,
         conversation_id: resolved.conversation_id,
         feedback,
+        messages,
     })
     .into_response())
 }

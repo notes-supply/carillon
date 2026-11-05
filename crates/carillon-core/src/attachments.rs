@@ -15,6 +15,8 @@
 //! until it holds a receipt, and cannot change accepted bytes through it.
 //! Core opens a whole batch before it starts the capture, which then reads
 //! the open files, so an interface removing its staging cannot fail it.
+//! An answer's capture leaves out each file that fails to copy, its ordinal
+//! taken by the next, so one file changing or failing costs only itself.
 //!
 //! Read-only files guard against accidental edits, not against the owner.
 
@@ -31,7 +33,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::attachment_staging;
+use carillon_installation::config::{attachment_staging, attachment_store};
 use carillon_protocol::model::{StagedAttachments, TurnAttachment};
 use rustix::fs::{CWD, Mode, OFlags, RenameFlags, ResolveFlags};
 use sha2::{Digest as _, Sha256};
@@ -41,7 +43,7 @@ const CHUNK: usize = 1024 * 1024;
 const PARTIAL: &str = ".partial-";
 
 pub(crate) fn store(data_directory: &Path) -> PathBuf {
-    data_directory.join("attachments")
+    attachment_store(data_directory)
 }
 
 /// A published capture: one directory holding a turn's files by ordinal.
@@ -136,10 +138,11 @@ pub(crate) fn valid_batch(batch: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// A staged batch opened for capture: each file with its declared length.
-/// The capture reads these files, not the staged names, which the interface
-/// may remove at any time, as it does when it restarts.
-pub(crate) struct Sources(Vec<(fs::File, u64)>);
+/// Files opened for capture, each with its expected length: a staged batch,
+/// or an answer's files. The capture reads these files, not their names,
+/// which may be removed at any time, as an interface's staging is when it
+/// restarts.
+pub(crate) struct Sources(pub(crate) Vec<(fs::File, u64)>);
 
 /// Open every file of the staged batch of `interface`, beneath the
 /// interface's staging directory and without following any link. Each must
@@ -203,17 +206,95 @@ pub(crate) fn open(
 /// off the async reactor.
 pub(crate) fn capture(
     data_directory: &Path,
-    sources: Sources,
+    Sources(sources): Sources,
     cancel: &Cancel,
 ) -> Result<Capture, CaptureError> {
-    let store = store(data_directory);
-    create_store(&store)?;
-    let id = uuid::Uuid::now_v7().to_string();
-    let partial = store.join(format!("{PARTIAL}{id}"));
-    fs::DirBuilder::new().mode(0o700).create(&partial)?;
-    let copied = copy_batch(sources, &partial, cancel).and_then(|digests| {
-        // A deadline or shutdown that arrived during the last sync still
-        // stops the capture before anything is published.
+    let partial = Partial::create(data_directory)?;
+    let mut digests = Vec::with_capacity(sources.len());
+    for (ordinal, (mut source, size)) in sources.into_iter().enumerate() {
+        let destination = partial.path.join(ordinal.to_string());
+        digests.push(copy_file(&mut source, &destination, size, cancel)?);
+    }
+    let id = partial.publish(cancel)?;
+    Ok(Capture { id, digests })
+}
+
+/// An answer's capture: the files that copied, at consecutive ordinals, and
+/// why each other one did not.
+#[derive(Debug)]
+pub(crate) struct Copies {
+    /// The capture, published when any file copied.
+    pub(crate) id: String,
+    /// Each source's digest, or why it was left out, in order.
+    pub(crate) files: Vec<Result<String, CaptureError>>,
+}
+
+/// Copy opened files into a new published capture, leaving out each that
+/// fails to copy; with none copied, nothing is published. Only a
+/// cancellation or a failure of the capture itself fails it. Blocking: run
+/// it off the async reactor.
+pub(crate) fn capture_each(
+    data_directory: &Path,
+    Sources(sources): Sources,
+    cancel: &Cancel,
+) -> Result<Copies, CaptureError> {
+    let partial = Partial::create(data_directory)?;
+    let mut files = Vec::with_capacity(sources.len());
+    let mut copied = 0_usize;
+    for (mut source, size) in sources {
+        let destination = partial.path.join(copied.to_string());
+        match copy_file(&mut source, &destination, size, cancel) {
+            Ok(digest) => {
+                copied += 1;
+                files.push(Ok(digest));
+            }
+            Err(CaptureError::Cancelled) => return Err(CaptureError::Cancelled),
+            Err(error) => {
+                if let Err(removal) = fs::remove_file(&destination)
+                    && removal.kind() != io::ErrorKind::NotFound
+                {
+                    return Err(removal.into());
+                }
+                files.push(Err(error));
+            }
+        }
+    }
+    let id = if copied == 0 {
+        partial.id.clone()
+    } else {
+        partial.publish(cancel)?
+    };
+    Ok(Copies { id, files })
+}
+
+/// A capture being copied, removed unless it is published. A failed
+/// removal is left for reconciliation: unpublished copies are never
+/// referenced.
+struct Partial {
+    store: PathBuf,
+    id: String,
+    path: PathBuf,
+    published: bool,
+}
+
+impl Partial {
+    fn create(data_directory: &Path) -> Result<Self, CaptureError> {
+        let store = store(data_directory);
+        create_store(&store)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let path = store.join(format!("{PARTIAL}{id}"));
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self {
+            store,
+            id,
+            path,
+            published: false,
+        })
+    }
+
+    /// Publishes the synced copies under the capture's name, unless a
+    /// deadline or shutdown arrived during the last sync.
+    fn publish(mut self, cancel: &Cancel) -> Result<String, CaptureError> {
         if cancel.checkpoint() {
             return Err(CaptureError::Cancelled);
         }
@@ -222,30 +303,18 @@ pub(crate) fn capture(
             cancel.publishing.store(true, Ordering::SeqCst);
             drop(cancel.publication.lock());
         }
-        publish(&store, &partial, &id).map(|()| digests)
-    });
-    match copied {
-        Ok(digests) => Ok(Capture { id, digests }),
-        Err(error) => {
-            // Unpublished copies are never referenced; a failed removal is
-            // left for reconciliation.
-            let _ = fs::remove_dir_all(&partial);
-            Err(error)
-        }
+        publish(&self.store, &self.path, &self.id)?;
+        self.published = true;
+        Ok(std::mem::take(&mut self.id))
     }
 }
 
-fn copy_batch(
-    Sources(sources): Sources,
-    partial: &Path,
-    cancel: &Cancel,
-) -> Result<Vec<String>, CaptureError> {
-    let mut digests = Vec::with_capacity(sources.len());
-    for (ordinal, (mut source, size)) in sources.into_iter().enumerate() {
-        let destination = partial.join(ordinal.to_string());
-        digests.push(copy_file(&mut source, &destination, size, cancel)?);
+impl Drop for Partial {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
-    Ok(digests)
 }
 
 /// Copy exactly `size` bytes, hashing them on the way, then sync the copy.

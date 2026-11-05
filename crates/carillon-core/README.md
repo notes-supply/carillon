@@ -29,7 +29,7 @@ mise run example:core
   dispatcher backs off from 1 to 60 seconds while its runtime takes
   nothing, logging each new kind of failure and the recovery once.
 - `settle(runtime, turn, outcome)` records how a turn the runtime holds
-  ended.
+  ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
   delivery with the interface instance that claimed it, and never treat an
   uncertain send as safe to repeat.
@@ -78,7 +78,8 @@ another runtime's turns never hold back a conversation's messages.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
   its submodules for admission, job reads, recovery and held turns.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
-  [`intake.rs`](src/intake.rs): captured resources and files.
+  [`intake.rs`](src/intake.rs), [`answers.rs`](src/answers.rs): captured
+  resources, messages' files and answers' files.
 - [`runtime_client.rs`](src/runtime_client.rs): core's calls to a runtime's
   inbox and restart readiness.
 - [`application/`](src/application): the `carillon` command and service. In

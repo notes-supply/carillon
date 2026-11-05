@@ -64,6 +64,7 @@ async fn deliver(
             core_client(format!("http://{address}"))?,
             reactions.clone(),
             http,
+            std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
         ),

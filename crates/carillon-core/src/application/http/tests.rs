@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::Context as _;
 use axum::response::IntoResponse as _;
+use carillon_installation::config::hash_token;
 use tempfile::tempdir;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -28,7 +29,7 @@ impl Fixture {
 }
 
 fn installation(root: &Path) -> Result<Fixture> {
-    use carillon_installation::config::{AgentConfig, Config, CoreConfig, hash_token};
+    use carillon_installation::config::{AgentConfig, Config, CoreConfig};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
     let resources = root.join("resources");
@@ -53,6 +54,7 @@ fn installation(root: &Path) -> Result<Fixture> {
             url: format!("http://127.0.0.1:{}", index + 2),
             token_hash: hash_token("test-only"),
             enabled: true,
+            max_upload_mib: None,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -114,8 +116,7 @@ async fn hand_next(core: &Core, runtime_id: &str) -> Result<Option<RuntimeTurnRe
     Ok(handed)
 }
 
-/// Settles a turn `runtime_id` holds as answered, with a reply to its input
-/// and `activity` as its report.
+/// Settles a held turn as answered: a reply to its input, `activity` its report.
 fn answer(
     core: &Core,
     runtime_id: &str,
@@ -125,6 +126,7 @@ fn answer(
     let answer = TurnOutcome::Answered {
         output: format!("reply to {}", request.input),
         activity,
+        files: Vec::new(),
     };
     let settled = core.settle(runtime_id, &request.correlation_id, answer)?;
     anyhow::ensure!(settled == Settled::Recorded, "the answer was {settled:?}");
@@ -655,8 +657,6 @@ fn activity_runtime(
 
 /// Registers `other-interface` and accepts one turn for it.
 async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventReceipt> {
-    use carillon_installation::config::hash_token;
-
     let mut other = state
         .config
         .provider("test-interface", ProviderRole::Interface)?

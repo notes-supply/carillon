@@ -34,7 +34,7 @@ export const groups = [
           Type.Array(Type.String({ minLength: 1 }), {
             maxItems: 10,
             description:
-              "Local file paths to attach; 4 MiB combined. Use empty content for attachment-only messages.",
+              "Local file paths to post with this message; 4 MiB combined. Use empty content for attachment-only messages. A file for your answer goes with `attach` instead.",
           }),
         ),
         reply_to: Type.Optional(id),

@@ -2,7 +2,7 @@
 //! reads back those it holds, and the controls an interface relays to it
 //! while one waits.
 
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,15 @@ pub enum TurnOutcome {
             skip_serializing_if = "Option::is_none"
         )]
         activity: Option<TurnActivity>,
+        /// Files the agent attached to the answer, as absolute paths on this
+        /// host, in the order it attached them; at most
+        /// [`ANSWER_FILE_LIMIT`].
+        #[serde(
+            default,
+            deserialize_with = "attached_files",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        files: Vec<PathBuf>,
     },
     /// The turn did not complete. `explanation` is phrased for the
     /// conversation and safe to display.
@@ -59,6 +68,27 @@ where
         return Err(serde::de::Error::custom("expected a nonblank string"));
     }
     Ok(value)
+}
+
+/// The most files one answer names.
+pub const ANSWER_FILE_LIMIT: usize = 100;
+
+fn attached_files<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let files = Vec::<PathBuf>::deserialize(deserializer)?;
+    if files.len() > ANSWER_FILE_LIMIT {
+        return Err(serde::de::Error::custom(format!(
+            "an answer names at most {ANSWER_FILE_LIMIT} files"
+        )));
+    }
+    if files.iter().any(|file| !file.is_absolute()) {
+        return Err(serde::de::Error::custom(
+            "an answer names its files by absolute path",
+        ));
+    }
+    Ok(files)
 }
 
 /// Why a delivery has nothing to send: its turn was steered into another,

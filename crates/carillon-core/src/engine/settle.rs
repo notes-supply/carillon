@@ -12,18 +12,41 @@ use crate::db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement};
 
 impl Core {
     /// Settles a turn `runtime_id` holds as it says the turn ended, with the
-    /// delivery that tells its conversation, once.
+    /// delivery that tells its conversation, once. An answer's files are
+    /// copied first, unless the turn already ended; blocking while they are.
     /// # Errors
-    /// Returns storage errors.
-    pub fn settle(&self, runtime_id: &str, turn_id: &str, outcome: TurnOutcome) -> Result<Settled> {
+    /// Returns unavailable while core stops, or storage errors.
+    pub fn settle(
+        &self,
+        runtime_id: &str,
+        turn_id: &str,
+        outcome: TurnOutcome,
+    ) -> Result<Settled, CoreError> {
         let settle = |settlement| self.database.settle_held(runtime_id, turn_id, settlement);
-        match outcome {
-            TurnOutcome::Answered { output, activity } => {
+        Ok(match outcome {
+            TurnOutcome::Answered {
+                output,
+                activity,
+                files,
+            } => {
                 let activity = kept_report(turn_id, activity);
-                settle(Settlement::Answered {
+                let kept = if files.is_empty() {
+                    None
+                } else {
+                    Some(self.keep_answer_files(runtime_id, turn_id, &files)?)
+                };
+                let settled = settle(Settlement::Answered {
                     output: &output,
+                    content: &kept
+                        .as_ref()
+                        .map_or_else(|| output.clone(), |kept| kept.content(&output)),
                     activity: activity.as_ref(),
-                })
+                    files: kept.as_ref().map_or(&[], |kept| &kept.files),
+                });
+                if let Some(kept) = kept {
+                    kept.settled(self);
+                }
+                settled?
             }
             TurnOutcome::Failed {
                 explanation,
@@ -39,11 +62,11 @@ impl Core {
                     error: &error,
                     notice: &interrupted(explanation.as_deref()),
                     activity: activity.as_ref(),
-                })
+                })?
             }
-            TurnOutcome::Steered {} => settle(Settlement::Silent(Silence::Steered)),
-            TurnOutcome::Stopped {} => settle(Settlement::Silent(Silence::Stopped)),
-        }
+            TurnOutcome::Steered {} => settle(Settlement::Silent(Silence::Steered))?,
+            TurnOutcome::Stopped {} => settle(Settlement::Silent(Silence::Stopped))?,
+        })
     }
 
     /// Returns the receipt of the turn the same key opened in the same

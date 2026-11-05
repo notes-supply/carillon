@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { afterEach, expect, it } from "vitest";
+import { ATTACH } from "./answers.ts";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
 import { BUILT_IN_SKILLS } from "./resources.ts";
 
@@ -144,8 +145,8 @@ it("applies a toggled extension from the next request of a conversation", async 
   await agent.outcome("turn-2");
   const tools = (messages: readonly Message[] = []) =>
     systems(messages).flatMap((message) => (message.toolsAdded ?? []).map((tool) => tool.name));
-  expect(tools(requests[0])).toEqual([]);
-  expect(tools(requests[1])).toEqual(["echo"]);
+  expect(tools(requests[0])).toEqual([ATTACH.name]);
+  expect(tools(requests[1])).toEqual([ATTACH.name, "echo"]);
 });
 
 it("loads a user extension its snapshot lists, also for an answer resumed after a restart", async () => {
