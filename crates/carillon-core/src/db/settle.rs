@@ -56,15 +56,23 @@ pub enum Settled {
 }
 
 impl Database {
-    /// Whether `runtime_id` holds the turn and it has not ended: a
-    /// settlement now would record it.
-    pub(crate) fn unsettled(&self, runtime_id: &str, turn_id: &str) -> Result<bool> {
-        Ok(self.connect()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM turns
-                 WHERE id = ?1 AND runtime_id = ?2 AND state IN ('queued', 'running'))",
-            params![turn_id, runtime_id],
-            |row| row.get(0),
-        )?)
+    /// The interface whose conversation the turn answers, while
+    /// `runtime_id` holds it and it has not ended: a settlement now would
+    /// record it.
+    pub(crate) fn unsettled_interface(
+        &self,
+        runtime_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .connect()?
+            .query_row(
+                "SELECT interface_id FROM turns
+                 WHERE id = ?1 AND runtime_id = ?2 AND state IN ('queued', 'running')",
+                params![turn_id, runtime_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Ends a queued or running turn of `runtime_id` as `settlement` says,

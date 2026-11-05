@@ -4,11 +4,12 @@
 use std::{fs, path::Path as FilePath};
 
 use axum::{body::Bytes, http::HeaderMap, routing::put};
-use carillon_installation::config::MIB;
+use carillon_installation::config::{MIB, Provider, ProviderRole};
 use carillon_protocol::model::AnswerFile;
 use sha2::{Digest as _, Sha256};
 
 use super::{super::files::compose, *};
+use crate::delivery::require_upload_limit;
 
 /// A message Discord received: its text and each file's name and bytes.
 #[derive(Debug, PartialEq, Eq)]
@@ -248,32 +249,6 @@ async fn an_answers_files_reach_discord_with_its_text_once_a_lost_claim_is_taken
 }
 
 #[tokio::test]
-async fn a_file_over_discords_limit_is_named_in_the_answer_and_the_rest_sent() -> anyhow::Result<()>
-{
-    let store = tempfile::tempdir()?;
-    let delivery = Delivery {
-        content: "Here they are.".to_owned(),
-        files: vec![
-            listed("talk.mp4", 21 * MIB),
-            kept(store.path(), 1, "notes.txt", b"notes")?,
-        ],
-        ..answer(1, TurnState::Completed)
-    };
-    let Uploaded { messages, acks, .. } = upload(vec![Some(delivery)], store.path()).await?;
-    assert_eq!(
-        messages,
-        [Received {
-            content: "Here they are.\n\nCould not send talk.mp4: it has 21 MiB, over the 20 MiB \
-                      Discord takes of one file. It is at /home/owner/out/talk.mp4."
-                .to_owned(),
-            files: vec![("notes.txt".to_owned(), b"notes".to_vec())],
-        }]
-    );
-    assert_eq!(acks[0]["outcome"], "delivered");
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_copy_that_changed_after_it_was_kept_is_never_sent() -> anyhow::Result<()> {
     let store = tempfile::tempdir()?;
     let chart = kept(store.path(), 0, "chart.png", b"chart")?;
@@ -379,4 +354,30 @@ fn a_file_at_discords_limit_goes_on_the_last_message_of_a_long_answer() {
     assert_eq!(messages.len(), 2);
     assert!(messages[0].files.is_empty());
     assert_eq!(names(&messages[1].files), ["edge.bin"]);
+}
+
+#[test]
+fn discord_needs_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
+    let provider = |max_upload_mib| Provider {
+        id: "discord-private".to_owned(),
+        role: ProviderRole::Interface,
+        version: "test".to_owned(),
+        url: "http://127.0.0.1:1".to_owned(),
+        token_hash: String::new(),
+        enabled: true,
+        max_upload_mib,
+    };
+    require_upload_limit(&provider(Some(20)))?;
+    for refused in [None, Some(25)] {
+        assert_eq!(
+            require_upload_limit(&provider(refused))
+                .err()
+                .map(|error| error.to_string()),
+            Some(
+                "carillon.toml must declare max_upload_mib of at most 24 for discord-private"
+                    .to_owned()
+            )
+        );
+    }
+    Ok(())
 }

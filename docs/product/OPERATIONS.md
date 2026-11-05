@@ -510,19 +510,20 @@ run that attached it. If that run is stopped, interrupted by a new message or
 fails, its files are dropped, and the agent attaches them again with a later
 answer.
 
-Before core records the answer, it copies each file into `state/attachments`,
-within the limits below, and keeps it with the turn. A file core couldn't
-keep, such as one that changed or couldn't be read while core copied it, is
-named in the answer with the reason, and the other files are kept.
+Before core records the answer, it copies each file Discord can upload into
+`state/attachments`, within the limits below, and keeps it with the turn.
+Those copies count against `storage_mib` with the files people send. Core
+keeps no copy of a file over Discord's upload limit, 20 MiB unless its
+`max_upload_mib` says otherwise, or of one that changed or couldn't be read
+while core copied it. The answer names each such
+file with where the agent had it and why, and the other files are kept.
 
 Discord takes at most 10 files and 25 MiB in one message. The answer's last
 message carries the first files, and the files that don't fit follow on more
-messages after it, so every file arrives. A file over Discord's 20 MiB upload
-limit is named in the answer with where the agent had it. Delivery sends
-core's copies, so the agent's own files may change or go once the answer is
-recorded, and an answer that waits for Discord, even across restarts, never
-runs the model again. To post files elsewhere, the agent uses its
-[Discord tools](#agent-discord-tools).
+messages after it, so every file arrives. Delivery sends core's copies, so the
+agent's own files may change or go once the answer is recorded, and an answer
+that waits for Discord, even across restarts, never runs the model again. To
+post files elsewhere, the agent uses its [Discord tools](#agent-discord-tools).
 
 Limits, each applied when its service restarts:
 
@@ -535,6 +536,9 @@ max_file_mib = 1024
 max_message_mib = 2048
 concurrent_messages = 2   # messages downloading at once
 staging_mib = 2048
+
+# carillon.toml, the Discord provider's [[providers]] entry
+max_upload_mib = 20       # the largest file it uploads; at most 24
 
 # carillon.toml
 [core.attachments]

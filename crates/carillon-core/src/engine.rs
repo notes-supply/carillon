@@ -18,7 +18,7 @@ use carillon_protocol::model::{
 };
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 /// What admission decided before any capture work.
 enum Admitted {
@@ -59,6 +59,9 @@ pub struct CoreOptions {
     /// while it serves.
     pub runtimes: Vec<RuntimeProvider>,
     pub attachments: AttachmentLimits,
+    /// The largest file each interface uploads, in MiB, by its ID. Core
+    /// keeps no larger answer file for that interface's conversations.
+    pub uploads: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, thiserror::Error)]

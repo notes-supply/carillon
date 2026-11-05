@@ -65,7 +65,7 @@ impl AppState {
     }
 }
 
-fn core_options(config: &LoadedConfig) -> CoreOptions {
+pub(super) fn core_options(config: &LoadedConfig) -> CoreOptions {
     CoreOptions {
         data_directory: config.value.data_dir.clone(),
         agents: config
@@ -79,6 +79,12 @@ fn core_options(config: &LoadedConfig) -> CoreOptions {
             })
             .collect(),
         attachments: config.value.core.attachments,
+        uploads: config
+            .value
+            .providers
+            .iter()
+            .filter_map(|provider| Some((provider.id.clone(), provider.max_upload_mib?)))
+            .collect(),
         runtimes: runtime_facts(config),
     }
 }

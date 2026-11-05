@@ -180,10 +180,11 @@ the conversation's native session. It keeps each turn core hands it at
 `POST /v1/inbox`, answering 202 once kept, and settles it later
 through core's `POST /v1/runtime/turns/{id}/outcome`. An answer may name
 files by absolute path. Before it records the answer, core copies each into
-its attachment store with its digest, within its attachment limits, and adds
-a line to the delivered text for each file it cannot keep. The same outcome
-again copies nothing; while the files are being copied, it is refused as
-unavailable, to be asked again. It opens turns of its
+its attachment store with its digest, within its attachment limits and the
+largest file the conversation's interface uploads, and adds a line to the
+delivered text for each file it cannot keep. The same outcome again copies
+nothing; while the files are being copied, it is refused as unavailable, to
+be asked again. It opens turns of its
 own through `POST /v1/runtime/turns`, reads back the turns core records
 running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. A turn's activity snapshot lists the
@@ -311,11 +312,11 @@ the turns a runtime opens included.
 ## Configuration
 
 `carillon.toml` declares providers by stable ID and role, with each one's
-address, credential hash, expected version and whether it's enabled, and the
-agents: each one's ID, name, runtime, workspace and, for Carillon's
-assistant on Pi, resources. Each provider owns `providers/ID.toml`, where a
-runtime keeps its own settings for its agents. Both files reject unknown
-fields.
+address, credential hash, expected version and whether it's enabled, with
+the largest file an interface uploads, and the agents: each one's ID, name,
+runtime, workspace and, for Carillon's assistant on Pi, resources. Each
+provider owns `providers/ID.toml`, where a runtime keeps its own settings for
+its agents. Both files reject unknown fields.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
 both. Pi runs Carillon's assistant whenever it is chosen. Each provider's

@@ -212,6 +212,12 @@ pub(super) fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result
     write_config(&config_path, &config)
 }
 
+/// Discord's default upload limit, which applies to every server
+/// (<https://docs.discord.com/developers/reference#uploading-files>). A
+/// server's boosts can raise it, but only interactions report a server's
+/// limit, and a message request stays within 25 MiB.
+const DISCORD_UPLOAD_MIB: u64 = 20;
+
 fn default_providers(
     base_port: u16,
     discord_token: &str,
@@ -226,6 +232,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
+            max_upload_mib: Some(DISCORD_UPLOAD_MIB),
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -239,6 +246,7 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
+        max_upload_mib: None,
     })
 }
 
@@ -1254,25 +1262,9 @@ mod tests {
     }
 
     fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
-        use carillon_installation::config::AttachmentLimits;
-        crate::Core::open(crate::CoreOptions {
-            data_directory: config.value.data_dir.clone(),
-            agents: vec![crate::AgentOptions {
-                id: super::ASSISTANT.to_owned(),
-                runtime: "runtime-pi".to_owned(),
-                resources: config.value.agent(super::ASSISTANT)?.resources.clone(),
-            }],
-            runtimes: vec![crate::RuntimeProvider {
-                id: "runtime-pi".to_owned(),
-                version: "test".to_owned(),
-                url: "http://127.0.0.1:1".to_owned(),
-                enabled: true,
-            }],
-            attachments: AttachmentLimits {
-                free_space_mib: 0,
-                ..AttachmentLimits::default()
-            },
-        })
+        let mut options = super::super::http::core_options(config);
+        options.attachments.free_space_mib = 0;
+        crate::Core::open(options)
     }
 
     #[tokio::test]

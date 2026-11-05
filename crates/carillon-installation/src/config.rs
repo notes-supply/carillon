@@ -198,6 +198,11 @@ pub struct Provider {
     pub url: String,
     pub token_hash: String,
     pub enabled: bool,
+    /// The largest file an interface uploads to its platform. Core keeps no
+    /// larger file an agent attaches to an answer for it, and names it in
+    /// the answer instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_upload_mib: Option<u64>,
 }
 
 impl Provider {
@@ -460,6 +465,11 @@ impl Config {
             if !provider_ids.insert(&provider.id) {
                 bail!("provider ID {} is configured more than once", provider.id);
             }
+        }
+        if let Some(provider) = self.providers.iter().find(|provider| {
+            provider.role == ProviderRole::Runtime && provider.max_upload_mib.is_some()
+        }) {
+            bail!("runtime provider {} uploads nothing", provider.id);
         }
         let mut agent_ids = BTreeSet::new();
         for agent in &self.agents {

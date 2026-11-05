@@ -49,6 +49,7 @@ pub(crate) fn installation(
             url: format!("http://127.0.0.1:{port}"),
             token_hash: hash_token(id),
             enabled: true,
+            max_upload_mib: (role == ProviderRole::Interface).then_some(20),
         });
     }
     fs::write(root.join("credentials").join("operator.token"), "operator")?;

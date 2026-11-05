@@ -1,31 +1,42 @@
 //! An answer's files on Discord: which message carries each, and their
 //! bytes, read from core's copies.
 //!
-//! Discord takes files of up to 20 MiB by default, from everyone, at most 10
-//! and 25 MiB in all per message
-//! (<https://docs.discord.com/developers/reference#uploading-files>,
-//! <https://docs.discord.com/developers/resources/message#create-message>,
+//! Discord takes at most 10 files and 25 MiB in all per message
+//! (<https://docs.discord.com/developers/resources/message#create-message>
 //! and error 30015 of
 //! <https://docs.discord.com/developers/topics/opcodes-and-status-codes>).
-//! A server's boosts can raise the limit for one file, but only interactions
-//! report a server's limit in bytes (`attachment_size_limit`), and a
-//! message's request stays within 25 MiB, so the default is the limit here.
+//! The provider's registry entry declares the largest file it uploads, and
+//! core keeps no larger answer file for it, so every file fits a message.
 
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::MIB;
+use carillon_installation::config::{MIB, Provider};
 use carillon_protocol::model::AnswerFile;
 use sha2::{Digest as _, Sha256};
 use twilight_model::http::attachment::Attachment;
 
 use super::discord_chunks;
 
-const FILE_LIMIT: u64 = 20 * MIB;
 const FILES_PER_MESSAGE: usize = 10;
 /// A message's files, leaving room in its 25 MiB request for its text and
 /// the request's framing.
 const MESSAGE_FILE_BYTES: u64 = 25 * MIB - 64 * 1024;
+
+/// Requires the provider's registry entry to declare an upload limit that
+/// one message can carry.
+/// # Errors
+/// Returns which limit to declare when it is missing or larger.
+pub(crate) fn require_upload_limit(provider: &Provider) -> Result<()> {
+    let most = MESSAGE_FILE_BYTES / MIB;
+    match provider.max_upload_mib {
+        Some(mib) if mib <= most => Ok(()),
+        _ => bail!(
+            "carillon.toml must declare max_upload_mib of at most {most} for {}",
+            provider.id
+        ),
+    }
+}
 
 /// One Discord message of a delivery: its text, possibly empty, and the
 /// files it carries.
@@ -36,29 +47,10 @@ pub(crate) struct Outgoing<'a> {
 }
 
 /// The messages that send `content` with `files`, in order. The text is
-/// split at Discord's length limit, with a line for each file over Discord's
-/// upload limit; the first files go on the text's last message, the rest
-/// after it, as many to a message as Discord takes.
+/// split at Discord's length limit; the first files go on the text's last
+/// message, the rest after it, as many to a message as Discord takes.
 pub(crate) fn compose<'a>(content: &str, files: &'a [AnswerFile]) -> Vec<Outgoing<'a>> {
-    let (fit, oversized): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.size <= FILE_LIMIT);
-    let notes = oversized
-        .iter()
-        .map(|file| {
-            format!(
-                "Could not send {}: it has {} MiB, over the {} MiB Discord takes of one file. It is at {}.",
-                file.name,
-                file.size.div_ceil(MIB),
-                FILE_LIMIT / MIB,
-                file.source
-            )
-        })
-        .collect::<Vec<_>>();
-    let content = if notes.is_empty() {
-        content.to_owned()
-    } else {
-        format!("{content}\n\n{}", notes.join("\n"))
-    };
-    let mut messages = discord_chunks(&content)
+    let mut messages = discord_chunks(content)
         .into_iter()
         .map(|content| Outgoing {
             content,
@@ -66,7 +58,7 @@ pub(crate) fn compose<'a>(content: &str, files: &'a [AnswerFile]) -> Vec<Outgoin
         })
         .collect::<Vec<_>>();
     let mut bytes = 0;
-    for file in fit {
+    for file in files {
         match messages.last_mut() {
             Some(last)
                 if last.files.len() < FILES_PER_MESSAGE

@@ -129,8 +129,9 @@ async function postCoreEvent({ basePort, credentialValue }, eventId, content, at
 
 /**
  * Deterministic Pi attaches files with its `attach` tool; core keeps a copy
- * of each with the answer, and the Discord provider composes the messages
- * that send them from those copies, checked against their digests.
+ * of each Discord can upload with the answer, and the Discord provider
+ * composes the messages that send them from those copies, checked against
+ * their digests.
  */
 async function testAnswerFiles({ installation, workspace, simulateRoute }) {
   const simulate = (eventId, content) => simulateRoute(eventId, CHANNEL, null, content);
@@ -144,17 +145,19 @@ async function testAnswerFiles({ installation, workspace, simulateRoute }) {
   assert.equal(delivery.turn_state, "completed");
   assert.deepEqual(
     delivery.files.map(({ name, source }) => [name, source]),
-    [
-      ["chart.png", chart],
-      ["talk.bin", talk],
-    ],
+    [["chart.png", chart]],
   );
   assert.deepEqual(await readFile(join(store, delivery.files[0].path)), drawn);
+  assert.deepEqual(
+    await readdir(join(store, delivery.files[0].path, "..")),
+    ["0"],
+    "core keeps no copy of a file Discord cannot upload",
+  );
   assert.equal(messages.length, 1, "the answer and its chart are one message");
   assert.deepEqual(messages[0].files, [["chart.png", sha256(drawn)]]);
   assert.ok(
     messages[0].content.endsWith(
-      `Could not send talk.bin: it has 21 MiB, over the 20 MiB Discord takes of one file. It is at ${talk}.`,
+      `Could not attach ${talk}: it has 21 MiB, over the 20 MiB this channel uploads of one file.`,
     ),
     messages[0].content,
   );

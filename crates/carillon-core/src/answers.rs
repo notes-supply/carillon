@@ -47,6 +47,8 @@ enum Unkept {
     NotAFile,
     #[error("it has {} MiB, over the {limit} MiB Carillon keeps of one file", .size.div_ceil(MIB))]
     TooLarge { size: u64, limit: u64 },
+    #[error("it has {} MiB, over the {limit} MiB this channel uploads of one file", .size.div_ceil(MIB))]
+    Unsendable { size: u64, limit: u64 },
     #[error("the answer's files would have more than {0} MiB together")]
     TooMuch(u64),
     #[error("an answer keeps at most {0} files")]
@@ -165,8 +167,9 @@ impl Kept {
 
 impl Core {
     /// Copies the files an answer names into one new capture, in order,
-    /// within the attachment limits, unless the turn `runtime_id` holds
-    /// already ended. Blocking: run it off the async reactor.
+    /// within the attachment limits and the largest file the turn's
+    /// interface uploads, unless the turn `runtime_id` holds already ended.
+    /// Blocking: run it off the async reactor.
     /// # Errors
     /// Returns unavailable while the turn's files are being kept or core
     /// stops, so the runtime asks again; or storage errors.
@@ -190,9 +193,10 @@ impl Core {
             },
             reservation: None,
         };
-        if !self.database.unsettled(runtime_id, turn_id)? {
+        let Some(interface) = self.database.unsettled_interface(runtime_id, turn_id)? else {
             return Ok(kept);
-        }
+        };
+        let upload = self.options.uploads.get(&interface).copied();
         let limits = &self.options.attachments;
         let (mut accepted, mut sources) = (Vec::new(), Vec::new());
         let mut total = 0_u64;
@@ -202,6 +206,12 @@ impl Core {
             } else {
                 match open(path) {
                     Err(reason) => reason,
+                    Ok((_, size))
+                        if let Some(limit) =
+                            upload.filter(|limit| size > limit.saturating_mul(MIB)) =>
+                    {
+                        Unkept::Unsendable { size, limit }
+                    }
                     Ok((_, size)) if size > limits.max_file_bytes() => Unkept::TooLarge {
                         size,
                         limit: limits.max_file_mib,

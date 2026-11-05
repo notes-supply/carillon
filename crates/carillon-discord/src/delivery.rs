@@ -31,6 +31,9 @@ use twilight_model::{
         marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
 };
+
+pub(crate) use files::require_upload_limit;
+
 /// How long one feedback request may take, rate-limit waits included.
 const FEEDBACK_LIMIT: Duration = Duration::from_secs(30);
 /// How long work waits for feedback it does not depend on before going on

@@ -24,6 +24,7 @@ fn options(root: &std::path::Path) -> CoreOptions {
             })
             .into(),
         attachments: AttachmentLimits::default(),
+        uploads: std::collections::BTreeMap::new(),
     }
 }
 

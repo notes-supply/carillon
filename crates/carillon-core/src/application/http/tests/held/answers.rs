@@ -155,6 +155,57 @@ async fn files_core_cannot_keep_are_named_in_the_answer_and_the_rest_sent() -> R
 }
 
 #[tokio::test]
+async fn a_file_over_the_interfaces_upload_limit_is_named_and_never_copied() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (mut fixture, _) = durable(directory.path(), &runtime)?;
+    fixture
+        .config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "test-interface")
+        .context("no interface")?
+        .max_upload_mib = Some(1);
+    let state = configured(&fixture);
+    let made = directory.path().join("made");
+    fs::create_dir(&made)?;
+    let (notes, recording) = (made.join("notes.txt"), made.join("recording.bin"));
+    fs::write(&notes, b"kept")?;
+    fs::write(&recording, vec![0; usize::try_from(MIB)? + 1])?;
+    let receipt = ok(submit(&state, "send them", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    let answer = json!({"outcome": "answered", "output": "Here.", "files": [recording, notes]});
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    let claimed = claim(&state.core, "instance")?;
+    assert_eq!(
+        claimed.content,
+        format!(
+            "Here.\n\nCould not attach {}: it has 2 MiB, over the 1 MiB this channel uploads of one file.",
+            source(&recording)
+        )
+    );
+    let store = fixture.config.value.data_dir.join("attachments");
+    assert_eq!(
+        sent(&store, &claimed)?,
+        [("notes.txt".to_owned(), source(&notes), b"kept".to_vec())]
+    );
+    let copies = fs::read_dir(&store)?
+        .map(|capture| Ok(fs::read_dir(capture?.path())?.count()))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(
+        copies,
+        [1],
+        "only the file the channel can upload is copied"
+    );
+    assert_eq!(state.core.database.captured_bytes()?, 4);
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_answer_whose_files_core_cannot_keep_is_recorded_with_its_text() -> Result<()> {
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
