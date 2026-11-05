@@ -17,7 +17,14 @@ import {
 import type { OpenedTurn } from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
 import { diagnostic } from "@carillon/runtime/failure";
-import { backoff, over, refusedForGood, type DeliveryInput, type Needs } from "./delivery.ts";
+import {
+  backoff,
+  over,
+  recordCutOffs,
+  refusedForGood,
+  type DeliveryInput,
+  type Needs,
+} from "./delivery.ts";
 import { ConversationInfo } from "./documents.ts";
 
 const OPENING = "carillon.opening";
@@ -52,7 +59,11 @@ export interface OpeningHost {
   stop(conversation: ConversationId, submission: SubmissionId): Promise<void>;
 }
 
-type OpeningState = { readonly phase: "open"; readonly attempt: number };
+type OpeningState = {
+  readonly phase: "open";
+  readonly attempt: number;
+  readonly cutOff?: number;
+};
 type Runtime = TaskRuntime<Opening, OpeningState, null, object>;
 
 export type OpeningTask = ReturnType<typeof openingTask>;
@@ -117,7 +128,8 @@ export function openingTask(host: OpeningHost) {
     initial: () => ({ phase: "open", attempt: 0 }),
     phases: {
       open: async (task, runtime, context) => {
-        const { attempt } = task.state.checkpoint;
+        const checkpoint = await recordCutOffs(task, runtime, context);
+        const { attempt } = checkpoint;
         try {
           await open(task.input, runtime, context);
         } catch (failure) {
@@ -128,8 +140,8 @@ export function openingTask(host: OpeningHost) {
             console.error(
               `opening ${task.input.key}: ${diagnostic(failure)}; trying again in ${String(delay / 1_000)} s`,
             );
-            const checkpoint = { phase: "open", attempt: attempt + 1 } as const;
-            await runtime.sleepUntil(runtime.now() + delay, checkpoint, context);
+            const next = { ...checkpoint, attempt: attempt + 1 };
+            await runtime.sleepUntil(runtime.now() + delay, next, context);
             return;
           }
           console.error(`opening ${task.input.key}: ${diagnostic(failure)}; giving it up`);

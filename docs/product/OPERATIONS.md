@@ -612,9 +612,10 @@ the tools can administer the server.
   held: a model call it cut off counts as a failed attempt and is retried,
   and a tool call it cut off is reported to the model as interrupted rather
   than repeated. A message whose answer keeps crashing it fails once Pi's
-  retries run out. T3 takes up the turns
-  it held again, reading each run back from T3, and settles a stop core
-  hadn't recorded instead of running the message.
+  retries run out. However often it crashes, every outcome it decided still
+  reaches core, and scheduled runs and subagent reports still open their
+  turns. T3 takes up the turns it held again, reading each run back from T3,
+  and settles a stop core hadn't recorded instead of running the message.
 - **Core can't save an outcome** (disk full, for example). The runtime asks
   again until core records it, and the turn shows as running meanwhile.
 - **Delegated T3 work** reports later in its own message, even across
