@@ -469,7 +469,10 @@ impl Config {
         if let Some(provider) = self.providers.iter().find(|provider| {
             provider.role == ProviderRole::Runtime && provider.max_upload_mib.is_some()
         }) {
-            bail!("runtime provider {} uploads nothing", provider.id);
+            bail!(
+                "max_upload_mib applies only to interface providers; remove it from runtime provider {}",
+                provider.id
+            );
         }
         let mut agent_ids = BTreeSet::new();
         for agent in &self.agents {

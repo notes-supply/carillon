@@ -255,6 +255,7 @@ it("gives each answer the files of its own run, whichever answer's delivery deci
     }, context);
     for (let attempt = 0; !decided.has("turn-2") && attempt < 200; attempt += 1)
       await new Promise((resolve) => setTimeout(resolve, 10));
+    expect([...decided.keys()]).toEqual(["turn-2"]);
     earlier.resolve();
     for (let attempt = 0; !decided.has("turn-1") && attempt < 200; attempt += 1)
       await new Promise((resolve) => setTimeout(resolve, 10));

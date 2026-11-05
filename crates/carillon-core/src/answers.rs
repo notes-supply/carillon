@@ -232,6 +232,17 @@ impl Core {
         if accepted.is_empty() {
             return Ok(kept);
         }
+        let _copying = self
+            .intake
+            .workers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                CoreError::Unavailable(
+                    "Carillon is already copying as many files as it can; try again shortly"
+                        .to_owned(),
+                )
+            })?;
         let refused = match self.intake.reserve(self, total) {
             Ok(reservation) => {
                 kept.reservation = Some(reservation);

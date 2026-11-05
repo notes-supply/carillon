@@ -322,6 +322,34 @@ async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> R
 }
 
 #[tokio::test]
+async fn an_answer_waits_its_turn_while_core_copies_as_many_files_as_it_may() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let chart = directory.path().join("chart.png");
+    fs::write(&chart, b"chart")?;
+    let receipt = ok(submit(&state, "chart it", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    let answer = json!({"outcome": "answered", "output": "Here.", "files": [chart]});
+    let workers = state.core.intake.workers.clone();
+    let all = u32::try_from(workers.available_permits())?;
+    let busy = workers.acquire_many_owned(all).await?;
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let store = fixture.config.value.data_dir.join("attachments");
+    assert!(!store.exists() || fs::read_dir(&store)?.count() == 0);
+    drop(busy);
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(fs::read_dir(&store)?.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 #[expect(
     clippy::await_holding_lock,
     reason = "the held lock is what stalls the blocking copy"

@@ -161,7 +161,7 @@ function quoted(text: string, limit: number): string {
   );
 }
 
-function size(bytes: number): string {
+export function size(bytes: number): string {
   if (bytes < 1024) return `${String(bytes)} bytes`;
   if (bytes < MIB) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / MIB).toFixed(1)} MiB`;

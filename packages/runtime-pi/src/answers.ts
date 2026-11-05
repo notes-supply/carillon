@@ -21,6 +21,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { Type } from "typebox";
+import { size } from "./attachments.ts";
 import { Attached } from "./documents.ts";
 
 export const ATTACH = defineTool({
@@ -116,9 +117,7 @@ async function readable(path: string): Promise<string> {
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) throw new Error(`${path} is not a regular file.`);
-    return stats.size < 1024 * 1024
-      ? `${String(Math.ceil(stats.size / 1024))} KiB`
-      : `${(stats.size / (1024 * 1024)).toFixed(1)} MiB`;
+    return size(stats.size);
   } finally {
     await handle.close();
   }
