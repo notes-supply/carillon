@@ -1,11 +1,11 @@
 {
   "name": "carillon-workspace",
-  "version": "0.1.0-beta.4",
+  "version": "0.1.0-beta.5",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "devDependencies": {
-    "@types/node": "26.6.5",
+    "@types/node": "26.6.6",
     "@types/proper-lockfile": "4.1.4",
     "knip": "6.43.0",
     "oxfmt": "0.75.0",
