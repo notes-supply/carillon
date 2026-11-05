@@ -235,7 +235,7 @@ impl Reader<'_> {
 pub(super) fn quote(mut line: String, files: &[String], content: &str) -> String {
     if !files.is_empty() {
         line.push_str(", with files ");
-        line.push_str(&Value::from(files.to_vec()).to_string());
+        line.push_str(&escaped(&Value::from(files.to_vec()).to_string()));
     }
     line.push(':');
     let text = content.trim();
@@ -246,16 +246,28 @@ pub(super) fn quote(mut line: String, files: &[String], content: &str) -> String
     std::iter::once(line)
         .chain(
             opening
-                .lines()
+                .replace("\r\n", "\n")
+                .split(LINE_BREAKS)
                 .map(|quoted| format!("> {quoted}").trim_end().to_owned()),
         )
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// Every character a reader may take for the end of a line.
+const LINE_BREAKS: [char; 7] = [
+    '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+];
+
 /// `text` as a JSON string, which nothing in it can end early.
 fn json(text: &str) -> String {
-    Value::from(text).to_string()
+    escaped(&Value::from(text).to_string())
+}
+
+/// JSON leaves the Unicode line and paragraph separators unescaped.
+fn escaped(json: &str) -> String {
+    json.replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 pub(super) fn rfc3339(at: Timestamp) -> String {
