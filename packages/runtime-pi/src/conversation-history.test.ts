@@ -3,7 +3,6 @@ import {
   fauxText,
   fauxThinking,
   fauxToolCall,
-  Type,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
@@ -13,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { startFixture, textsOf, type Fixture } from "./fixture.ts";
 import { BUILT_IN_SKILLS } from "./resources.ts";

@@ -3,7 +3,6 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
-  Type,
   type FauxResponseFactory,
   type FauxResponseStep,
   type Message,
@@ -32,6 +31,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import type { Clock } from "./agent.ts";
 import type { McpServer } from "./mcp.ts";

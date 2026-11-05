@@ -27,7 +27,7 @@ import type { OpeningTask } from "./opening.ts";
 import { SCHEDULES } from "./schedules.ts";
 
 const SUBAGENTS = "subagents";
-export const REPORTER = "carillon.subagent";
+const REPORTER = "carillon.subagent";
 
 /** Each background call, by its tool task: the reporter it started. */
 const Calls = defineDocFamily<{ reporter?: TaskId }, null>({
@@ -47,7 +47,15 @@ type Answer =
 
 type ReporterState =
   | { readonly phase: "start" }
-  | { readonly phase: "run"; readonly child: ConversationId };
+  | {
+      readonly phase: "run";
+      readonly child: ConversationId;
+      /**
+       * How often crashes cut the wait off. Recording it is progress, so the
+       * child's crashes, which end its run, never end the reporter.
+       */
+      readonly cutOff?: number;
+    };
 
 const COMPLETED = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 
@@ -70,6 +78,15 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
           context,
         ),
       run: async (task, runtime, context) => {
+        const restarts = task.restarts ?? 0;
+        if (restarts > 0) {
+          const { checkpoint } = task.state;
+          const cutOff = (checkpoint.cutOff ?? 0) + restarts;
+          await runtime.commit(
+            () => ({ status: "running", checkpoint: { ...checkpoint, cutOff } }),
+            context,
+          );
+        }
         const child = await runtime.conversation(task.state.checkpoint.child, context);
         if (child === undefined) throw new Error(`subagent ${String(task.id)} has no conversation`);
         const submission = await child.submit(

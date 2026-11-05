@@ -25,7 +25,7 @@ import { backoff } from "./delivery.ts";
 import type { OpeningTask } from "./opening.ts";
 
 export const SCHEDULES = "schedules";
-export const SCHEDULE = "carillon.schedule";
+const SCHEDULE = "carillon.schedule";
 
 const ScheduleInputSchema = Type.Object({
   prompt: Type.String(),

@@ -19,8 +19,6 @@ import {
   type HarnessOptions,
   type Storage,
   type SubmissionId,
-  type TaskId,
-  type TaskInspection,
   type UserInput,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -33,13 +31,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { watchActivity, type ConversationActivity } from "./activity.ts";
 import { prepareAttachments, type InlineImagePolicy, type ModelImages } from "./attachments.ts";
-import {
-  CRASHED,
-  DELIVERY,
-  deliveryTask,
-  isDeliveryInput,
-  type DeliveryInput,
-} from "./delivery.ts";
+import { DELIVERY, deliveryTask, isDeliveryInput, type DeliveryInput } from "./delivery.ts";
 import {
   ConversationInfo,
   conversationKey,
@@ -51,7 +43,7 @@ import {
 } from "./documents.ts";
 import type { McpServer } from "./mcp.ts";
 import type { ModelChoice, ModelSettings, PiCatalogue } from "./models.ts";
-import { OPENING, openingTask, type Opening } from "./opening.ts";
+import { openingTask, type Opening } from "./opening.ts";
 import {
   carillonExtension,
   isUserExtension,
@@ -60,8 +52,8 @@ import {
   type Extensions,
   type Snapshot,
 } from "./resources.ts";
-import { createSchedulesExtension, SCHEDULE } from "./schedules.ts";
-import { createSubagentsExtension, REPORTER } from "./subagents.ts";
+import { createSchedulesExtension } from "./schedules.ts";
+import { createSubagentsExtension } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
 const INTERRUPTED = "[Carillon] This message interrupted your previous answer.";
@@ -70,8 +62,6 @@ const ENDED =
   "[Carillon] Your previous answer was stopped: what it ran for was cancelled or turned off.";
 /** The most times a run is aborted again because its task handed over meanwhile. */
 const ABORT_ATTEMPTS = 5;
-/** The runtime's own tasks a crash loop parked, which run again at startup. */
-const RETRIED = new Set([DELIVERY, OPENING, SCHEDULE, REPORTER]);
 
 /** The harness clock and timers; the system's by default. */
 export type Clock = Pick<HarnessOptions, "now" | "setTimer">;
@@ -193,8 +183,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
           registry.snapshot().extension(name),
         ),
       }),
-      onReport: (error, info) => {
-        console.error(`agent ${options.id}: ${info.type}: ${diagnostic(error)}`);
+      onReport: (report) => {
+        console.error(`agent ${options.id}: ${report.kind}: ${diagnostic(report.error)}`);
       },
       ...options.clock,
     },
@@ -223,9 +213,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const inspection = await harness.inspect(context);
   for (const { record } of inspection.tasks)
     if (record.kind === DELIVERY && isDeliveryInput(record.input)) hold(record.input);
-  const given = await recover(inspection.tasks);
   harness.resume();
-  for (const run of given) await harness.waitForTask(run, context);
   const waiting = new Set(
     inspection.submissions.flatMap((record) =>
       record.status === "queued" ? [record.conversationId] : [],
@@ -443,35 +431,6 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       });
     }, context);
     hold(input);
-  }
-
-  /**
-   * Startup: parked deliveries, openings, schedules and subagents run
-   * again, and a run that crashed the process too often is given up, its
-   * messages failed. Returns the runs given up, whose aborts finish once
-   * tasks run.
-   */
-  async function recover(tasks: readonly TaskInspection[]): Promise<TaskId[]> {
-    const crashed = new Set<ConversationId>();
-    for (const { record, state } of tasks) {
-      if (state.kind !== "blocked" || state.reason !== "restart_limit") continue;
-      if (RETRIED.has(record.kind)) await harness.retryTask(record.id, context);
-      else if (record.kind === "pi.generation" || record.kind === "pi.tool")
-        crashed.add(record.conversationId);
-    }
-    const given: TaskId[] = [];
-    for (const conversation of crashed) {
-      const run = await harness.commit(async (tx) => {
-        const live = await tx.doc(LiveDoc, conversation);
-        for (const input of live.run?.inputs ?? [])
-          tx.settleSubmission(input, { status: "unanswered", reason: CRASHED });
-        return live.run?.taskId;
-      }, context);
-      if (run === undefined) continue;
-      await harness.abortTask(run, context);
-      given.push(run);
-    }
-    return given;
   }
 
   /**

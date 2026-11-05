@@ -4,9 +4,6 @@
   "workspaces": {
     ".": {
       "entry": ["scripts/*.mjs"]
-    },
-    "packages/runtime-pi": {
-      "ignoreDependencies": ["ws"]
     }
   }
 }

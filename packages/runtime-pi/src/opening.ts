@@ -20,7 +20,7 @@ import { diagnostic } from "@carillon/runtime/failure";
 import { backoff, over, refusedForGood, type DeliveryInput, type Needs } from "./delivery.ts";
 import { ConversationInfo } from "./documents.ts";
 
-export const OPENING = "carillon.opening";
+const OPENING = "carillon.opening";
 
 /** A turn to open in the opening task's conversation. */
 export interface Opening {

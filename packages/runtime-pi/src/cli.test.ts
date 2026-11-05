@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "smol-toml";
 import { afterEach, expect, it } from "vitest";
+import { DEFAULT_RESTART_LIMIT } from "@earendil-works/pi-durable";
 import { TurnActivitySchema, TurnOutcomeSchema } from "@carillon/protocol";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { Parse } from "typebox/value";
@@ -220,12 +221,12 @@ async function configure(args: readonly string[]) {
   expect(configured.status, configured.stderr).toBe(0);
 }
 
-async function inbox(url: string, home: string, input: string) {
+async function inbox(url: string, home: string, input: string, turn = "turn-1") {
   const response = await fetch(`${url}/v1/inbox`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({
-      correlation_id: "turn-1",
+      correlation_id: turn,
       interface_id: "discord-private",
       agent_id: "default",
       audience_id: "conversation",
@@ -238,24 +239,26 @@ async function inbox(url: string, home: string, input: string) {
   expect(response.status).toBe(202);
 }
 
-/** Waits until the held turn's model request runs. */
-async function answering(url: string) {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const activity = await fetch(`${url}/v1/turns/turn-1/activity?interface_id=discord-private`, {
+const outcomePath = (turn: string) => `/v1/runtime/turns/${turn}/outcome`;
+
+async function answering(url: string, core: FakeCore, turn = "turn-1") {
+  for (let attempt = 0; attempt < 800; attempt += 1) {
+    if (core.received.some((call) => call.path === outcomePath(turn))) return "settled";
+    const activity = await fetch(`${url}/v1/turns/${turn}/activity?interface_id=discord-private`, {
       headers: { authorization: `Bearer ${token}` },
     });
     if (
       activity.status === 200 &&
       Parse(TurnActivitySchema, await activity.json()).phase === "model"
     )
-      return;
+      return "model";
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("the turn never reached its model request");
+  throw new Error(`${turn} never reached its model request`);
 }
 
-async function outcomes(core: FakeCore) {
-  const path = "/v1/runtime/turns/turn-1/outcome";
+async function outcomes(core: FakeCore, turn = "turn-1") {
+  const path = outcomePath(turn);
   for (
     let attempt = 0;
     attempt < 400 && !core.received.some((call) => call.path === path);
@@ -266,7 +269,7 @@ async function outcomes(core: FakeCore) {
   return core.received.filter((call) => call.path === path);
 }
 
-it("gives up a message whose answer keeps killing the runtime, and fails its turn", async () => {
+it("gives up a message whose answer keeps killing the runtime, and answers the one queued behind it", async () => {
   const core: FakeCore = await startFakeCore();
   cleanups.push(() => core.close());
   const { home, args, url } = await installation(
@@ -275,22 +278,33 @@ it("gives up a message whose answer keeps killing the runtime, and fails its tur
   );
   await mkdir(join(home, "resources"));
   await configure(args);
-  for (let run = 0; run < 5; run += 1) {
-    const started = start(args);
-    await started.ready;
-    if (run === 0) await inbox(url, home, `hold ${join(home, "never")}`);
-    await answering(url);
+  const release = join(home, "release");
+  let started = start(args);
+  await started.ready;
+  await inbox(url, home, `hold ${join(home, "never")}`);
+  await inbox(url, home, `hold ${release}`, "turn-2");
+  let cutOffs = 0;
+  const crash = async () => {
     started.child.kill("SIGKILL");
     await once(started.child, "close");
-  }
-  await start(args).ready;
-  const [outcome, ...more] = await outcomes(core);
+    cutOffs += 1;
+    started = start(args);
+    await started.ready;
+  };
+  while ((await answering(url, core)) === "model") await crash();
+  expect(await answering(url, core, "turn-2")).toBe("model");
+  await crash();
+  expect(cutOffs).toBeGreaterThanOrEqual(DEFAULT_RESTART_LIMIT);
+  await writeFile(release, "");
+  for (const posted of await outcomes(core))
+    expect(posted.body).toMatchObject({
+      outcome: "failed",
+      explanation: "This message stopped the agent's runtime several times, so it was given up.",
+    });
+  const [answered, ...more] = await outcomes(core, "turn-2");
   expect(more).toEqual([]);
-  expect(outcome?.body).toMatchObject({
-    outcome: "failed",
-    explanation: "This message stopped the agent's runtime several times, so it was given up.",
-  });
-}, 30_000);
+  expect(answered?.body).toMatchObject({ outcome: "answered" });
+}, 90_000);
 
 it("finishes a turn cut off by SIGKILL once it runs again, and settles it once", async () => {
   const core: FakeCore = await startFakeCore();
@@ -305,7 +319,7 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
   const first = start(args);
   await first.ready;
   await inbox(url, home, `hold ${marker}`);
-  await answering(url);
+  expect(await answering(url, core)).toBe("model");
   first.child.kill("SIGKILL");
   await once(first.child, "close");
   await start(args).ready;

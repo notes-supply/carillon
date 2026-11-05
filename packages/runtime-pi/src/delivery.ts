@@ -59,7 +59,14 @@ export function isDeliveryInput(value: unknown): value is DeliveryInput {
 }
 
 type DeliveryState =
-  | { readonly phase: "wait" }
+  | {
+      readonly phase: "wait";
+      /**
+       * How often crashes cut the wait off. Recording it is progress, so the
+       * run's crashes, which end the run, never end its delivery.
+       */
+      readonly cutOff?: number;
+    }
   | {
       readonly phase: "post";
       readonly outcome: TurnOutcome;
@@ -81,8 +88,6 @@ export interface DeliveryHost {
   released(turn: string): void;
 }
 
-/** Why a message whose run crashed the runtime too often was given up on. */
-export const CRASHED = "carillon_crashed";
 const LONGEST_BACKOFF_MS = 60_000;
 /** What is posted once in place of an outcome core refused for good. */
 const UNDELIVERABLE: TurnOutcome = {
@@ -105,6 +110,14 @@ export function deliveryTask(host: DeliveryHost) {
     initial: () => ({ phase: "wait" }),
     phases: {
       wait: async (task, runtime, context) => {
+        const restarts = task.restarts ?? 0;
+        if (restarts > 0) {
+          const cutOff = (task.state.checkpoint.cutOff ?? 0) + restarts;
+          await runtime.commit(
+            () => ({ status: "running", checkpoint: { phase: "wait", cutOff } }),
+            context,
+          );
+        }
         const settled = await host.wait(task.input.submission, context);
         if (settled.status === "unanswered" && settled.detail !== undefined)
           console.error(
@@ -179,7 +192,8 @@ async function decide(
         return { outcome: "stopped" };
       case "no_model":
         return { outcome: "failed", explanation: await modelMissing(tx, input), ...activity };
-      case CRASHED:
+      case "restart_limit":
+      case "interrupted":
         return {
           outcome: "failed",
           explanation:
