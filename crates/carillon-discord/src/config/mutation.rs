@@ -142,9 +142,6 @@ impl FileChange {
     }
 }
 
-/// `answered` in the order `settings` lists them, each answer taking the
-/// first place no earlier answer took, so a repeated one keeps its places.
-/// New answers follow, in their own order.
 fn in_order_of<T>(answered: Vec<T>, settings: &[T], same: impl Fn(&T, &T) -> bool) -> Vec<T> {
     let mut taken = vec![false; settings.len()];
     let mut placed: Vec<(usize, T)> = answered

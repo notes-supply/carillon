@@ -157,7 +157,7 @@ fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> b
     let mut unplaced = String::new();
     for index in steps.removed_from_the_end {
         let removed = file.remove(index);
-        let section = section_above(raw(removed.decor().prefix()));
+        let section = section_comments(raw(removed.decor().prefix()));
         match file.get_mut(index) {
             Some(next) => prepend(next, section),
             None => unplaced.insert_str(0, section),
@@ -193,9 +193,7 @@ fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> b
     true
 }
 
-/// The comments a blank line separates from what follows them, through that
-/// blank line: they head a section of the file, not the element below.
-fn section_above(prefix: &str) -> &str {
+fn section_comments(prefix: &str) -> &str {
     let end = prefix
         .split_inclusive('\n')
         .scan(0, |end, line| {
@@ -282,7 +280,7 @@ fn left_by_removal(removed_prefix: &str, following: &str, first: bool, last: boo
     } else if end_of_own_line.is_empty() && !last {
         removed_prefix.to_owned()
     } else {
-        format!("{end_of_line_before}{}{rest}", section_above(own_lines))
+        format!("{end_of_line_before}{}{rest}", section_comments(own_lines))
     }
 }
 
@@ -368,8 +366,7 @@ fn indent(prefix: &str) -> &str {
     prefix.rsplit('\n').next().unwrap_or_default()
 }
 
-/// Whether a comment is on `key`'s line, above it or within its table. A
-/// comment on the lines above a key is in the key's decor.
+/// A comment on the lines above a key is in the key's decor.
 fn commented(table: &dyn TableLike, key: &str) -> bool {
     let Some((key, item)) = table.get_key_value(key) else {
         return false;

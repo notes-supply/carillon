@@ -16,8 +16,6 @@ activation = "always"
 conversation = "channel"
 "#;
 
-/// Writes `owned`, then `change` of it and the file's settings again,
-/// returning the file after the change and after its undo.
 fn change_and_undo(
     owned: &str,
     change: impl FnOnce(&mut DiscordConfig),
