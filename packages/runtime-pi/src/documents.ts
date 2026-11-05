@@ -37,6 +37,21 @@ export const ConversationInfo = defineDoc<{
   checkpointWhen: () => true,
 });
 
+/**
+ * The files the agent attached in a conversation that no answer has taken
+ * yet, in order, each with the newest entry of the conversation when it
+ * was attached.
+ */
+export const Attached = defineDoc<{ files: { path: string; at: number }[] }>({
+  kind: "carillon.attached",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ files: [] }),
+  checkpointWhen: () => true,
+});
+
 /** Each turn core handed over, by turn ID: the task that settles it, once it has one. */
 export const Turns = defineDocFamily<{ task?: TaskId }, null>({
   kind: "carillon.turn",

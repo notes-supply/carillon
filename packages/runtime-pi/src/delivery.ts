@@ -27,6 +27,7 @@ import { diagnostic, displayableExplanation, redactCredentials } from "@carillon
 import { noModel } from "@carillon/runtime/settings";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import { takeAttached } from "./answers.ts";
 import { ConversationInfo, MESSAGE } from "./documents.ts";
 
 /**
@@ -166,7 +167,8 @@ export function deliveryTask(host: DeliveryHost) {
 /**
  * The turn's outcome from how its message settled. Steers placed into one
  * run settle with that run's answer; the newest of them carries it, and
- * the others were steered into it.
+ * the others were steered into it. An answer takes the files attached
+ * before it.
  */
 async function decide(
   tx: Tx,
@@ -213,9 +215,10 @@ async function decide(
     message.stopReason === "length"
       ? `${text}\n\n[The answer was cut off at the model's output limit.]`
       : text;
-  return output.trim().length === 0
-    ? { outcome: "failed", explanation: "The model gave no answer.", ...activity }
-    : { outcome: "answered", output, ...activity };
+  if (output.trim().length === 0)
+    return { outcome: "failed", explanation: "The model gave no answer.", ...activity };
+  const files = await takeAttached(tx, input.conversation, settled.answer);
+  return { outcome: "answered", output, ...(files.length === 0 ? {} : { files }), ...activity };
 }
 
 /** Whether a later message was placed into the run before its answer. */

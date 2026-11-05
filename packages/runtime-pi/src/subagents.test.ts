@@ -123,7 +123,7 @@ it("leaves a background subagent working when the answer that started it is stop
   });
 });
 
-it("offers a subagent neither subagents nor schedules", async () => {
+it("offers a subagent neither subagents, schedules nor attach", async () => {
   const offered: string[][] = [];
   const offer = (context: TranscriptContext) =>
     offered.push(
@@ -151,6 +151,7 @@ it("offers a subagent neither subagents nor schedules", async () => {
   const [parent, child] = offered;
   expect(parent).toContain("subagent");
   expect(parent).toContain("schedule");
+  expect(parent).toContain("attach");
   expect(child).toEqual([]);
 });
 

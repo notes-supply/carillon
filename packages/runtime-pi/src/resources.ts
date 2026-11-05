@@ -28,6 +28,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { ATTACH } from "./answers.ts";
 import { attachmentSection } from "./attachments.ts";
 import { ConversationInfo } from "./documents.ts";
 
@@ -197,8 +198,8 @@ export async function loadSnapshot(
 
 /**
  * The runtime's own extension: the latest snapshot's prompt, the agent's
- * workspace and conversation store, and where attached files are kept once
- * a conversation has any.
+ * workspace and conversation store, where attached files are kept once a
+ * conversation has any, and `attach`, which adds a file to the agent's answer.
  */
 export function carillonExtension(
   latest: () => Snapshot | undefined,
@@ -208,6 +209,7 @@ export function carillonExtension(
 ): Extension {
   return defineExtension({
     name: CARILLON,
+    tools: [ATTACH],
     sections: [
       section("system", () => latest()?.prompt.system, { tag: false }),
       section("project_context", () => latest()?.prompt.context),

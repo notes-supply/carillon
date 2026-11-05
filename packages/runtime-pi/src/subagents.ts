@@ -22,6 +22,7 @@ import {
   type Tx,
 } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { ATTACH } from "./answers.ts";
 import { recordCutOffs } from "./delivery.ts";
 import { ConversationInfo } from "./documents.ts";
 import type { OpeningTask } from "./opening.ts";
@@ -169,7 +170,7 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
 /**
  * The child conversation `owner` owns, created once as a copy of the
  * agent of `parent`, its conversation, that cannot start subagents or
- * schedules. It serves the parent's Carillon conversation, so tools such as
+ * schedules, or attach files to an answer. It serves the parent's Carillon conversation, so tools such as
  * Discord's find its interface and origin.
  */
 async function childOf(tx: Tx, owner: TaskId, parent: ConversationId): Promise<ConversationId> {
@@ -178,6 +179,7 @@ async function childOf(tx: Tx, owner: TaskId, parent: ConversationId): Promise<C
   const created = await tx.createConversation({ ownership: { kind: "task", taskId: owner } });
   await configure(tx, created.id, {
     extensions: { remove: [{ name: SUBAGENTS }, { name: SCHEDULES }] },
+    tools: { remove: [ATTACH] },
   });
   Object.assign(
     await tx.doc(ConversationInfo, created.id),

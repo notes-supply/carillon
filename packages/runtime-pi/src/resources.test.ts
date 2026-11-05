@@ -144,8 +144,9 @@ it("applies a toggled extension from the next request of a conversation", async 
   await agent.outcome("turn-2");
   const tools = (messages: readonly Message[] = []) =>
     systems(messages).flatMap((message) => (message.toolsAdded ?? []).map((tool) => tool.name));
-  expect(tools(requests[0])).toEqual([]);
-  expect(tools(requests[1])).toEqual(["echo"]);
+  // The runtime's own `attach` is there whatever the settings select.
+  expect(tools(requests[0])).toEqual(["attach"]);
+  expect(tools(requests[1])).toEqual(["attach", "echo"]);
 });
 
 it("loads a user extension its snapshot lists, also for an answer resumed after a restart", async () => {
