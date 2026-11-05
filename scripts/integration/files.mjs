@@ -8,6 +8,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+/** Answers with files go to a channel of their own, apart from the conversations counted elsewhere. */
+const CHANNEL = "305";
+
 /** Returns the turn of the message whose attachments core captured. */
 export async function testFiles(harness) {
   const turn = await testAttachments(harness);
@@ -129,7 +132,8 @@ async function postCoreEvent({ basePort, credentialValue }, eventId, content, at
  * of each with the answer, and the Discord provider composes the messages
  * that send them from those copies, checked against their digests.
  */
-async function testAnswerFiles({ installation, workspace, simulate }) {
+async function testAnswerFiles({ installation, workspace, simulateRoute }) {
+  const simulate = (eventId, content) => simulateRoute(eventId, CHANNEL, null, content);
   const store = join(installation, "state/attachments");
   const chart = join(workspace, "chart.png");
   const talk = join(workspace, "talk.bin");
@@ -176,7 +180,7 @@ async function testAnswerFilesOutlastRestarts(harness) {
   await stop("discord");
   const report = join(workspace, "report.pdf");
   await writeFile(report, "%PDF-1.7 report");
-  const pending = await submitCoreEvent("answer-file-retry", `attach ${report}`);
+  const pending = await submitCoreEvent("answer-file-retry", `attach ${report}`, CHANNEL);
   const answered = await waitForTurn(pending.turn_id, "completed", "pending");
   await rm(report);
   await restart("core");

@@ -243,7 +243,7 @@ try {
     workspace,
     event,
     requestSimulation,
-    simulate,
+    simulateRoute,
     credential,
     credentialValue,
     submitCoreEvent,
