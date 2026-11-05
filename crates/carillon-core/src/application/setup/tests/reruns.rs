@@ -190,10 +190,6 @@ fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Re
     Ok(())
 }
 
-/// Kept T3 settings over new state leave the agents' models behind, since
-/// those live in the runtime's settings ledger: setup asks the model of each
-/// agent whose ledger has none, on the saved server with the saved token,
-/// and configures it with its saved project.
 #[test]
 fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -256,9 +252,6 @@ fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Resul
     Ok(())
 }
 
-/// A registry carried from another installation, without its state, gets a
-/// new database and expects the providers this release bundles. One with a
-/// database is left as it is.
 #[test]
 fn a_carried_registry_without_state_starts_fresh_on_this_release() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

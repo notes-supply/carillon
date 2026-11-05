@@ -94,8 +94,8 @@ struct Drained {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Create a new installation, with Carillon's assistant on Pi. Over a
-    /// `carillon.toml` carried from another installation, create only the
-    /// database it lacks, for this release's bundled providers.
+    /// `carillon.toml` carried from another installation, create the database
+    /// it lacks and expect the providers this release bundles.
     Init {
         #[arg(long)]
         workspace: PathBuf,

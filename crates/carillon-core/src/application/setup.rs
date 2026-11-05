@@ -39,8 +39,8 @@ pub(super) struct Options {
     pub runtimes: Vec<Runtime>,
 }
 
-/// What a T3 server offers, as `carillon-runtime-t3 discover` prints it;
-/// offered to an agent, with the model the agent uses.
+/// What a T3 server offers, and, offered to an agent, the model the agent
+/// uses, as `carillon-runtime-t3 discover` prints them.
 #[derive(Deserialize)]
 struct Offer {
     projects: Vec<Project>,
@@ -288,9 +288,8 @@ fn choose_pi_models(
     Ok(())
 }
 
-/// `carillon init`: a new installation at `home` with Carillon's assistant
-/// on Pi in `workspace`, or, over a `carillon.toml` carried from another
-/// installation, the fresh start it lacks. Returns the registry's path.
+/// `carillon init` at `home`, with the assistant in `workspace`. Returns the
+/// registry's path.
 pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
     let path = home.join("carillon.toml");
     if !path.exists() {
@@ -307,11 +306,10 @@ pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<Path
 }
 
 /// Starts an installation without a database, as one set up with another's
-/// carried configuration, on this release: its registry expects the
-/// providers this release bundles at their versions here, edited in place,
-/// and it gets a new database. Core itself never creates one. An
-/// installation with a database, in whatever format, is left as it is. The
-/// caller holds the maintenance lock.
+/// carried configuration, on this release: its registry expects the versions
+/// of the providers this release bundles, and it gets the database core
+/// itself never creates. An installation with a database, in whatever
+/// format, is left as it is. The caller holds the maintenance lock.
 fn start_fresh(home: &Path) -> Result<()> {
     let config_path = home.join("carillon.toml");
     let database = LoadedConfig::load(&config_path)?
@@ -523,8 +521,8 @@ fn configure_agents(
 }
 
 /// Has the T3 runtime configure each T3 agent whose settings ledger has no
-/// model, as kept settings over new state leave it, with its saved project
-/// and the default model chosen for it. An agent with a model keeps it.
+/// model, as after kept settings over a new database, with its saved project
+/// and the default model chosen for it.
 fn choose_kept_models(
     home: &Path,
     server: &Server<'_>,
