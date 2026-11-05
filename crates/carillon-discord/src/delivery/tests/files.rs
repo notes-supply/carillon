@@ -9,7 +9,10 @@ use carillon_protocol::model::AnswerFile;
 use sha2::{Digest as _, Sha256};
 
 use super::{super::files::compose, *};
-use crate::delivery::require_upload_limit;
+use crate::{
+    conversations::{Author, IncomingMessage, Reference, ReferenceKind, admit_message},
+    delivery::require_upload_limit,
+};
 
 /// A message Discord received: its text and each file's name and bytes.
 #[derive(Debug, PartialEq, Eq)]
@@ -150,11 +153,13 @@ fn uploading_core(
         .fallback(|| async { StatusCode::NO_CONTENT })
 }
 
-/// Runs the delivery loop against `claims` with core's copies in `store`,
-/// Discord failing the message numbered `refused`, until its reactions end.
+/// Runs the delivery loop against `claims` with core's copies in `store`
+/// and the provider's records in `records`, Discord failing the message
+/// numbered `refused`, until its reactions end.
 async fn upload_refusing(
     claims: Vec<Option<Delivery>>,
     store: &FilePath,
+    records: &FilePath,
     refused: Option<usize>,
 ) -> anyhow::Result<Uploaded> {
     let uploaded = Arc::new(tokio::sync::Mutex::new(Uploaded::default()));
@@ -166,13 +171,12 @@ async fn upload_refusing(
     let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
-    let records = tempfile::tempdir()?;
     let ended = tokio::time::timeout(
         Duration::from_secs(10),
         delivery_loop(
             core_client(format!("http://{address}"))?,
             reactions.clone(),
-            participation(records.path())?,
+            participation(records)?,
             store.to_path_buf(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -191,9 +195,11 @@ async fn upload_refusing(
     Ok(std::mem::take(&mut *uploaded.lock().await))
 }
 
-/// As [`upload_refusing`], with Discord taking every message.
+/// As [`upload_refusing`], with Discord taking every message and records
+/// nothing reads.
 async fn upload(claims: Vec<Option<Delivery>>, store: &FilePath) -> anyhow::Result<Uploaded> {
-    upload_refusing(claims, store, None).await
+    let records = tempfile::tempdir()?;
+    upload_refusing(claims, store, records.path(), None).await
 }
 
 /// Keeps `bytes` in `store` as core does, as file `ordinal` of a capture.
@@ -298,6 +304,49 @@ async fn files_past_a_messages_limits_follow_the_answer_once_each() -> anyhow::R
 }
 
 #[tokio::test]
+async fn a_reply_to_the_files_after_an_answer_names_the_agent_that_sent_them() -> anyhow::Result<()>
+{
+    let (store, records) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let delivery = Delivery {
+        agent_id: "code".to_owned(),
+        ..overflowing(store.path())?
+    };
+    let uploaded =
+        upload_refusing(vec![Some(delivery)], store.path(), records.path(), None).await?;
+    assert_eq!(uploaded.acks[0]["native_ref"], "901,902");
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    "code".clone_into(&mut config.routes[0].agent);
+    let reply = IncomingMessage {
+        event_id: "903".to_owned(),
+        guild_id: Some("100".to_owned()),
+        user_id: "200".to_owned(),
+        channel_id: "300".to_owned(),
+        parent_channel_id: None,
+        content: "thanks".to_owned(),
+        attachments: Vec::new(),
+        reference: Some(Reference {
+            kind: ReferenceKind::Reply,
+            author: Some(Author::Bot {
+                message_id: twilight_model::id::Id::new(902),
+            }),
+            sent_at: "2026-11-05T14:03:00+00:00".to_owned(),
+            forwarding: false,
+            content: String::new(),
+            files: vec!["10.txt".to_owned(), "11.txt".to_owned()],
+        }),
+    };
+    let restarted = participation(records.path())?;
+    let plan = admit_message(&config, &restarted, reply, serde_json::Value::Null)
+        .map_err(|failure| anyhow::anyhow!(failure.message))?
+        .context("the reply was ignored")?;
+    assert_eq!(
+        plan.quotes.concat(),
+        r#"In reply to your message, sent 2026-11-05T14:03:00+00:00, with files ["10.txt","11.txt"]:"#
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_following_message_discord_fails_leaves_the_answer_uncertain_and_sends_nothing_again()
 -> anyhow::Result<()> {
     let store = tempfile::tempdir()?;
@@ -305,7 +354,9 @@ async fn a_following_message_discord_fails_leaves_the_answer_uncertain_and_sends
     let uncertain = discord_config(DiscordActivation::Always, DiscordConversation::Channel)
         .uncertain_emoji
         .clone();
-    let uploaded = upload_refusing(vec![Some(delivery)], store.path(), Some(2)).await?;
+    let records = tempfile::tempdir()?;
+    let uploaded =
+        upload_refusing(vec![Some(delivery)], store.path(), records.path(), Some(2)).await?;
     let counts = uploaded
         .messages
         .iter()

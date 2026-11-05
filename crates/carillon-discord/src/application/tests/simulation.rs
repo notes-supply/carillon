@@ -19,6 +19,8 @@ struct SimulatedCore {
     capturing: HashMap<String, (usize, carillon_protocol::model::ExternalEvent)>,
     /// An event whose next submission core receives but whose answer is lost.
     lose: Option<String>,
+    /// The files core keeps with every answer, in the installation's store.
+    files: Vec<carillon_protocol::model::AnswerFile>,
 }
 
 type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
@@ -71,7 +73,7 @@ impl SimulatedCore {
                     turn_id: format!("turn-{}", event.event_id),
                     accepted_at: 1_790_000_000,
                 },
-                files: Vec::new(),
+                files: self.files.clone(),
             },
             false,
         ));
@@ -799,5 +801,77 @@ async fn a_voice_message_reaches_core_as_its_unconverted_audio_file() -> anyhow:
     assert_eq!(files[0].name, "voice-message.ogg");
     assert_eq!(files[0].content_type.as_deref(), Some("audio/ogg"));
     assert_eq!(core.staged, vec![vec![audio]]);
+    Ok(())
+}
+
+/// A forward's file reaches core as the person's; what Discord would send
+/// back is the answer's own file, read from core's copy.
+#[tokio::test]
+async fn a_forwarded_file_goes_to_core_and_only_the_answers_file_comes_back() -> anyhow::Result<()>
+{
+    use sha2::{Digest as _, Sha256};
+    let directory = tempfile::tempdir()?;
+    let staging = directory.path().join("staging");
+    let notes = b"forwarded notes".to_vec();
+    let (cdn, _log) = serve_cdn(HashMap::from([(
+        "/attachments/300/700/notes.txt".to_owned(),
+        Serve::Bytes(notes.clone()),
+    )]))
+    .await?;
+    let (core_address, core) = simulated_core(staging.clone()).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    state.downloads = Arc::new(
+        Downloads::open(staging, state.settings.current().attachments)?.with_fixture_cdn(cdn),
+    );
+    let chart = b"\x89PNG chart";
+    let kept = "0190a6e0-0000-7000-8000-000000000001/0";
+    let store = carillon_installation::config::attachment_store(&state.installation.value.data_dir);
+    std::fs::create_dir_all(store.join(kept).parent().context("no capture")?)?;
+    std::fs::write(store.join(kept), chart)?;
+    let digest = hex::encode(Sha256::digest(chart));
+    core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.files =
+        vec![carillon_protocol::model::AnswerFile {
+            path: kept.to_owned(),
+            name: "chart.png".to_owned(),
+            source: "/home/owner/out/chart.png".to_owned(),
+            size: chart.len().try_into()?,
+            sha256: digest.clone(),
+        }];
+    let forward = json!({
+        "event_id": "1", "guild_id": "100", "user_id": "200", "channel_id": "300",
+        "content": "",
+        "attachments": [attachment(cdn, "700", "notes.txt", notes.len().try_into()?)],
+        "reference": {
+            "kind": "forward", "sent_at": "2026-11-04T09:00:00+00:00", "files": ["notes.txt"],
+        },
+    });
+    let (status, body) = simulate_message(&state, &forward).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["messages"],
+        json!([{"content": "answer", "files": [["chart.png", digest]]}])
+    );
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let [event] = core.events.as_slice() else {
+        anyhow::bail!("expected the forward to be accepted");
+    };
+    assert_eq!(
+        event.content,
+        r#"Forwarding a message, sent 2026-11-04T09:00:00+00:00, with files ["notes.txt"]:"#
+    );
+    let files = &event.attachments.as_ref().context("no files")?.files;
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>(),
+        ["notes.txt"]
+    );
+    assert_eq!(core.staged, [vec![notes]]);
     Ok(())
 }

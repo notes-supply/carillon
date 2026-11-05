@@ -247,7 +247,7 @@ pub(super) fn quote(mut line: String, files: &[String], content: &str) -> String
         .chain(
             opening
                 .replace("\r\n", "\n")
-                .split(LINE_BREAKS)
+                .split_terminator(LINE_BREAKS)
                 .map(|quoted| format!("> {quoted}").trim_end().to_owned()),
         )
         .collect::<Vec<_>>()

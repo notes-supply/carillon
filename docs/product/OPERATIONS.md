@@ -494,7 +494,8 @@ An allowlisted person can message the bot directly. Their direct messages
 are one rolling conversation with the agent the settings name for direct
 messages ([Settings](#settings)); there are no threads. Messages from anyone
 else, or while no agent is named, are dropped before core sees them, as in
-an unrouted channel. Files and reactions work as in a channel.
+an unrouted channel. Files, the person's and those the agent attaches to its
+answers, and reactions work as in a channel.
 
 An agent can also write to an allowlisted person first with its
 [Discord tools](#agent-discord-tools), from any of its conversations, such
@@ -542,14 +543,14 @@ quoted can pass for Carillon's line, and the quote keeps the message's first
 300 characters. A person is named by their display name, as a JSON string,
 and their Discord user ID: `a message from "Ada" (Discord user
 1302543210987654322)`. A message of the bot is `your message` only when the
-agent the turn goes to had the bot send it, as an answer or with its
-Discord tools; another agent's is `a message from agent "code"`. The
-provider records which agent had the bot send each of its latest 1,000
-messages. A reply to an older message of the bot, or to one it didn't
-record, such as an activity card or a message sent with `carillon discord
-call`, is to `a message from another agent`. A message an
-agent sent with its tools from another channel says where: `sent … from
-<#1302543210987654321>`.
+agent the turn goes to had the bot send it, as an answer, the messages
+that carry its files included, or with its Discord tools; another agent's
+is `a message from agent "code"`. The provider records which agent had the
+bot send each of its latest 1,000 messages. A reply to an older message of
+the bot, or to one it didn't record, such as an activity card or a message
+sent with `carillon discord call`, is to `a message from another agent`. A
+message an agent sent with its tools from another channel says where:
+`sent … from <#1302543210987654321>`.
 
 Discord doesn't say who wrote a forwarded message, so its quote reads
 `Forwarding a message`. A forward's files arrive with it, downloaded like

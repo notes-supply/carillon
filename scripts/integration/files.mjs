@@ -15,6 +15,7 @@ const CHANNEL = "305";
 export async function testFiles(harness) {
   const turn = await testAttachments(harness);
   await testAnswerFiles(harness);
+  await testDirectMessageFiles(harness);
   await testAnswerFilesOutlastRestarts(harness);
   return turn;
 }
@@ -168,6 +169,31 @@ async function testAnswerFiles({ installation, workspace, simulateRoute }) {
   assert.ok(
     refused.delivery.content.includes(`There is no file at ${missing}.`),
     refused.delivery.content,
+  );
+}
+
+/** An answer in a person's direct messages carries its files to them too. */
+async function testDirectMessageFiles({ installation, workspace, event, requestSimulation }) {
+  const notes = join(workspace, "dm-notes.txt");
+  await writeFile(notes, "for your eyes");
+  const response = await requestSimulation(
+    event("dm-answer-files", null, "200", "700", null, `attach ${notes}`),
+  );
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  const { conversation_id: conversation, delivery, messages } = JSON.parse(body);
+  assert.equal(conversation, "discord-dm-700");
+  assert.equal(delivery.target_id, "700");
+  assert.equal(delivery.agent_id, "assistant");
+  assert.deepEqual(
+    delivery.files.map(({ name, source }) => [name, source]),
+    [["dm-notes.txt", notes]],
+  );
+  const store = join(installation, "state/attachments");
+  assert.equal(await readFile(join(store, delivery.files[0].path), "utf8"), "for your eyes");
+  assert.deepEqual(
+    messages.map(({ files }) => files),
+    [[["dm-notes.txt", sha256("for your eyes")]]],
   );
 }
 
