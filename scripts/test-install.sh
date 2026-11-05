@@ -33,6 +33,7 @@ for artifact in \
   lib/carillon_discord_module.wasm \
   lib/examples/card-colours.wasm \
   lib/carillon-discord-SKILL.md \
+  lib/pi-skills/conversation-history/SKILL.md \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \
   bin/photon_rs_bg.wasm \

@@ -21,9 +21,13 @@ function lanesOf(path) {
   if (path === ".oxlintrc.json" || path === "knip.json") return ["ts"];
   // Read only by CodeRabbit's own review.
   if (path === ".coderabbit.yaml") return [];
-  // The Discord skill ships in the release; Rust reads protocol and
+  // The Discord and Pi skills ship in the release; Rust reads protocol and
   // operations fixtures, and core embeds each runtime's package version.
-  if (path === "packages/discord-pi/skill/SKILL.md") return ["ts", "release"];
+  if (
+    path === "packages/discord-pi/skill/SKILL.md" ||
+    path.startsWith("packages/runtime-pi/skills/")
+  )
+    return ["ts", "release"];
   if (/^packages\/(protocol|discord-pi)\/fixtures\//u.test(path)) return ["rust", "ts", "release"];
   if (/^packages\/runtime-(pi|t3)\/package\.json$/u.test(path)) return ["rust", "ts", "release"];
   // The release's own licence and notices.

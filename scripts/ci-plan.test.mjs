@@ -38,8 +38,13 @@ it("follows inputs across languages", () => {
   ]);
   expect(lanes(["packages/runtime-pi/package.json"])).toEqual(["lint", "release", "rust", "ts"]);
   expect(lanes(["packages/runtime-t3/package.json"])).toEqual(["lint", "release", "rust", "ts"]);
-  // The shipped skill is documentation the release carries.
+  // The shipped skills are documentation the release carries.
   expect(lanes(["packages/discord-pi/skill/SKILL.md"])).toEqual(["lint", "release", "ts"]);
+  expect(lanes(["packages/runtime-pi/skills/conversation-history/SKILL.md"])).toEqual([
+    "lint",
+    "release",
+    "ts",
+  ]);
   // TypeScript formatting covers JSON anywhere.
   expect(lanes(["crates/carillon-discord-module/fixtures/cards.json"])).toEqual([
     "lint",

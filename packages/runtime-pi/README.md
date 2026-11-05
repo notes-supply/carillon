@@ -97,7 +97,10 @@ extensions apply to the agent's next requests, also for messages admitted
 earlier. Each snapshot is read once:
 
 - `SYSTEM.md` as the prompt's base, `AGENTS.md` and `CLAUDE.md` from the
-  snapshot and the workspace's parents, and the snapshot's `skills/`;
+  snapshot and the workspace's parents, and the snapshot's `skills/` beside
+  the runtime's own in [`skills/`](skills), which one of the same name
+  replaces. The prompt also names the agent's store, which the built-in
+  `conversation-history` skill reads;
 - `settings.json`, whose unknown settings are refused:
 
   ```json

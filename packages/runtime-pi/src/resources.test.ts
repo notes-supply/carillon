@@ -10,8 +10,10 @@ import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
+import { BUILT_IN_SKILLS } from "./resources.ts";
 
 const fixtures: Fixture[] = [];
 afterEach(async () => {
@@ -105,6 +107,28 @@ it("renders a snapshot's prompt once, and only what an edit changed", async () =
   expect(delta["system"]).toBe("You are the installation's careful assistant.");
   expect(delta["skills"]).toContain(edited);
   expect(delta).not.toHaveProperty("cwd");
+});
+
+it("offers every agent the conversation history skill and its store, unless it has its own", async () => {
+  const { requests, answers } = recording(2);
+  const agent = await fixture({ builtIns: [{ ...echo, name: "coding" }], answers });
+  const coding = { "settings.json": JSON.stringify({ extensions: ["coding"] }) };
+  const own = await agent.snapshot({
+    ...coding,
+    "skills/conversation-history/SKILL.md":
+      "---\nname: conversation-history\ndescription: The agent's own.\n---\nAsk the archive.",
+  });
+  await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(coding) });
+  await agent.ask("turn-2", "again", { resource_root: own, audience_id: "elsewhere" });
+  const [builtIn = {}, replaced = {}] = requests.map(sections);
+  expect(builtIn["skills"]).toContain(
+    fileURLToPath(new URL("conversation-history/SKILL.md", BUILT_IN_SKILLS)),
+  );
+  expect(builtIn["conversation_store"]).toBe(
+    `<conversation_store>\n${join(agent.componentDirectory, "agents", "default.sqlite")}\n</conversation_store>`,
+  );
+  expect(replaced["skills"]).toContain(join(own, "skills/conversation-history/SKILL.md"));
+  expect(replaced["skills"]).not.toContain(fileURLToPath(BUILT_IN_SKILLS));
 });
 
 it("applies a toggled extension from the next request of a conversation", async () => {

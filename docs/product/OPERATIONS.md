@@ -331,6 +331,17 @@ received keeps the mode it arrived with.
 
 ### What Pi can do besides answer
 
+Pi can answer from its own history, such as what you discussed last week
+about a topic or in a thread, and how many tokens it used this week. With
+`coding` selected, as by default, its prompt names the SQLite file it records
+conversations in, and the conversation history skill, which a release ships
+in `CARILLON_HOME/app/lib/pi-skills/`, tells it how to read that file
+read-only with `sqlite3`, or with the SQLite in Pi's own executable where
+`sqlite3` is not installed. Token counts are what the provider reported;
+the dollar figure is the model catalogue's estimate, not a bill, and a
+ChatGPT subscription is not billed per token. A skill of the same name in
+the agent's `resources` replaces it.
+
 The agent's Extensions setting selects more of Pi's built-in extensions.
 None of these is selected by default:
 
