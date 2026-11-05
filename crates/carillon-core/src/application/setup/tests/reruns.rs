@@ -190,6 +190,72 @@ fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Re
     Ok(())
 }
 
+/// Kept T3 settings over new state leave the agents' models behind, since
+/// those live in the runtime's settings ledger: setup asks the model of each
+/// agent whose ledger has none, on the saved server with the saved token,
+/// and configures it with its saved project.
+#[test]
+fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    let agent = |id: &str, name: &str| carillon_installation::config::AgentConfig {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        runtime: Runtime::T3.id().to_owned(),
+        workspace: directory.path().to_path_buf(),
+        resources: None,
+    };
+    set_agents(
+        &path,
+        vec![
+            agent("t3-notes", "T3 Code · Notes"),
+            agent("t3-other", "T3 Code · Other"),
+        ],
+    )?;
+    std::fs::write(home.join("credentials/t3.token"), "saved-token\n")?;
+    std::fs::write(
+        home.join("providers/runtime-t3.toml"),
+        "url = 'http://127.0.0.1:3999'\ntoken_file = 'credentials/t3.token'\n\
+         [agents.t3-notes]\nproject_id = 'notes'\n[agents.t3-other]\nproject_id = 'other'\n",
+    )?;
+    let models = [model("codex", "gpt", "GPT")];
+    let program = fake_t3(
+        directory.path(),
+        &serde_json::json!({"projects": [], "models": models}),
+    )?;
+    std::fs::write(
+        directory.path().join("offer-t3-other.json"),
+        serde_json::json!({"projects": [], "models": models, "value": "codex/gpt"}).to_string(),
+    )?;
+    let mut questions = Shown::answering(&["0"]);
+    set_up_t3(
+        &home,
+        &options(),
+        false,
+        &program,
+        SavedT3::Kept,
+        &mut questions,
+    )?;
+    assert_eq!(
+        questions.transcript,
+        [
+            "GPT (codex)",
+            "Which model should T3 Code · Notes use?",
+            &format!("configured {} --url", path.display()),
+        ]
+    );
+    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
+    let configured = format!(
+        "configure --config {} --url http://127.0.0.1:3999 --agent t3-notes --project notes \
+         --model codex/gpt\n  stdin: saved-token\n",
+        path.display()
+    );
+    assert!(calls.contains(&configured), "{configured}\nnot in\n{calls}");
+    assert!(!calls.contains("--agent t3-other --project"), "{calls}");
+    Ok(())
+}
+
 #[test]
 fn a_carried_registry_without_state_gets_a_new_database() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
