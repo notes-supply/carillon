@@ -34,6 +34,11 @@ export interface FakeCore {
    * released: as if the caller stopped before it heard them.
    */
   stall(path: string): { readonly reached: Promise<void>; release(): void };
+  /**
+   * Holds POSTs to `path` before core acts on them, until released, and
+   * then acts on those whose caller still waits: as if core were slow.
+   */
+  delay(path: string): { arrived(): number; release(): void };
   close(): Promise<void>;
 }
 
@@ -55,10 +60,17 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
     return known;
   };
   const stalls = new Map<string, { reached: () => void; released: Promise<void> }>();
+  const delays = new Map<string, { arrived: number; released: Promise<void> }>();
   const server = createServer((request, response) => {
     void respond(request, response);
   });
   async function respond(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const delay = request.method === "POST" ? delays.get(request.url ?? "/") : undefined;
+    if (delay !== undefined) {
+      delay.arrived += 1;
+      await delay.released;
+      if (request.socket.destroyed) return;
+    }
     const [status, body] = await answer(request);
     const stall = stalls.get(request.url ?? "/");
     if (stall !== undefined) {
@@ -152,6 +164,18 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
         reached: reached.promise,
         release() {
           stalls.delete(path);
+          released.resolve();
+        },
+      };
+    },
+    delay(path) {
+      const released = Promise.withResolvers<void>();
+      const delay = { arrived: 0, released: released.promise };
+      delays.set(path, delay);
+      return {
+        arrived: () => delay.arrived,
+        release() {
+          delays.delete(path);
           released.resolve();
         },
       };

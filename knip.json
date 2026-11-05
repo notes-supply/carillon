@@ -4,6 +4,9 @@
   "workspaces": {
     ".": {
       "entry": ["scripts/*.mjs"]
+    },
+    "packages/runtime-pi": {
+      "entry": ["src/crash-worker.ts"]
     }
   }
 }
