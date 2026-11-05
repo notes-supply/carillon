@@ -296,19 +296,24 @@ and the [module](#discord-module) apply live. The guild, bot user, bot token fil
 settings it was admitted with. While the provider runs, it is the only
 program that writes its settings file: setup, `carillon discord module` and
 route changes send their change to it, and it writes and serves the file.
-It writes only the values a change makes differ, each in its place, so the
-file keeps its comments, its order, its line endings, a missing final
-newline and the defaults it leaves unstated. Routes are matched by channel
-and users by ID, each keeping its line and comments. A removed one goes with
-its line and the comments above it, except comments a blank line sets off;
-one that shares its line with another goes alone. Setup answers that list
-them in another order change nothing, and new ones are added at the end. A
-changed string keeps its single quotes when the new value fits in them,
-holding no single quote or line break. Other changed values are written in
-their plain form: a string in double quotes, in single quotes when it holds
-a `"` or a backslash but no single quote, or in `"""` when it holds a line
-break. A change and its undo leave the file byte for byte as it was, except
-that:
+It writes only the values that a change alters, each in its place. The file
+keeps its comments, its order and its line endings. A missing final newline
+stays missing, and defaults the file leaves unstated stay unstated.
+
+Routes are matched by channel and users by ID. Each keeps its line and its
+comments. A removed one goes with its line and the comments above it. Comments
+a blank line sets off from it stay. A removed one that shares its line with
+another goes alone. Setup answers that list routes or users in another order
+change nothing. New ones are added at the end.
+
+A changed string keeps its single quotes when the new value fits in them,
+which means it holds no single quote and no line break. Other changed values
+are written in their plain form. A plain string is in double quotes. It is in
+single quotes when it holds a `"` or a backslash but no single quote. It is
+in `"""` when it holds a line break.
+
+A change and its undo leave the file byte for byte as it was, except in these
+cases:
 
 - A user or route the change removed comes back without its comments, and
   setup adds it at the end of its list. In a list written over several
