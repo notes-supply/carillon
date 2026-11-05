@@ -9,8 +9,6 @@
  */
 import { createHash } from "node:crypto";
 import { open, type FileHandle } from "node:fs/promises";
-// pi-durable types tools' arguments with pi-ai's TypeBox, a later one than Carillon's.
-import { Type as ToolType } from "@earendil-works/pi-ai";
 import {
   defineExtension,
   defineTool,
@@ -315,7 +313,7 @@ function toolsOf(server: string, tools: readonly Tool[], client: McpClient): Too
       name,
       description: tool.description ?? tool.title ?? tool.name,
       // Providers take an object schema, and some refuse one without properties.
-      parameters: ToolType.Unsafe<Record<string, unknown>>({
+      parameters: Type.Unsafe<Record<string, unknown>>({
         ...tool.inputSchema,
         type: "object",
         properties: tool.inputSchema["properties"] ?? {},

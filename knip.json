@@ -6,7 +6,7 @@
       "entry": ["scripts/*.mjs"]
     },
     "packages/runtime-pi": {
-      "ignoreDependencies": ["ws"]
+      "entry": ["src/crash-worker.ts"]
     }
   }
 }

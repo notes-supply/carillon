@@ -1,11 +1,6 @@
-import {
-  fauxAssistantMessage,
-  fauxText,
-  fauxThinking,
-  fauxToolCall,
-  Type,
-} from "@earendil-works/pi-ai";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { defineExtension, defineTool, type LiveState } from "@earendil-works/pi-durable";
+import { Type } from "typebox";
 import { afterEach, expect, it } from "vitest";
 import { trackActivity } from "./activity.ts";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
@@ -133,32 +128,43 @@ it("shows a run compacting its context before it can answer", async () => {
 
 it("lists the latest running and finished calls and counts them all", () => {
   const tracker = trackActivity("/work");
-  tracker.observe({ type: "run_start", inputs: [] });
-  for (let call = 0; call < 10; call += 1)
-    tracker.observe({
-      type: "tool_execution_start",
-      toolCallId: `call-${String(call)}`,
+  const calls = Array.from({ length: 10 }, (_, call) => `call-${String(call)}`);
+  const slots = (done: number): LiveState => ({
+    tools: calls.map((callId, call) => ({
+      callId,
+      name: "bash",
+      status: call < done ? "done" : "running",
+    })),
+  });
+  tracker.update({}, [
+    fauxAssistantMessage(
+      calls.map((id, call) => fauxToolCall("bash", { command: `echo ${String(call)}` }, { id })),
+      { stopReason: "toolUse" },
+    ),
+  ]);
+  tracker.update(slots(0), []);
+  tracker.update(
+    slots(7),
+    calls.slice(0, 7).map((toolCallId) => ({
+      role: "toolResult" as const,
+      toolCallId,
       toolName: "bash",
-      args: { command: `echo ${String(call)}` },
-    });
-  for (let call = 0; call < 7; call += 1)
-    tracker.observe({
-      type: "tool_execution_end",
-      toolCallId: `call-${String(call)}`,
-      toolName: "bash",
-    });
+      content: [],
+      isError: false,
+      timestamp: 0,
+      durationMs: 12,
+    })),
+  );
   const snapshot = tracker.snapshot();
   expect(snapshot.tool_calls).toBe(10);
   expect(snapshot.running.map((call) => call.detail)).toEqual(["echo 7", "echo 8", "echo 9"]);
-  expect(snapshot.recent.map((call) => call.detail)).toEqual([
-    "echo 2",
-    "echo 3",
-    "echo 4",
-    "echo 5",
-    "echo 6",
-  ]);
-  expect(snapshot.recent.every((call) => call.ok && typeof call.duration_ms === "number")).toBe(
-    true,
+  expect(snapshot.recent).toEqual(
+    ["echo 2", "echo 3", "echo 4", "echo 5", "echo 6"].map((detail) => ({
+      tool: "bash",
+      detail,
+      ok: true,
+      duration_ms: 12,
+    })),
   );
   expect(snapshot.phase).toBe("tools");
 });

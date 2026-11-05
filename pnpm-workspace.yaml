@@ -2,15 +2,14 @@ packages:
   - packages/*
 
 catalog:
-  '@earendil-works/chord': 1.4.0
-  '@earendil-works/pi-ai': 1.4.0
-  '@earendil-works/pi-codemode': 1.4.0
-  '@earendil-works/pi-coding-agent': 1.4.0
-  '@earendil-works/pi-durable': 1.4.0
-  '@earendil-works/pi-mcp': 1.4.0
+  '@earendil-works/chord': 1.5.0
+  '@earendil-works/pi-ai': 1.5.0
+  '@earendil-works/pi-codemode': 1.5.0
+  '@earendil-works/pi-coding-agent': 1.5.0
+  '@earendil-works/pi-durable': 1.5.0
+  '@earendil-works/pi-mcp': 1.5.0
   smol-toml: 1.9.1
-  # Pi's packages pin this exact version; one copy keeps their tool schemas
-  # and ours the same type.
+  # pi-coding-agent pins this exact version, so the install keeps one copy.
   typebox: 1.3.27
   ws: 8.22.0
 
@@ -21,4 +20,17 @@ allowBuilds:
 
 # Install only releases published at least a week (10080 minutes) ago.
 minimumReleaseAge: 10080
+# The owner chose on 2026-11-05 to trust Pi 1.5.0 before it is a week old.
+# Pruning drops each entry once the lockfile moves past that version.
+minimumReleaseAgeExclude:
+  - '@earendil-works/chord@1.5.0'
+  - '@earendil-works/pi-agent-core@1.5.0'
+  - '@earendil-works/pi-ai@1.5.0'
+  - '@earendil-works/pi-codemode@1.5.0'
+  - '@earendil-works/pi-coding-agent@1.5.0'
+  - '@earendil-works/pi-durable@1.5.0'
+  - '@earendil-works/pi-mcp@1.5.0'
+  - '@earendil-works/pi-schema@1.5.0'
+  - '@earendil-works/pi-telemetry@1.5.0'
+  - '@earendil-works/pi-tui@1.5.0'
 minimumReleaseAgeExcludePrune: true

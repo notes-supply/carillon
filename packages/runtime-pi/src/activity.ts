@@ -1,23 +1,26 @@
 /**
- * What a held turn is doing, from the agent events pi-durable derives from
- * each commit of its conversation, bounded for display. Tool inputs are
- * described by the shared runtime package's deny-by-default descriptions.
- * Steers placed into a run share its activity.
+ * What a held turn is doing, from pi-durable's view of its conversation,
+ * bounded for display. Tool inputs are described by the shared runtime
+ * package's deny-by-default descriptions. Steers placed into a run share its
+ * activity.
  *
  * The model's thinking, as it streams, becomes the turn's notes: each
  * thinking block one bounded note from its beginning, never the answer.
- * A call's start is when this process saw it start, on the monotonic
- * clock, so a wall clock that steps cannot make durations wrong.
  */
 import type { Context } from "@earendil-works/chord";
-import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Models } from "@earendil-works/pi-ai";
 import {
-  watchEvents,
-  type AgentEvent,
+  AgentDoc,
+  InboxDoc,
+  LiveDoc,
   type AgentState,
   type ConversationId,
+  type ConversationView,
+  type EntryId,
   type Harness,
   type InboxItem,
+  type InboxState,
+  type LiveState,
   type SubmissionId,
 } from "@earendil-works/pi-durable";
 import {
@@ -34,126 +37,102 @@ import { commentary, describe, keepNote, toolName } from "@carillon/runtime/acti
 const RECENT_CALLS = 5;
 /** The most running calls a snapshot lists, in the order they started. */
 const RUNNING_CALLS = 8;
+/** The most of a thinking block a note reads: a note shows only its beginning. */
+const THINKING_READ = 2 * NOTE_LENGTH;
 
 export interface ActivityTracker {
-  observe(event: AgentEvent): void;
+  /** The run's live state now, with the messages appended since the last update. */
+  update(live: LiveState, appended: readonly Message[]): void;
   agent(info: AgentInfo): void;
   snapshot(): TurnActivity;
 }
+
+type Call = Pick<RunningTool, "tool" | "detail">;
 
 /** Tracks one run from its start until it ends. */
 export function trackActivity(workspace: string): ActivityTracker {
   let phase: ActivityPhase = "model";
   let headline: string | undefined;
-  let toolCalls = 0;
+  const requested = new Map<string, Call>();
   const running = new Map<string, RunningTool>();
+  const finished = new Set<string>();
   const recent: FinishedTool[] = [];
-  const idle = (): ActivityPhase => (running.size > 0 ? "tools" : "model");
-  const startedMs = new Map<string, number>();
-  /** Thinking blocks of the streaming message by content index: their text so far. */
-  let messages = 0;
-  const thinking = new Map<number, string>();
+  let answers = 0;
   const notes = new Map<string, string>();
   let agent: AgentInfo | undefined;
 
-  function think(contentIndex: number, text: string): void {
-    // A note shows a block's beginning, so only that much is kept while it streams.
-    const kept = text.slice(0, 2 * NOTE_LENGTH);
-    thinking.set(contentIndex, kept);
-    keepNote(notes, `${String(messages)}:${String(contentIndex)}`, kept);
+  const call = (name: string, args: unknown): Call => {
+    const detail = describe(name, args, workspace);
+    return { tool: toolName(name), ...(detail === undefined ? {} : { detail }) };
+  };
+
+  function think(content: readonly AssistantMessage["content"][number][]): void {
+    for (const [index, block] of content.entries())
+      if (block.type === "thinking")
+        keepNote(
+          notes,
+          `${String(answers)}:${String(index)}`,
+          block.thinking.slice(0, THINKING_READ),
+        );
+  }
+
+  function finish(callId: string, name: string, ok: boolean, durationMs?: number): void {
+    if (finished.has(callId)) return;
+    finished.add(callId);
+    const about = running.get(callId) ?? requested.get(callId) ?? { tool: toolName(name) };
+    running.delete(callId);
+    requested.delete(callId);
+    recent.push({
+      tool: about.tool,
+      ...(about.detail === undefined ? {} : { detail: about.detail }),
+      ok,
+      ...(durationMs === undefined ? {} : { duration_ms: Math.round(durationMs) }),
+    });
+    recent.splice(0, Math.max(0, recent.length - RECENT_CALLS));
   }
 
   return {
-    observe(event) {
-      switch (event.type) {
-        case "run_start":
-        case "turn_start":
-        case "auto_retry_end":
-        case "compaction_end":
-          phase = idle();
-          break;
-        case "auto_retry_start":
-          phase = "retrying";
-          break;
-        case "compaction_start":
-          if (event.blocking) phase = "compacting";
-          break;
-        case "message_start":
-          messages += 1;
-          thinking.clear();
-          break;
-        case "message_update":
-          for (const change of event.changes)
-            if (change.type === "thinking_delta")
-              think(
-                change.contentIndex,
-                `${thinking.get(change.contentIndex) ?? ""}${change.delta}`,
-              );
-            else if (
-              (change.type === "thinking_start" || change.type === "block") &&
-              change.block.type === "thinking"
-            )
-              think(change.contentIndex, change.block.thinking);
-            else if (change.type === "message")
-              for (const [index, block] of change.message.content.entries())
-                if (block.type === "thinking") think(index, block.thinking);
-          break;
-        case "message_end": {
-          const message = event.entry.model?.[0];
-          if (message?.role !== "assistant") break;
-          for (const [index, block] of message.content.entries())
-            if (block.type === "thinking") think(index, block.thinking);
+    update(live, appended) {
+      for (const message of appended) {
+        if (message.role === "assistant") {
+          think(message.content);
           const text = message.content.flatMap((block) =>
             block.type === "text" ? [block.text] : [],
           );
           headline = commentary(text.join("\n")) ?? headline;
-          break;
-        }
-        case "tool_execution_start": {
-          toolCalls += 1;
-          const detail = describe(event.toolName, event.args, workspace);
-          startedMs.set(event.toolCallId, performance.now());
-          running.set(event.toolCallId, {
-            tool: toolName(event.toolName),
-            ...(detail === undefined ? {} : { detail }),
-            started_at: Math.floor(Date.now() / 1000),
-          });
-          phase = "tools";
-          break;
-        }
-        case "tool_execution_end": {
-          const started = running.get(event.toolCallId);
-          const startedAt = startedMs.get(event.toolCallId);
-          running.delete(event.toolCallId);
-          startedMs.delete(event.toolCallId);
-          const result = event.entry?.model?.[0];
-          const failed = event.result?.isError ?? (result?.role === "toolResult" && result.isError);
-          recent.push({
-            tool: started?.tool ?? toolName(event.toolName),
-            ...(started?.detail === undefined ? {} : { detail: started.detail }),
-            ok: !failed,
-            ...(startedAt === undefined
-              ? {}
-              : { duration_ms: Math.round(performance.now() - startedAt) }),
-          });
-          recent.splice(0, Math.max(0, recent.length - RECENT_CALLS));
-          phase = idle();
-          break;
-        }
-        // Ends, writes, spend and running output say nothing a card shows.
-        case "snapshot":
-        case "run_end":
-        case "turn_end":
-        case "tool_execution_update":
-        case "inbox_update":
-        case "submission":
-        case "deferred_poll":
-        case "entry_appended":
-        case "agent_changed":
-        case "usage_changed":
-        case "task_failed":
-          break;
+          for (const block of message.content)
+            if (block.type === "toolCall")
+              requested.set(block.id, call(block.name, block.arguments));
+          answers += 1;
+        } else if (message.role === "toolResult")
+          finish(message.toolCallId, message.toolName, !message.isError, message.durationMs);
       }
+      think(live.generation?.message?.content ?? []);
+
+      const slots = [...(live.tools ?? []), ...(live.nestedTools ?? [])];
+      for (const slot of slots) {
+        if (slot.status === "running" && !running.has(slot.callId) && !finished.has(slot.callId)) {
+          const about =
+            "parentCallId" in slot
+              ? call(slot.name, slot.arguments)
+              : (requested.get(slot.callId) ?? { tool: toolName(slot.name) });
+          running.set(slot.callId, { ...about, started_at: Math.floor(Date.now() / 1000) });
+        } else if (slot.status === "done" && running.has(slot.callId)) {
+          const summary = "summary" in slot ? slot.summary : undefined;
+          finish(slot.callId, slot.name, summary?.isError === false, summary?.durationMs);
+        }
+      }
+      for (const [callId, { tool }] of running)
+        if (!slots.some((slot) => slot.callId === callId)) finish(callId, tool, false);
+
+      phase =
+        live.generation?.retry !== undefined
+          ? "retrying"
+          : live.compactions?.some((compaction) => compaction.blocking) === true
+            ? "compacting"
+            : running.size > 0
+              ? "tools"
+              : "model";
     },
     agent(info) {
       agent = info;
@@ -164,7 +143,7 @@ export function trackActivity(workspace: string): ActivityTracker {
         ...(headline === undefined ? {} : { headline }),
         running: [...running.values()].slice(0, RUNNING_CALLS),
         recent: [...recent],
-        tool_calls: toolCalls,
+        tool_calls: finished.size + running.size,
         ...(notes.size === 0 ? {} : { notes: [...notes.values()] }),
         ...(agent === undefined ? {} : { agent }),
       };
@@ -194,13 +173,11 @@ const QUEUED: Record<Waiting, TurnActivity> = {
 };
 
 /** The waiting messages of an inbox, without its writes. */
-function waiting(
-  items: readonly { readonly id: SubmissionId; readonly mode: InboxItem["mode"] }[],
-): Map<SubmissionId, Waiting> {
+function waiting(items: readonly InboxItem[]): Map<SubmissionId, Waiting> {
   return new Map(items.flatMap((item) => (item.mode === "write" ? [] : [[item.id, item.mode]])));
 }
 
-/** The activity of the messages a conversation holds, kept current from its events. */
+/** The activity of the messages a conversation holds, kept current from its view. */
 export interface ConversationActivity {
   /** A held message's activity: waiting in the inbox, or what its run does. */
   of(submission: SubmissionId): TurnActivity | undefined;
@@ -218,15 +195,18 @@ export async function watchActivity(
   models: Models,
   context: Context,
 ): Promise<ConversationActivity> {
-  const stream = await watchEvents(harness, conversationId, context);
+  const conversation = await harness.conversation(conversationId, context);
+  if (conversation === undefined) throw new Error(`conversation ${conversationId} does not exist`);
+  const watch = await conversation.watch(context);
   let queued = new Map<SubmissionId, Waiting>();
-  let inputs = new Set<SubmissionId>();
+  let inputs: readonly SubmissionId[] = [];
   let agentState: AgentState = {};
   let usage: AssistantMessage["usage"] | undefined;
   let run: ActivityTracker | undefined;
   /** Runs that ended, by their messages, until each message is settled with core. */
   const ended = new Map<SubmissionId, ActivityTracker>();
-  const calls = new Set<string>();
+  let calling = false;
+  let newest: EntryId | undefined = watch.value.entries.at(-1)?.id;
 
   const agentInfo = (): AgentInfo | undefined => {
     const ref = agentState.model;
@@ -247,93 +227,60 @@ export async function watchActivity(
           }),
     };
   };
-  const describeAgent = () => {
+
+  function apply(view: ConversationView, appended: readonly Message[]): void {
+    const live = (view.docs[LiveDoc.definition.kind] ?? {}) as LiveState;
+    const inbox = (view.docs[InboxDoc.definition.kind] ?? {}) as Partial<InboxState>;
+    agentState = (view.docs[AgentDoc.definition.kind] ?? {}) as AgentState;
+    queued = waiting(inbox.items ?? []);
+    for (const message of appended) if (message.role === "assistant") usage = message.usage;
+    const first = live.run?.inputs[0];
+    if (run !== undefined && first === inputs[0]) run.update(live, appended);
+    else {
+      const before = run;
+      before?.update({}, appended);
+      if (before !== undefined) for (const input of inputs) ended.set(input, before);
+      run = first === undefined ? undefined : trackActivity(workspace);
+      run?.update(live, before === undefined ? appended : []);
+    }
+    inputs = live.run?.inputs ?? [];
     const info = agentInfo();
     if (info !== undefined) run?.agent(info);
-  };
-
-  function apply(event: AgentEvent): void {
-    switch (event.type) {
-      case "snapshot":
-        queued = waiting(event.inbox);
-        inputs = new Set(event.run?.inputs ?? []);
-        if (inputs.size > 0) run ??= trackActivity(workspace);
-        agentState = event.agent;
-        calls.clear();
-        for (const slot of [...event.tools, ...event.nestedTools])
-          if (slot.status === "running") calls.add(slot.callId);
-        describeAgent();
-        return;
-      case "inbox_update":
-        queued = waiting(event.items);
-        return;
-      case "run_start":
-        inputs = new Set(event.inputs);
-        run = trackActivity(workspace);
-        describeAgent();
-        break;
-      case "run_end":
-        for (const input of event.inputs) if (run !== undefined) ended.set(input, run);
-        inputs = new Set();
-        run = undefined;
-        return;
-      case "submission":
-        if (event.record.status === "placed" && run !== undefined) inputs.add(event.record.id);
-        return;
-      case "agent_changed":
-        agentState = event.agent;
-        describeAgent();
-        return;
-      case "message_end": {
-        const message = event.entry.model?.[0];
-        if (message?.role === "assistant") usage = message.usage;
-        break;
-      }
-      case "tool_execution_start":
-        calls.add(event.toolCallId);
-        break;
-      case "tool_execution_end":
-        calls.delete(event.toolCallId);
-        break;
-      case "turn_start":
-      case "turn_end":
-      case "message_start":
-      case "message_update":
-      case "tool_execution_update":
-      case "auto_retry_start":
-      case "auto_retry_end":
-      case "deferred_poll":
-      case "entry_appended":
-      case "usage_changed":
-      case "task_failed":
-      case "compaction_start":
-      case "compaction_end":
-        break;
-    }
-    run?.observe(event);
-    if (event.type === "message_end") describeAgent();
+    calling = [...(live.tools ?? []), ...(live.nestedTools ?? [])].some(
+      (slot) => slot.status === "running",
+    );
   }
 
-  apply(stream.snapshot);
-  stream.start((events) => {
-    for (const event of events) apply(event);
+  apply(watch.value, []);
+  watch.start((call) => {
+    if (call.kind === "value") {
+      const after = newest;
+      const appended = call.value.entries.filter(
+        (entry) => after === undefined || entry.id > after,
+      );
+      newest = call.value.entries.at(-1)?.id ?? newest;
+      apply(
+        call.value,
+        appended.flatMap((entry) => entry.model ?? []),
+      );
+    }
     return Promise.resolve();
   });
   return {
     of(submission) {
       const mode = queued.get(submission);
       if (mode !== undefined) return QUEUED[mode];
-      if (inputs.has(submission)) return run?.snapshot();
+      if (inputs.includes(submission)) return run?.snapshot();
       return ended.get(submission)?.snapshot();
     },
     forget(submission) {
       ended.delete(submission);
     },
     get calling() {
-      return calls.size > 0;
+      return calling;
     },
     async stop() {
-      await stream.stop();
+      await watch.stop();
     },
   };
 }

@@ -12,10 +12,12 @@ import {
   type ConversationId,
   type Cursor,
   type EntryId,
+  type RunningTask,
   type SettledSubmissionRecord,
   type SubmissionId,
   type TaskId,
   type TaskRecord,
+  type TaskRuntime,
   type Tx,
 } from "@earendil-works/pi-durable";
 import type { TurnActivity, TurnOutcome } from "@carillon/protocol";
@@ -59,13 +61,14 @@ export function isDeliveryInput(value: unknown): value is DeliveryInput {
 }
 
 type DeliveryState =
-  | { readonly phase: "wait" }
+  | { readonly phase: "wait"; readonly cutOff?: number }
   | {
       readonly phase: "post";
       readonly outcome: TurnOutcome;
       readonly attempt: number;
       /** Core refused the decided outcome for good, so this is the plain failure in its place. */
       readonly replaced?: true;
+      readonly cutOff?: number;
     };
 
 /** What the delivery task needs of the runtime that runs it. */
@@ -81,8 +84,6 @@ export interface DeliveryHost {
   released(turn: string): void;
 }
 
-/** Why a message whose run crashed the runtime too often was given up on. */
-export const CRASHED = "carillon_crashed";
 const LONGEST_BACKOFF_MS = 60_000;
 /** What is posted once in place of an outcome core refused for good. */
 const UNDELIVERABLE: TurnOutcome = {
@@ -105,6 +106,7 @@ export function deliveryTask(host: DeliveryHost) {
     initial: () => ({ phase: "wait" }),
     phases: {
       wait: async (task, runtime, context) => {
+        await recordCutOffs(task, runtime, context);
         const settled = await host.wait(task.input.submission, context);
         if (settled.status === "unanswered" && settled.detail !== undefined)
           console.error(
@@ -122,7 +124,8 @@ export function deliveryTask(host: DeliveryHost) {
       },
       post: async (task, runtime, context) => {
         const { turn } = task.input;
-        const { outcome, attempt, replaced } = task.state.checkpoint;
+        const checkpoint = await recordCutOffs(task, runtime, context);
+        const { outcome, attempt, replaced } = checkpoint;
         try {
           await host.settle(turn, outcome);
         } catch (failure) {
@@ -131,8 +134,8 @@ export function deliveryTask(host: DeliveryHost) {
             console.error(
               `turn ${turn}: ${diagnostic(failure)}; posting again in ${String(delay / 1_000)} s`,
             );
-            const checkpoint = { ...task.state.checkpoint, attempt: attempt + 1 };
-            await runtime.sleepUntil(runtime.now() + delay, checkpoint, context);
+            const next = { ...checkpoint, attempt: attempt + 1 };
+            await runtime.sleepUntil(runtime.now() + delay, next, context);
             return;
           }
           if (replaced === undefined) {
@@ -179,7 +182,8 @@ async function decide(
         return { outcome: "stopped" };
       case "no_model":
         return { outcome: "failed", explanation: await modelMissing(tx, input), ...activity };
-      case CRASHED:
+      case "restart_limit":
+      case "interrupted":
         return {
           outcome: "failed",
           explanation:
@@ -245,6 +249,27 @@ export function over(
     task.abortRequested ||
     task.state.outcome?.status === "aborted"
   );
+}
+
+/**
+ * The phase's checkpoint, recording how often crashes cut the phase off.
+ * Pi ends a task cut off `restartLimit` times without progress, and a
+ * changed checkpoint is progress, so crashes while a phase waits on a run
+ * or on core never end its task.
+ */
+export async function recordCutOffs<
+  I,
+  P extends S & { readonly cutOff?: number },
+  S,
+  R,
+  H extends object,
+>(task: RunningTask<I, P, R>, runtime: TaskRuntime<I, S, R, H>, context: Context): Promise<P> {
+  const { checkpoint } = task.state;
+  const restarts = task.restarts ?? 0;
+  if (restarts === 0) return checkpoint;
+  const recorded = { ...checkpoint, cutOff: (checkpoint.cutOff ?? 0) + restarts };
+  await runtime.commit(() => ({ status: "running", checkpoint: recorded }), context);
+  return recorded;
 }
 
 /** How long to wait before asking core again once `attempt` earlier tries failed. */

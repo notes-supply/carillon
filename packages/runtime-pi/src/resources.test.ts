@@ -1,7 +1,6 @@
 import {
   fauxAssistantMessage,
   fauxToolCall,
-  Type,
   type FauxResponseStep,
   type Message,
   type SystemMessage,
@@ -11,6 +10,7 @@ import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-dura
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
 import { BUILT_IN_SKILLS } from "./resources.ts";
