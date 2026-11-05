@@ -30,7 +30,10 @@ fn provider_commands_change_only_their_own_lines() -> Result<()> {
     set_provider(&config_path, "runtime-pi", false)?;
     let pi = "id = \"runtime-pi\"\r\n";
     let (head, tail) = written.split_at(written.find(pi).context("runtime-pi")? + pi.len());
-    let disabled = format!("{head}{}", tail.replacen("enabled = true", "enabled = false", 1));
+    let disabled = format!(
+        "{head}{}",
+        tail.replacen("enabled = true", "enabled = false", 1)
+    );
     assert_eq!(fs::read_to_string(&config_path)?, disabled);
     super::super::register_runtime(&config_path, Runtime::T3)?;
     let config = LoadedConfig::load(&config_path)?;

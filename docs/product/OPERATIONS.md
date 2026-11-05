@@ -55,11 +55,13 @@ Without Discord options, the installer asks at the terminal:
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
-token). Kept T3 settings still ask the model of each T3 agent that has none. The installer refuses while Carillon runs: stop it with `carillon
-stop` first, or update it with `carillon update ARCHIVE`. On an installed
-release, `carillon setup` asks the same questions, and `carillon discord
-setup` asks only Discord's. A rerun that changes the T3 settings or the bot
-token takes effect in a running Carillon at `carillon restart`. Changing an
+token). Kept T3 settings ask the model of each T3 agent that has none, and
+reach T3 only for those agents. The installer refuses while Carillon runs:
+stop it with `carillon stop` first, or update it with `carillon update
+ARCHIVE`. On an installed release, `carillon setup` asks the same
+questions, and `carillon discord setup` asks only Discord's. A rerun that
+changes the T3 settings or the bot token takes effect in a running Carillon
+at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
 empty thread in the current project and receive an explanation. That message
 never runs; the next message runs in the new thread. Commands are refused
@@ -110,10 +112,9 @@ the models Pi offers.
 Rerunning the installer with options keeps the registry, credentials and
 state, and writes the guild, bot and people from them. A `carillon.toml`
 copied from another installation, without its state, gets a new database
-(see [Update](#update)). `--route` only
-creates the first routes: a rerun must name the routes the settings already
-have, and changes a route only through [Settings](#settings). Use
-`carillon update` for new releases.
+(see [Update](#update)). `--route` only creates the first routes: a rerun
+must name the routes the settings already have, and changes a route only
+through [Settings](#settings). Use `carillon update` for new releases.
 
 ### From the downloaded archive
 
@@ -269,6 +270,13 @@ Carillon's next turn in that thread.
 provider with its role, address, credential hash and expected version.
 Unknown fields make the file invalid. Each provider keeps its own settings in
 `providers/ID.toml`.
+
+Setup, `carillon init` and `carillon provider` change `carillon.toml` as
+Discord changes its settings file, described
+[below](#changes-that-apply-while-running): they write only the values a
+change alters, each in its place, and match providers and agents by ID. The
+file keeps its comments, its order, its quoting and its line endings, except
+as listed there. A new provider or agent goes after the others.
 
 ### Changes that apply while running
 
@@ -845,7 +853,10 @@ refuses its database format and changes nothing. To move to it:
 2. Create a new `~/.carillon` with mode 700. Copy these from the old one,
    keeping their modes: `carillon.toml`, `providers/*.toml`, `credentials/`,
    `pi/auth.json`, `pi/models.json`, `pi/settings.json`, `pi/mcp.json` if
-   you have one, and `agents/`.
+   you have one, and `agents/`. If the `[module]` table of
+   `providers/discord-private.toml` enables a module of your own kept
+   inside `~/.carillon`, outside `app/`, copy that file to the same path. A
+   relative `path` there starts at `~/.carillon`.
 3. Run the new release's `install.sh` the way you installed before.
    - **Guided**, without options. Setup asks no runtime question: it uses
      the runtimes `carillon.toml` registers. With T3, it asks "Keep the T3
@@ -861,10 +872,10 @@ refuses its database format and changes nothing. To move to it:
      --agent AGENT model=PROVIDER/MODEL`.
 
    Either way, the installer creates a new database. In `carillon.toml`, it
-   sets the `version` line of each provider this release bundles
+   sets the `version` of each provider this release bundles
    (`discord-private`, `runtime-pi` and `runtime-t3`) and leaves the rest
    of the file as it was. A provider you installed separately keeps its
-   line.
+   version.
 
 `state/` starts empty, so turn history, conversations, Pi's conversations
 and scheduled runs do not carry over. T3 per-thread model choices do not

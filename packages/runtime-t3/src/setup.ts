@@ -9,7 +9,12 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { publish, Unsynced } from "@carillon/runtime/publish";
-import { modelChoiceId, SettingsLedger, type CatalogueModel } from "@carillon/runtime/settings";
+import {
+  modelChoiceId,
+  SettingsLedger,
+  type Catalogue,
+  type CatalogueModel,
+} from "@carillon/runtime/settings";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -25,14 +30,10 @@ export interface Project {
   readonly workspace: string;
 }
 
-/**
- * A T3 server's projects and usable models. Offered to an agent, `value` is
- * the agent's model in the settings ledger, `null` when it has none.
- */
+/** A T3 server's projects and usable models. */
 export interface Offer {
   readonly projects: readonly Project[];
   readonly models: readonly CatalogueModel[];
-  readonly value?: string | null;
 }
 
 /** An agent's project and default model, the model as T3 names its provider instance and slug. */
@@ -67,13 +68,24 @@ export async function discover(
   const { connect = connectT3, scope } = options;
   if (scope !== undefined) plain(agentOf(scope.installation, scope.agentId));
   const { projects, catalogue } = await serverOffer(endpoint, connect);
-  if (scope === undefined) return { projects, models: catalogue.models };
-  const ledger = await openLedger(scope.installation);
-  const { value } = await modelLine(ledger, catalogue, scope.agentId);
-  return { projects, models: catalogue.models, value: value?.kind === "one" ? value.id : null };
+  return { projects, models: catalogue.models };
 }
 
-async function modelLine(ledger: SettingsLedger, catalogue: Catalog, agentId: string) {
+/**
+ * The model the installation's agent `agentId` uses in the settings ledger,
+ * `null` when it has none, read without reaching T3.
+ */
+export async function ledgerModel(
+  installation: Installation,
+  agentId: string,
+): Promise<string | null> {
+  plain(agentOf(installation, agentId));
+  const ledger = await openLedger(installation);
+  const { value } = await modelLine(ledger, { providers: [], models: [] }, agentId);
+  return value?.kind === "one" ? value.id : null;
+}
+
+async function modelLine(ledger: SettingsLedger, catalogue: Catalogue, agentId: string) {
   const lines = await ledger.settings(catalogue, { kind: "agent", agent_id: agentId });
   const line = lines.find(({ id }) => id === "model");
   if (line === undefined) throw new Error("the settings ledger shows no model line");
@@ -191,18 +203,15 @@ export async function configure(
   if (!offer.catalogue.models.some((candidate) => modelChoiceId(candidate) === model))
     throw new Error(`T3 offers ${agent.name} no usable model ${model}`);
   const ledger = await openLedger(installation);
+  const subject = { kind: "agent", agent_id: choice.agentId } as const;
   const line = await modelLine(ledger, offer.catalogue, choice.agentId);
   // Choosing the model again keeps the options chosen for it.
   if (line.value?.kind !== "one" || line.value.id !== model)
-    await ledger.change(
-      offer.catalogue,
-      { kind: "agent", agent_id: choice.agentId },
-      {
-        setting: "model",
-        value: { kind: "one", id: model },
-        expected: line.revision,
-      },
-    );
+    await ledger.change(offer.catalogue, subject, {
+      setting: "model",
+      value: { kind: "one", id: model },
+      expected: line.revision,
+    });
   await publishSettings(installation, endpoint, existing, {
     ...existing?.agents,
     [choice.agentId]: { project_id: project.id },

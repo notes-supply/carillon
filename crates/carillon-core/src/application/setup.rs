@@ -9,7 +9,6 @@
 use std::{
     collections::BTreeMap,
     io::Write as _,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -17,12 +16,10 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
     config::{AgentConfig, Config, LoadedConfig, ProviderRole, RELEASE_VERSION},
-    filesystem::atomic_write,
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item};
 
 use super::{
     admin::{self, Runtime, initialize, register_runtime, set_agents},
@@ -39,13 +36,11 @@ pub(super) struct Options {
     pub runtimes: Vec<Runtime>,
 }
 
-/// What a T3 server offers, and, offered to an agent, the model the agent
-/// uses, as `carillon-runtime-t3 discover` prints them.
+/// What a T3 server offers, as `carillon-runtime-t3 discover` prints it.
 #[derive(Deserialize)]
 struct Offer {
     projects: Vec<Project>,
     models: Vec<OfferedModel>,
-    value: Option<String>,
 }
 
 /// A model a runtime offers an agent, as its setup commands print it.
@@ -324,22 +319,13 @@ fn start_fresh(home: &Path) -> Result<()> {
         (Runtime::Pi.id(), Runtime::Pi.version()?),
         (Runtime::T3.id(), Runtime::T3.version()?),
     ];
-    let mut registry: DocumentMut = std::fs::read_to_string(&config_path)?.parse()?;
-    if let Some(providers) = registry
-        .get_mut("providers")
-        .and_then(Item::as_array_of_tables_mut)
-    {
-        for provider in providers.iter_mut() {
-            let id = provider.get("id").and_then(Item::as_str);
-            if let Some((_, version)) = bundled.iter().find(|(bundled, _)| Some(*bundled) == id) {
-                provider["version"] = toml_edit::value(version.as_str());
-            }
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    for provider in &mut config.providers {
+        if let Some((_, version)) = bundled.iter().find(|(id, _)| *id == provider.id) {
+            version.clone_into(&mut provider.version);
         }
     }
-    let registry = registry.to_string();
-    toml::from_str::<Config>(&registry)?.validate()?;
-    let mode = std::fs::metadata(&config_path)?.permissions().mode() & 0o777;
-    atomic_write(&config_path, registry.as_bytes(), mode)?;
+    config.write(&config_path)?;
     Database::create(&database)?;
     Ok(())
 }
@@ -522,7 +508,7 @@ fn configure_agents(
 
 /// Has the T3 runtime configure each T3 agent whose settings ledger has no
 /// model, as after kept settings over a new database, with its saved project
-/// and the default model chosen for it.
+/// and the default model chosen for it. Only such an agent needs T3.
 fn choose_kept_models(
     home: &Path,
     server: &Server<'_>,
@@ -536,10 +522,10 @@ fn choose_kept_models(
         .filter(|agent| agent.runtime == Runtime::T3.id())
         .collect();
     for &agent in &agents {
-        let offer = server.offer(home, &agent.id)?;
-        if offer.value.is_some() {
+        if ledger_model(home, server.t3, &agent.id)?.is_some() {
             continue;
         }
+        let offer = server.offer(home, &agent.id)?;
         let project = projects
             .get(&agent.id)
             .with_context(|| format!("the saved T3 settings give {} no project", agent.id))?;
@@ -555,6 +541,20 @@ fn choose_kept_models(
         )?;
     }
     Ok(())
+}
+
+/// The model the T3 agent `id` uses in the settings ledger, which the T3
+/// runtime `t3` reads without reaching T3.
+fn ledger_model(home: &Path, t3: &Path, id: &str) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Model {
+        value: Option<String>,
+    }
+    let config = home.join("carillon.toml").to_string_lossy().into_owned();
+    let printed = run(t3, &["model", "--config", &config, "--agent", id], "")?;
+    let model: Model =
+        serde_json::from_str(&printed).context("carillon-runtime-t3 told the model unreadably")?;
+    Ok(model.value)
 }
 
 /// Asks the default model of the agent `id`, called `label`, among those

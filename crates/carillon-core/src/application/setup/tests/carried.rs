@@ -127,7 +127,9 @@ fn a_carried_registry_gets_this_releases_versions_and_keeps_the_rest_as_written(
     let forms: [fn(&Path, [&str; 3]) -> String; 2] = [carried, carried_inline];
     for (index, form) in forms.into_iter().enumerate() {
         for ending in ["\n", "\r\n"] {
-            let home = directory.path().join(format!("home-{index}-{}", ending.len()));
+            let home = directory
+                .path()
+                .join(format!("home-{index}-{}", ending.len()));
             let written = form(directory.path(), PREVIOUS).replace('\n', ending);
             let path = carry(&home, directory.path(), &written)?;
             start_fresh(&home)?;
@@ -180,7 +182,11 @@ fn setup_leaves_a_carried_registry_as_written_but_for_what_it_adds() -> anyhow::
 fn kept_t3_settings_need_no_t3_when_every_agent_has_a_model() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    carry(&home, directory.path(), &carried(directory.path(), PREVIOUS))?;
+    carry(
+        &home,
+        directory.path(),
+        &carried(directory.path(), PREVIOUS),
+    )?;
     std::fs::write(home.join("credentials/t3.token"), "saved-token\n")?;
     std::fs::write(
         home.join("providers/runtime-t3.toml"),

@@ -292,7 +292,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
- "toml_edit",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -325,7 +324,6 @@ dependencies = [
  "tokio-util",
  "tokio-websockets",
  "toml",
- "toml_edit",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -372,6 +370,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "toml_edit",
  "uuid",
 ]
 

@@ -40,9 +40,9 @@ impl Fixture {
             &serde_json::json!({
                 "projects": [{"id": "p1", "title": "Notes", "workspace": directory.path()}],
                 "models": [model("codex", "gpt", "GPT")],
-                "value": "codex/gpt",
             }),
         )?;
+        std::fs::write(directory.path().join("model-t3-notes"), "codex/gpt")?;
         for (name, script) in [
             (
                 "runtime-pi",
