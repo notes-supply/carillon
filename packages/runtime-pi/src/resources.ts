@@ -22,7 +22,7 @@ import { ExplainedFailure } from "@carillon/runtime/failure";
 import { mismatch } from "@carillon/runtime/mismatch";
 import { publish } from "@carillon/runtime/publish";
 import { settingRevision } from "@carillon/runtime/settings";
-import { chmod, readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -32,13 +32,14 @@ import { attachmentSection } from "./attachments.ts";
 import { ConversationInfo } from "./documents.ts";
 
 /** What a message does when it arrives while the agent answers in its conversation. */
-type Busy = "queue" | "steer" | "interrupt";
-const BUSY: readonly Busy[] = ["queue", "steer", "interrupt"];
+const BUSY = ["queue", "steer", "interrupt"] as const;
+type Busy = (typeof BUSY)[number];
 const DEFAULT_BUSY: Busy = "steer";
 
 /** The runtime's own extension, always selected: the prompt from the agent's resources. */
 const CARILLON = "carillon";
-const USER_EXTENSION = /^extensions\/[^/]+\.(?:js|mjs|ts)$/u;
+/** A module file, named without a comma, since `carillon settings` separates names with one. */
+const USER_EXTENSION = /^extensions\/[^/,]+\.(?:js|mjs|ts)$/u;
 
 const NameSchema = Type.String({ minLength: 1 });
 const SettingsSchema = Type.Object(
@@ -55,9 +56,7 @@ const SettingsSchema = Type.Object(
         ),
       ]),
     ),
-    busy: Type.Optional(
-      Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("interrupt")]),
-    ),
+    busy: Type.Optional(Type.Enum(BUSY)),
   },
   { additionalProperties: false },
 );
@@ -130,10 +129,10 @@ export async function loadSnapshot(
   extensions: Extensions,
 ): Promise<Snapshot> {
   const settings = await readSettings(join(root, "settings.json"));
-  const selected = selection(
-    settings.extensions,
+  const selected = selection(settings.extensions, extensions.defaults);
+  refuseUnknown(
+    selected,
     extensions.builtIn.map((extension) => extension.name),
-    extensions.defaults,
   );
   const modules = await Promise.all(
     selected.filter(isUserExtension).map((name) => importExtension(root, name)),
@@ -245,7 +244,9 @@ export const RESOURCE_SETTINGS: readonly string[] = ["busy", "extensions"];
  * The agent's Busy and Extensions lines, as its resources set them now. An
  * agent without resources shows what it runs with and offers no choice.
  * Settings that cannot be used show both lines empty, so the rest of the
- * page stays usable; changing either names what is wrong.
+ * page stays usable; changing either names what is wrong. A selected
+ * extension the resources no longer hold shows as unavailable, and a change
+ * may drop it but not keep it.
  */
 export async function resourceSettings(
   source: ResourceSource,
@@ -279,7 +280,7 @@ export async function changeResourceSetting(
   change: Change,
   checkLease: () => void,
 ): Promise<void> {
-  const { lines, settings, choices } = await resourceLines(source, subject);
+  const { lines, settings, offered } = await resourceLines(source, subject);
   const line = lines.find(({ id }) => id === change.setting);
   if (line === undefined || line.revision !== change.expected)
     throw new ExplainedFailure(409, "This setting changed meanwhile.");
@@ -293,7 +294,7 @@ export async function changeResourceSetting(
     if (change.value === null) delete next.busy;
     else next.busy = busyMode(change.value);
   } else if (change.value === null) delete next.extensions;
-  else next.extensions = extensionNames(change.value, choices);
+  else next.extensions = extensionNames(change.value, offered);
   if (isDeepStrictEqual(next, settings)) return;
   const path = join(source.root, "settings.json");
   const mode = await stat(path).then(
@@ -301,8 +302,7 @@ export async function changeResourceSetting(
     () => undefined,
   );
   checkLease();
-  await publish(path, `${JSON.stringify(next, null, 2)}\n`);
-  if (mode !== undefined) await chmod(path, mode);
+  await publish(path, `${JSON.stringify(next, null, 2)}\n`, mode);
   checkLease();
 }
 
@@ -310,13 +310,11 @@ async function resourceLines(source: ResourceSource, subject: Subject) {
   const root = source.root;
   const settings =
     root === undefined ? {} : await readable(() => readSettings(join(root, "settings.json")));
-  const choices = [...source.builtIn, ...(await readable(() => userExtensions(root)))];
+  const offered = [...source.builtIn, ...(await readable(() => userExtensions(root)))];
+  const selected = selection(settings.extensions, source.defaults);
   const editable = source.root !== undefined;
   const busy: SettingValue = { kind: "one", id: settings.busy ?? DEFAULT_BUSY };
-  const extensions: SettingValue = {
-    kind: "many",
-    ids: selection(settings.extensions, choices, source.defaults),
-  };
+  const extensions: SettingValue = { kind: "many", ids: selected };
   const revision = (setting: string, stored: unknown, value: SettingValue) =>
     settingRevision(setting, subject, [editable, stored ?? null, value]);
   const lines: Setting[] = [
@@ -331,13 +329,20 @@ async function resourceLines(source: ResourceSource, subject: Subject) {
     {
       id: "extensions",
       name: "Extensions",
-      choices: editable ? choices.map((name) => ({ id: name, name })) : [],
+      choices: editable
+        ? [
+            ...offered.map((name) => ({ id: name, name })),
+            ...selected
+              .filter((name) => !offered.includes(name))
+              .map((name) => ({ id: name, name: `${name} (unavailable)` })),
+          ]
+        : [],
       value: extensions,
       inherited: settings.extensions === undefined,
       revision: revision("extensions", settings.extensions, extensions),
     },
   ];
-  return { lines, settings, choices };
+  return { lines, settings, offered };
 }
 
 /** What `read` returns, or why the agent's resources could not be read, explained. */
@@ -417,17 +422,19 @@ async function readSettings(path: string): Promise<Settings> {
   return settings;
 }
 
-function selection(
-  setting: Settings["extensions"],
-  builtIn: readonly string[],
-  defaults: readonly string[],
-): string[] {
+/** The extensions `setting` selects, in order and once each. */
+function selection(setting: Settings["extensions"], defaults: readonly string[]): string[] {
   const names = Array.isArray(setting)
     ? setting
     : [
         ...defaults.filter((name) => setting?.remove?.includes(name) !== true),
         ...(setting?.add ?? []).filter((name) => setting?.remove?.includes(name) !== true),
       ];
+  return [...new Set(names)];
+}
+
+/** Refuses a selection naming an extension the runtime has no way to load. */
+function refuseUnknown(names: readonly string[], builtIn: readonly string[]): void {
   for (const name of names) {
     if (builtIn.includes(name) || isUserExtension(name)) continue;
     if (name.startsWith("mcp:"))
@@ -437,10 +444,9 @@ function selection(
       );
     throw new ExplainedFailure(
       422,
-      `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor extensions/<file>.js, .mjs or .ts.`,
+      `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor extensions/<file>.js, .mjs or .ts named without a comma.`,
     );
   }
-  return [...new Set(names)];
 }
 
 /** A user extension: its module's default export, a pi-durable extension object. */

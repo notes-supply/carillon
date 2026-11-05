@@ -1,20 +1,29 @@
 /** Durable replacement of a file a runtime owns. */
 import { open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-
-/** A publication in place whose directory did not sync, so a crash may still undo it. */
-export class Unsynced extends Error {}
+import { ExplainedFailure } from "./failure.ts";
 
 /**
- * Replaces `path` with `text`, readable only by the owner, durably. A failure
- * before the rename leaves `path` as it was; {@link Unsynced} leaves the new
- * text in place.
+ * A publication in place whose directory did not sync, so a crash may still
+ * undo it. It tells the caller the change was made.
  */
-export async function publish(path: string, text: string): Promise<void> {
+export class Unsynced extends ExplainedFailure {
+  constructor(message: string) {
+    super(500, message);
+  }
+}
+
+/**
+ * Replaces `path` with `text` and `mode`, readable only by the owner unless
+ * the mode says otherwise, durably. A failure before the rename leaves `path`
+ * as it was; {@link Unsynced} leaves the new text and mode in place.
+ */
+export async function publish(path: string, text: string, mode = 0o600): Promise<void> {
   const temporary = `${path}.${crypto.randomUUID()}.tmp`;
   const file = await open(temporary, "wx", 0o600);
   try {
     try {
+      await file.chmod(mode);
       await file.writeFile(text);
       await file.sync();
     } finally {

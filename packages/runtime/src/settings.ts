@@ -177,10 +177,13 @@ export class SettingsLedger {
   }
 
   /**
-   * Runs `work` alone, in order with every change, under a short lease on
-   * the ledger across processes. `work` calls its argument before and after
-   * each write, which throws once the lease was lost. A runtime's other
-   * settings files change under the same lease.
+   * Runs `work` after every change this runtime started before it, holding a
+   * lease on the ledger that other processes take before they write. `work`
+   * calls its argument before and after each write, which throws once the
+   * lease was lost. The lease detects a loss but cannot fence a holder that
+   * stalled past the lock's stale threshold: another process may take the
+   * lease and write meanwhile. A runtime's other settings files change under
+   * the same lease.
    */
   async exclusive<T>(work: (checkLease: () => void) => Promise<T>): Promise<T> {
     return this.#writes.run(async () => {
