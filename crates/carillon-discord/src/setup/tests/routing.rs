@@ -258,3 +258,30 @@ async fn each_channel_is_routed_to_the_agent_chosen_for_it_with_that_agents_mode
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn setup_again_dropping_a_user_and_a_route_keeps_the_rest_of_the_owners_file()
+-> anyhow::Result<()> {
+    let users =
+        "allowed_user_ids = [\n    \"200\", \"210\", # the two of us\n    \"250\", # a friend\n]\n";
+    let general = "# General: everyone may talk here.\n[[routes]]\nchannel_id = \"300\"\nagent = \"default\"\nactivation = \"always\"\nconversation = \"channel\"\n\n";
+    let agent = "# Agent: everyone may talk here too.\n[[routes]]\nchannel_id = \"301\"\nagent = \"default\"\nactivation = \"always\" # loud\nconversation = \"channel\"\n";
+    let owned = format!(
+        "guild_id = \"100\"\nbot_user_id = \"201\"\n{users}\n# ---- Channels the agent answers in ----\n\n{general}{agent}"
+    );
+    let directory = tempfile::tempdir()?;
+    let config = crate::config::tests::installation(directory.path(), "discord-private", 46_700)?;
+    let path = config.provider_config_path("discord-private")?;
+    std::fs::write(&path, &owned)?;
+    std::fs::write(config.root.join(BOT_TOKEN_FILE), format!("{TOKEN}\n"))?;
+    let address = discord(Arc::new(Discord::default())).await?;
+    let (result, shown) = run(&config, address, &["n", "", "", "2", "2", "", "250"]).await;
+    result.with_context(|| shown.clone())?;
+    assert_eq!(
+        std::fs::read_to_string(&path)?,
+        owned
+            .replace(r#""200", "210","#, r#""200","#)
+            .replace(general, "")
+    );
+    Ok(())
+}

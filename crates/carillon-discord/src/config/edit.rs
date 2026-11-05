@@ -7,9 +7,10 @@ use toml_edit::{
 use super::{DiscordConfig, ModuleSetting};
 
 pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<String> {
-    let Some((mut document, previous)) = file.and_then(|file| {
+    let Some((file, mut document, previous)) = file.and_then(|file| {
         let previous = toml::from_str::<DiscordConfig>(file).ok()?;
         Some((
+            file,
             file.replace("\r\n", "\n").parse::<DocumentMut>().ok()?,
             previous,
         ))
@@ -33,8 +34,11 @@ pub(super) fn text(settings: &DiscordConfig, file: Option<&str>) -> Result<Strin
         &stated(settings)?,
         Some(&skipped_defaults),
     );
-    let text = document.to_string();
-    Ok(if file.is_some_and(|file| file.contains("\r\n")) {
+    let mut text = document.to_string();
+    if !file.ends_with('\n') && text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(if file.contains("\r\n") {
         text.replace('\n', "\r\n")
     } else {
         text
@@ -59,25 +63,21 @@ fn edit(
             file.insert(key, fresh_item(after));
             continue;
         };
-        let default = skipped_defaults.and_then(|defaults| defaults.get(key));
-        edit_item(item, before, after, default.and_then(Value::as_table));
-        let left_as_a_new_file_would = default == Some(after) && !commented(item);
+        edit_item(item, before, after);
+        let left_as_a_new_file_would = skipped_defaults
+            .is_some_and(|defaults| defaults.get(key) == Some(after))
+            && !commented(file, key);
         if left_as_a_new_file_would {
             file.remove(key);
         }
     }
 }
 
-fn edit_item(
-    item: &mut Item,
-    before: Option<&Value>,
-    after: &Value,
-    skipped_defaults: Option<&Table>,
-) {
+fn edit_item(item: &mut Item, before: Option<&Value>, after: &Value) {
     match (before, after) {
         (Some(Value::Table(before)), Value::Table(after)) => {
             if let Some(table) = item.as_table_like_mut() {
-                return edit(table, before, after, skipped_defaults);
+                return edit(table, before, after, None);
             }
         }
         (Some(Value::Array(before)), Value::Array(after)) => {
@@ -154,9 +154,24 @@ fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> b
     else {
         return false;
     };
+    let mut unplaced = String::new();
     for index in steps.removed_from_the_end {
-        file.remove(index);
+        let removed = file.remove(index);
+        let section = section_above(raw(removed.decor().prefix()));
+        match file.get_mut(index) {
+            Some(next) => prepend(next, section),
+            None => unplaced.insert_str(0, section),
+        }
     }
+    let after_the_kept = steps
+        .placed
+        .iter()
+        .rev()
+        .find_map(|placed| match placed {
+            Placed::Kept { index, .. } => Some(index + 1),
+            Placed::Inserted(..) => None,
+        })
+        .unwrap_or(0);
     for placed in steps.placed {
         match placed {
             Placed::Inserted(index, Value::Table(table)) => file.insert(index, fresh_table(table)),
@@ -172,7 +187,38 @@ fn edit_tables(file: &mut ArrayOfTables, before: &[Value], after: &[Value]) -> b
             Placed::Inserted(..) | Placed::Kept { .. } => {}
         }
     }
+    if let Some(next) = file.get_mut(after_the_kept) {
+        prepend(next, &unplaced);
+    }
     true
+}
+
+/// The comments a blank line separates from what follows them, through that
+/// blank line: they head a section of the file, not the element below.
+fn section_above(prefix: &str) -> &str {
+    let end = prefix
+        .split_inclusive('\n')
+        .scan(0, |end, line| {
+            *end += line.len();
+            Some((*end, line))
+        })
+        .filter(|(_, line)| line.ends_with('\n') && line.trim().is_empty())
+        .last()
+        .map_or(0, |(end, _)| end);
+    let (section, _) = prefix.split_at(end);
+    if section.contains('#') { section } else { "" }
+}
+
+fn prepend(table: &mut toml_edit::Table, section: &str) {
+    if !section.is_empty() {
+        let own = table
+            .decor()
+            .prefix()
+            .and_then(RawString::as_str)
+            .unwrap_or("\n");
+        let prefix = format!("{section}{}", own.strip_prefix('\n').unwrap_or(own));
+        table.decor_mut().set_prefix(prefix);
+    }
 }
 
 fn edit_array(file: &mut Array, before: &[Value], after: &[Value]) -> bool {
@@ -218,7 +264,7 @@ fn remove_element(array: &mut Array, index: usize) {
     } else {
         raw(removed.decor().suffix()).to_owned()
     };
-    let joined = keep_the_line_before(prefix, &following, index == 0);
+    let joined = left_by_removal(prefix, &following, index == 0, last);
     if !last {
         set_prefix(array, index, joined);
     } else if array.trailing_comma() {
@@ -228,13 +274,15 @@ fn remove_element(array: &mut Array, index: usize) {
     }
 }
 
-fn keep_the_line_before(removed_prefix: &str, following: &str, first: bool) -> String {
-    let (end_of_line_before, _) = split_after_newline(removed_prefix);
+fn left_by_removal(removed_prefix: &str, following: &str, first: bool, last: bool) -> String {
+    let (end_of_line_before, own_lines) = split_after_newline(removed_prefix);
     let (end_of_own_line, rest) = split_after_newline(following);
-    if end_of_own_line.is_empty() && first {
+    if end_of_line_before.is_empty() && !first {
+        following.to_owned()
+    } else if end_of_own_line.is_empty() && !last {
         removed_prefix.to_owned()
     } else {
-        format!("{end_of_line_before}{rest}")
+        format!("{end_of_line_before}{}{rest}", section_above(own_lines))
     }
 }
 
@@ -320,21 +368,24 @@ fn indent(prefix: &str) -> &str {
     prefix.rsplit('\n').next().unwrap_or_default()
 }
 
-fn commented(item: &Item) -> bool {
+/// Whether a comment is on `key`'s line, above it or within its table. A
+/// comment on the lines above a key is in the key's decor.
+fn commented(table: &dyn TableLike, key: &str) -> bool {
+    let Some((key, item)) = table.get_key_value(key) else {
+        return false;
+    };
     let decor = match item {
         Item::Table(table) => Some(table.decor()),
         Item::Value(value) => Some(value.decor()),
         Item::None | Item::ArrayOfTables(_) => None,
     };
-    decor.is_some_and(has_comment)
-        || item.as_table_like().is_some_and(|table| {
-            table.iter().any(|(key, item)| {
-                table
-                    .key(key)
-                    .is_some_and(|key| has_comment(key.leaf_decor()))
-                    || commented(item)
-            })
-        })
+    [key.leaf_decor(), key.dotted_decor()]
+        .into_iter()
+        .chain(decor)
+        .any(has_comment)
+        || item
+            .as_table_like()
+            .is_some_and(|table| table.iter().any(|(key, _)| commented(table, key)))
 }
 
 fn has_comment(decor: &Decor) -> bool {

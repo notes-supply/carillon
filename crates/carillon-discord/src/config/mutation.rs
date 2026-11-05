@@ -75,15 +75,14 @@ impl FileChange {
                 guild_id,
                 bot_user_id,
                 bot_token_file,
-                mut allowed_user_ids,
+                allowed_user_ids,
                 routes,
             } => {
                 let routes = match routes {
-                    Routes::Answered(mut routes) => {
-                        in_order_of(&mut routes, &discord.routes, |one, other| {
+                    Routes::Answered(routes) => {
+                        in_order_of(routes, &discord.routes, |one, other| {
                             one.channel_id == other.channel_id
-                        });
-                        routes
+                        })
                     }
                     Routes::First(routes) if discord.routes.is_empty() => routes,
                     Routes::First(routes) if same_routes(&discord.routes, &routes) => {
@@ -104,12 +103,8 @@ impl FileChange {
                 if bot_token_file.is_some() {
                     discord.bot_token_file = bot_token_file;
                 }
-                in_order_of(
-                    &mut allowed_user_ids,
-                    &discord.allowed_user_ids,
-                    PartialEq::eq,
-                );
-                discord.allowed_user_ids = allowed_user_ids;
+                discord.allowed_user_ids =
+                    in_order_of(allowed_user_ids, &discord.allowed_user_ids, PartialEq::eq);
                 discord.routes = routes;
             }
             Self::Module { enabled, path } => {
@@ -147,13 +142,24 @@ impl FileChange {
     }
 }
 
-fn in_order_of<T>(answered: &mut [T], settings: &[T], same: impl Fn(&T, &T) -> bool) {
-    answered.sort_by_key(|answer| {
-        settings
-            .iter()
-            .position(|kept| same(kept, answer))
-            .unwrap_or(usize::MAX)
-    });
+/// `answered` in the order `settings` lists them, each answer taking the
+/// first place no earlier answer took, so a repeated one keeps its places.
+/// New answers follow, in their own order.
+fn in_order_of<T>(answered: Vec<T>, settings: &[T], same: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    let mut taken = vec![false; settings.len()];
+    let mut placed: Vec<(usize, T)> = answered
+        .into_iter()
+        .map(|answer| {
+            let place =
+                (0..settings.len()).find(|&place| !taken[place] && same(&settings[place], &answer));
+            if let Some(place) = place {
+                taken[place] = true;
+            }
+            (place.unwrap_or(usize::MAX), answer)
+        })
+        .collect();
+    placed.sort_by_key(|(place, _)| *place);
+    placed.into_iter().map(|(_, answer)| answer).collect()
 }
 
 fn same_routes(left: &[DiscordRoute], right: &[DiscordRoute]) -> bool {
