@@ -18,7 +18,7 @@ use tracing::warn;
 
 use crate::{
     Core, CoreError,
-    attachments::{self, Capture, CaptureError, Sources},
+    attachments::{self, CaptureError, Copies, Sources},
     intake::{Intake, Reservation, lock},
 };
 
@@ -59,6 +59,17 @@ enum Unkept {
     Changed,
     #[error("Carillon could not copy it: {0:#}")]
     Uncopied(anyhow::Error),
+}
+
+impl From<CaptureError> for Unkept {
+    fn from(error: CaptureError) -> Self {
+        match error {
+            CaptureError::Full => Self::DiskFull,
+            CaptureError::Invalid(_) => Self::Changed,
+            CaptureError::Io(error) => Self::Uncopied(error),
+            cancelled @ CaptureError::Cancelled => Self::Uncopied(cancelled.into()),
+        }
+    }
 }
 
 impl From<io::Error> for Unkept {
@@ -102,6 +113,20 @@ impl Kept {
             return output.to_owned();
         }
         format!("{output}\n\n{}", self.notes.join("\n"))
+    }
+
+    fn keep(&mut self, capture: &str, path: &Path, size: u64, sha256: String) {
+        self.files.push(KeptFile {
+            capture: capture.to_owned(),
+            name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            source: path.display().to_string(),
+            size,
+            sha256,
+        });
     }
 
     fn refuse(&mut self, path: &Path, reason: &Unkept) {
@@ -186,7 +211,7 @@ impl Core {
                     }
                     Ok((file, size)) => {
                         total += size;
-                        accepted.push(path.as_path());
+                        accepted.push((path.as_path(), size));
                         sources.push((file, size));
                         continue;
                     }
@@ -200,12 +225,19 @@ impl Core {
         let refused = match self.intake.reserve(self, total) {
             Ok(reservation) => {
                 kept.reservation = Some(reservation);
-                let sizes = sources.iter().map(|(_, size)| *size).collect::<Vec<_>>();
                 let cancel = self.intake.signals.fresh();
-                match attachments::capture(&self.options.data_directory, Sources(sources), &cancel)
-                {
-                    Ok(Capture { id, digests }) => {
-                        kept.files = kept_files(&id, &accepted, &sizes, digests);
+                match attachments::capture_each(
+                    &self.options.data_directory,
+                    Sources(sources),
+                    &cancel,
+                ) {
+                    Ok(Copies { id, files }) => {
+                        for ((path, size), copied) in accepted.into_iter().zip(files) {
+                            match copied {
+                                Ok(sha256) => kept.keep(&id, path, size, sha256),
+                                Err(error) => kept.refuse(path, &error.into()),
+                            }
+                        }
                         return Ok(kept);
                     }
                     Err(CaptureError::Cancelled) => {
@@ -213,43 +245,17 @@ impl Core {
                             "Carillon is shutting down".to_owned(),
                         ));
                     }
-                    Err(CaptureError::Full) => Unkept::DiskFull,
-                    Err(CaptureError::Invalid(_)) => Unkept::Changed,
-                    Err(CaptureError::Io(error)) => Unkept::Uncopied(error),
+                    Err(error) => error.into(),
                 }
             }
             Err(CoreError::InsufficientStorage(reason)) => Unkept::NoRoom(reason),
             Err(error) => return Err(error),
         };
-        for path in accepted {
+        for (path, _) in accepted {
             kept.refuse(path, &refused);
         }
         Ok(kept)
     }
-}
-
-fn kept_files(
-    capture: &str,
-    paths: &[&Path],
-    sizes: &[u64],
-    digests: Vec<String>,
-) -> Vec<KeptFile> {
-    paths
-        .iter()
-        .zip(sizes)
-        .zip(digests)
-        .map(|((path, size), sha256)| KeptFile {
-            capture: capture.to_owned(),
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            source: path.display().to_string(),
-            size: *size,
-            sha256,
-        })
-        .collect()
 }
 
 /// Opens a file as its owner would, following links. A FIFO opens without
