@@ -12,7 +12,7 @@ struct Fixture {
 
 impl Fixture {
     /// An installation of T3 Code agent `t3-notes` alone, whose T3 settings
-    /// the runtime's check reads.
+    /// the runtime's check reads, using a model.
     fn new() -> anyhow::Result<Self> {
         let directory = tempfile::tempdir()?;
         let home = directory.path().join("home");
@@ -40,6 +40,7 @@ impl Fixture {
             &serde_json::json!({
                 "projects": [{"id": "p1", "title": "Notes", "workspace": directory.path()}],
                 "models": [model("codex", "gpt", "GPT")],
+                "value": "codex/gpt",
             }),
         )?;
         for (name, script) in [

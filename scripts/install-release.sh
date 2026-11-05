@@ -197,9 +197,10 @@ if [ "$GUIDED" -eq 1 ]; then
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" setup "$@"
 fi
 # Unattended setup keeps an existing registry, credentials and durable state;
-# only the Discord provider's own settings file is (re)written from the
-# arguments.
-if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
+# init creates the installation, or the database of a registry carried from
+# another, and only the Discord provider's own settings file is (re)written
+# from the arguments.
+if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" \
     --base-port "$BASE_PORT"
 fi

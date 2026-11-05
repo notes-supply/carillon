@@ -9,17 +9,20 @@
 use std::{
     collections::BTreeMap,
     io::Write as _,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{AgentConfig, Config, LoadedConfig, ProviderRole},
+    config::{AgentConfig, Config, LoadedConfig, ProviderRole, RELEASE_VERSION},
+    filesystem::atomic_write,
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
 use serde::Deserialize;
+use toml_edit::{DocumentMut, Item};
 
 use super::{
     admin::{self, Runtime, initialize, register_runtime, set_agents},
@@ -36,11 +39,13 @@ pub(super) struct Options {
     pub runtimes: Vec<Runtime>,
 }
 
-/// What a T3 server offers, as `carillon-runtime-t3 discover` prints it.
+/// What a T3 server offers, as `carillon-runtime-t3 discover` prints it;
+/// offered to an agent, with the model the agent uses.
 #[derive(Deserialize)]
 struct Offer {
     projects: Vec<Project>,
     models: Vec<OfferedModel>,
+    value: Option<String>,
 }
 
 /// A model a runtime offers an agent, as its setup commands print it.
@@ -96,7 +101,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     } else {
         SavedT3::Replaced
     };
-    if t3 && saved != SavedT3::Kept {
+    if t3 {
         set_up_t3(
             home,
             options,
@@ -113,7 +118,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
-        create_missing_database(home)?;
+        start_fresh(home)?;
     }
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents = &config.value.agents;
@@ -283,15 +288,61 @@ fn choose_pi_models(
     Ok(())
 }
 
-/// Creates the installation's database when it has none, as a new
-/// installation does. An installation set up with another's carried
-/// configuration starts with empty state; core itself never creates one.
-fn create_missing_database(home: &Path) -> Result<()> {
-    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
-    let path = config.value.data_dir.join("carillon.sqlite3");
+/// `carillon init`: a new installation at `home` with Carillon's assistant
+/// on Pi in `workspace`, or, over a `carillon.toml` carried from another
+/// installation, the fresh start it lacks. Returns the registry's path.
+pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
+    let path = home.join("carillon.toml");
     if !path.exists() {
-        Database::create(&path)?;
+        return initialize(
+            home,
+            base_port,
+            Runtime::Pi,
+            vec![admin::assistant(workspace)],
+        );
     }
+    let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    start_fresh(home)?;
+    Ok(path)
+}
+
+/// Starts an installation without a database, as one set up with another's
+/// carried configuration, on this release: its registry expects the
+/// providers this release bundles at their versions here, edited in place,
+/// and it gets a new database. Core itself never creates one. An
+/// installation with a database, in whatever format, is left as it is. The
+/// caller holds the maintenance lock.
+fn start_fresh(home: &Path) -> Result<()> {
+    let config_path = home.join("carillon.toml");
+    let database = LoadedConfig::load(&config_path)?
+        .value
+        .data_dir
+        .join("carillon.sqlite3");
+    if database.exists() {
+        return Ok(());
+    }
+    let bundled = [
+        ("discord-private", RELEASE_VERSION.to_owned()),
+        (Runtime::Pi.id(), Runtime::Pi.version()?),
+        (Runtime::T3.id(), Runtime::T3.version()?),
+    ];
+    let mut registry: DocumentMut = std::fs::read_to_string(&config_path)?.parse()?;
+    if let Some(providers) = registry
+        .get_mut("providers")
+        .and_then(Item::as_array_of_tables_mut)
+    {
+        for provider in providers.iter_mut() {
+            let id = provider.get("id").and_then(Item::as_str);
+            if let Some((_, version)) = bundled.iter().find(|(bundled, _)| Some(*bundled) == id) {
+                provider["version"] = toml_edit::value(version.as_str());
+            }
+        }
+    }
+    let registry = registry.to_string();
+    toml::from_str::<Config>(&registry)?.validate()?;
+    let mode = std::fs::metadata(&config_path)?.permissions().mode() & 0o777;
+    atomic_write(&config_path, registry.as_bytes(), mode)?;
+    Database::create(&database)?;
     Ok(())
 }
 
@@ -345,6 +396,12 @@ impl Server<'_> {
         serde_json::from_str(&offer).context("carillon-runtime-t3 discovered something unreadable")
     }
 
+    /// What the runtime offers the installation's agent `id` on the server.
+    fn offer(&self, home: &Path, id: &str) -> Result<Offer> {
+        let offer = self.run(home, "discover", &["--agent", id], None)?;
+        serde_json::from_str(&offer).context("carillon-runtime-t3 discovered something unreadable")
+    }
+
     /// `t3`'s `command` with `args` for the installation at `home`, the
     /// token on its standard input, followed by `secret` when there is one,
     /// under the maintenance lock, which no question waits behind.
@@ -373,7 +430,9 @@ impl Server<'_> {
 /// Asks for a T3 server and the projects T3 Code channels work in; creates
 /// or extends the installation with their agents, and with Carillon's
 /// `assistant` on Pi when Pi is used; then has the T3 runtime `t3` write each
-/// T3 agent's settings with the default model chosen for it.
+/// T3 agent's settings with the default model chosen for it. Kept settings
+/// keep their server, token and agents, and only a T3 agent without a model
+/// is asked one.
 fn set_up_t3(
     home: &Path,
     options: &Options,
@@ -382,6 +441,12 @@ fn set_up_t3(
     saved: SavedT3,
     questions: &mut impl Questions,
 ) -> Result<()> {
+    if saved == SavedT3::Kept {
+        if assistant {
+            agents(home, options, true, None)?;
+        }
+        return choose_kept_models(home, &saved_server(home, t3)?, questions);
+    }
     let (server, offer) = loop {
         let url = questions.answer("T3 Code's address:", Some("http://127.0.0.1:3773"))?;
         let token = questions.secret(
@@ -443,30 +508,101 @@ fn configure_agents(
 ) -> Result<()> {
     for (agent, project) in agents {
         let label = agent.label(agents.iter().map(|(agent, _)| agent));
-        let offer = server.run(home, "discover", &["--agent", &agent.id], None)?;
-        let offer: Offer = serde_json::from_str(&offer)
-            .context("carillon-runtime-t3 discovered something unreadable")?;
-        let models = &offer.models;
-        if models.is_empty() {
-            bail!("T3 offers {label} no usable model; set one up in T3, then run setup again");
-        }
-        let model = &models[questions.choose(
-            &format!("Which model should {label} use?"),
-            &model_labels(models),
-            0,
-        )?];
-        let model = model.id();
-        let args = [
-            "--agent",
+        let offer = server.offer(home, &agent.id)?;
+        configure_agent(
+            home,
+            server,
             &agent.id,
-            "--project",
+            &label,
             &project.id,
-            "--model",
-            &model,
-        ];
-        questions.say(server.run(home, "configure", &args, None)?.trim())?;
+            &offer,
+            questions,
+        )?;
     }
     Ok(())
+}
+
+/// Has the T3 runtime configure each T3 agent whose settings ledger has no
+/// model, as kept settings over new state leave it, with its saved project
+/// and the default model chosen for it. An agent with a model keeps it.
+fn choose_kept_models(
+    home: &Path,
+    server: &Server<'_>,
+    questions: &mut impl Questions,
+) -> Result<()> {
+    let config: Config = toml::from_str(&std::fs::read_to_string(home.join("carillon.toml"))?)?;
+    let projects = saved_projects(home)?;
+    let agents: Vec<&AgentConfig> = config
+        .agents
+        .iter()
+        .filter(|agent| agent.runtime == Runtime::T3.id())
+        .collect();
+    for &agent in &agents {
+        let offer = server.offer(home, &agent.id)?;
+        if offer.value.is_some() {
+            continue;
+        }
+        let project = projects
+            .get(&agent.id)
+            .with_context(|| format!("the saved T3 settings give {} no project", agent.id))?;
+        let label = agent.label(agents.iter().copied());
+        configure_agent(
+            home,
+            server,
+            &agent.id,
+            &label,
+            &project.project_id,
+            &offer,
+            questions,
+        )?;
+    }
+    Ok(())
+}
+
+/// Asks the default model of the agent `id`, called `label`, among those
+/// `offer` makes it, and has the T3 runtime configure the agent with it and
+/// its project.
+fn configure_agent(
+    home: &Path,
+    server: &Server<'_>,
+    id: &str,
+    label: &str,
+    project: &str,
+    offer: &Offer,
+    questions: &mut impl Questions,
+) -> Result<()> {
+    let models = &offer.models;
+    if models.is_empty() {
+        bail!("T3 offers {label} no usable model; set one up in T3, then run setup again");
+    }
+    let model = &models[questions.choose(
+        &format!("Which model should {label} use?"),
+        &model_labels(models),
+        0,
+    )?];
+    let model = model.id();
+    let args = ["--agent", id, "--project", project, "--model", &model];
+    questions.say(server.run(home, "configure", &args, None)?.trim())
+}
+
+/// The T3 server the saved settings name, with the token their file holds.
+fn saved_server<'a>(home: &Path, t3: &'a Path) -> Result<Server<'a>> {
+    #[derive(Deserialize)]
+    struct Settings {
+        url: String,
+        token_file: PathBuf,
+    }
+    let path = home.join("providers/runtime-t3.toml");
+    let settings: Settings = toml::from_str(&std::fs::read_to_string(&path)?)
+        .with_context(|| format!("read the T3 server from {}", path.display()))?;
+    let token_file = home.join(&settings.token_file);
+    let token = std::fs::read_to_string(&token_file)
+        .with_context(|| format!("read {}", token_file.display()))?;
+    Ok(Server {
+        t3,
+        url: settings.url,
+        token: token.trim().to_owned(),
+    })
 }
 
 /// Replaces T3's agents, and with `assistant` places Carillon's assistant on

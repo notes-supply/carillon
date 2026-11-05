@@ -25,10 +25,14 @@ export interface Project {
   readonly workspace: string;
 }
 
-/** A T3 server's projects and usable models. */
+/**
+ * A T3 server's projects and usable models. Offered to an agent, `value` is
+ * the agent's model in the settings ledger, `null` when it has none.
+ */
 export interface Offer {
   readonly projects: readonly Project[];
   readonly models: readonly CatalogueModel[];
+  readonly value?: string | null;
 }
 
 /** An agent's project and default model, the model as T3 names its provider instance and slug. */
@@ -63,7 +67,17 @@ export async function discover(
   const { connect = connectT3, scope } = options;
   if (scope !== undefined) plain(agentOf(scope.installation, scope.agentId));
   const { projects, catalogue } = await serverOffer(endpoint, connect);
-  return { projects, models: catalogue.models };
+  if (scope === undefined) return { projects, models: catalogue.models };
+  const ledger = await openLedger(scope.installation);
+  const { value } = await modelLine(ledger, catalogue, scope.agentId);
+  return { projects, models: catalogue.models, value: value?.kind === "one" ? value.id : null };
+}
+
+async function modelLine(ledger: SettingsLedger, catalogue: Catalog, agentId: string) {
+  const lines = await ledger.settings(catalogue, { kind: "agent", agent_id: agentId });
+  const line = lines.find(({ id }) => id === "model");
+  if (line === undefined) throw new Error("the settings ledger shows no model line");
+  return line;
 }
 
 async function serverOffer(
@@ -177,12 +191,10 @@ export async function configure(
   if (!offer.catalogue.models.some((candidate) => modelChoiceId(candidate) === model))
     throw new Error(`T3 offers ${agent.name} no usable model ${model}`);
   const ledger = await openLedger(installation);
-  const subject = { kind: "agent", agent_id: choice.agentId } as const;
-  const line = (await ledger.settings(offer.catalogue, subject)).find(({ id }) => id === "model");
-  if (line === undefined) throw new Error("the settings ledger shows no model line");
+  const line = await modelLine(ledger, offer.catalogue, choice.agentId);
   // Choosing the model again keeps the options chosen for it.
   if (line.value?.kind !== "one" || line.value.id !== model)
-    await ledger.change(offer.catalogue, subject, {
+    await ledger.change(offer.catalogue, { kind: "agent", agent_id: choice.agentId }, {
       setting: "model",
       value: { kind: "one", id: model },
       expected: line.revision,

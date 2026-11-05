@@ -62,7 +62,7 @@ impl Runtime {
     }
 
     /// The version of the runtime this release bundles.
-    fn version(self) -> Result<String> {
+    pub(super) fn version(self) -> Result<String> {
         #[derive(serde::Deserialize)]
         struct Package {
             version: String,

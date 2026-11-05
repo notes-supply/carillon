@@ -151,7 +151,7 @@ function originArgument(args: ReadonlyMap<string, string>): string {
 /**
  * `discover --url URL [--agent ID --config PATH]`: the server's projects and
  * models, as JSON. `--agent` offers them to that agent of the installation
- * `--config` names, or `CARILLON_HOME`'s.
+ * `--config` names, or `CARILLON_HOME`'s, with the model it uses.
  */
 async function discoverCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);

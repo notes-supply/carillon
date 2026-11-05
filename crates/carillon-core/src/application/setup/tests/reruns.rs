@@ -1,6 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, create_missing_database, fake_t3,
-    initialized, model, options, saved_t3, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, fake_t3, initialized, model, options,
+    saved_t3, set_up_t3, start_fresh,
 };
 use crate::application::{
     admin::set_agents,
@@ -256,21 +256,37 @@ fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Resul
     Ok(())
 }
 
+/// A registry carried from another installation, without its state, gets a
+/// new database and expects the providers this release bundles. One with a
+/// database is left as it is.
 #[test]
-fn a_carried_registry_without_state_gets_a_new_database() -> anyhow::Result<()> {
+fn a_carried_registry_without_state_starts_fresh_on_this_release() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::Pi)?;
+    let path = initialized(&home, directory.path(), Runtime::Pi)?;
+    let note = "# Carried from the previous installation.\n";
+    let current = format!("{note}{}", std::fs::read_to_string(&path)?);
+    let carried: String = current
+        .lines()
+        .map(|line| {
+            if line.starts_with("version = ") {
+                "version = \"0.0.1-previous\"\n".to_owned()
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    assert_ne!(carried, current);
+    std::fs::write(&path, &carried)?;
     let database = home.join("state/carillon.sqlite3");
     std::fs::remove_file(&database)?;
-    create_missing_database(&home)?;
+    start_fresh(&home)?;
     crate::db::Database::open(&database)?;
+    assert_eq!(std::fs::read_to_string(&path)?, current);
     let created = std::fs::read(&database)?;
-    create_missing_database(&home)?;
-    assert_eq!(
-        std::fs::read(&database)?,
-        created,
-        "an existing database is left as it is"
-    );
+    std::fs::write(&path, &carried)?;
+    start_fresh(&home)?;
+    assert_eq!(std::fs::read(&database)?, created);
+    assert_eq!(std::fs::read_to_string(&path)?, carried);
     Ok(())
 }

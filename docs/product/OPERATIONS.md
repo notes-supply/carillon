@@ -55,7 +55,7 @@ Without Discord options, the installer asks at the terminal:
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
-token). The installer refuses while Carillon runs: stop it with `carillon
+token). Kept T3 settings still ask the model of each T3 agent that has none. The installer refuses while Carillon runs: stop it with `carillon
 stop` first, or update it with `carillon update ARCHIVE`. On an installed
 release, `carillon setup` asks the same questions, and `carillon discord
 setup` asks only Discord's. A rerun that changes the T3 settings or the bot
@@ -108,7 +108,9 @@ Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
 the models Pi offers.
 
 Rerunning the installer with options keeps the registry, credentials and
-state, and writes the guild, bot and people from them. `--route` only
+state, and writes the guild, bot and people from them. A `carillon.toml`
+copied from another installation, without its state, gets a new database
+(see [Update](#update)). `--route` only
 creates the first routes: a rerun must name the routes the settings already
 have, and changes a route only through [Settings](#settings). Use
 `carillon update` for new releases.
@@ -844,12 +846,25 @@ refuses its database format and changes nothing. To move to it:
    keeping their modes: `carillon.toml`, `providers/*.toml`, `credentials/`,
    `pi/auth.json`, `pi/models.json`, `pi/settings.json`, `pi/mcp.json` if
    you have one, and `agents/`.
-3. Run the new release's `install.sh` and answer setup. It keeps the
-   Discord settings and the Pi sign-in. It asks T3's address, token and
-   projects again, because the old T3 settings name a model, and the model
-   now lives in the runtime's settings. It asks each agent's model and
-   creates a new database.
-4. Run `carillon start`.
+3. Run the new release's `install.sh` the way you installed before.
+   - **Guided**, without options. Setup asks no runtime question: it uses
+     the runtimes `carillon.toml` registers. With T3, it asks "Keep the T3
+     settings and agents?". Yes keeps T3's address, token and projects and
+     asks the model of each T3 agent. No asks the address, token, projects
+     and models again. With Pi, it says Pi is signed in, then asks the
+     model of each Pi agent. Discord checks the saved bot token and asks
+     "Keep the saved Discord bot and settings?". Then Carillon starts.
+   - **Without questions**, with the Discord options you used before,
+     every route included. The bot token and the Pi sign-in are already
+     in place, so skip the first two steps it prints. Run `carillon
+     start`, then give each agent its model with `carillon settings
+     --agent AGENT model=PROVIDER/MODEL`.
+
+   Either way, the installer creates a new database. In `carillon.toml`, it
+   sets the `version` line of each provider this release bundles
+   (`discord-private`, `runtime-pi` and `runtime-t3`) and leaves the rest
+   of the file as it was. A provider you installed separately keeps its
+   line.
 
 `state/` starts empty, so turn history, conversations, Pi's conversations
 and scheduled runs do not carry over. T3 per-thread model choices do not
@@ -865,8 +880,9 @@ nothing. If a later step fails, the message says what changed; rerun the
 same update until it succeeds before starting services. There's no
 downgrade: restore a backup made before the update instead.
 
-Provider versions in `carillon.toml` are expectations you change yourself
-when you mean to run another provider release; `status` shows any mismatch.
+After `carillon update`, provider versions in `carillon.toml` are
+expectations you change yourself when you mean to run another provider
+release; `status` shows any mismatch.
 
 Earlier releases ran Carillon's assistant on T3 through T3 instances of its
 own, `carillon_claude` and `carillon_codex`. Nothing uses them now, and T3
