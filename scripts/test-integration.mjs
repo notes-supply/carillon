@@ -8,7 +8,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readdir,
   readFile,
   rename,
   rm,
@@ -21,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isolateEnvironment } from "./environment.ts";
+import { testFiles } from "./integration/files.mjs";
 import { availableBasePort } from "./integration/ports.mjs";
 import { embedText, seen } from "./integration/replies.mjs";
 import { testSettings } from "./integration/settings.mjs";
@@ -237,7 +237,23 @@ try {
   const abandonedInspection = JSON.parse(run("--home", installation, "inspect", abandoned.turn_id));
   assert.equal(abandonedInspection.delivery_state, "uncertain");
 
-  const attachmentTurn = await testAttachments();
+  const attachmentTurn = await testFiles({
+    basePort,
+    installation,
+    workspace,
+    event,
+    requestSimulation,
+    simulate,
+    credential,
+    credentialValue,
+    submitCoreEvent,
+    waitForTurn,
+    waitForDeliveryClaim,
+    acknowledgeDelivery,
+    stop,
+    start,
+    restart,
+  });
 
   const recent = JSON.parse(
     run("--home", installation, "recent", "--event-id", "event-4", "--limit", "5"),
@@ -1643,102 +1659,6 @@ async function interact(channelId, parentChannelId, kind, name, values = [], opt
 
 /** A reply as a person reads it: its text, then its embeds' notes, sections and hints. */
 /** Files staged as the Discord provider stages them, captured through core. */
-async function testAttachments() {
-  // Simulation fetches an admitted message's files only from Discord's CDN:
-  // the built provider refuses anything else before a request is made.
-  const local = await requestSimulation({
-    ...event("attachments-local", "100", "200", "300", null, ""),
-    attachments: [
-      {
-        id: "601",
-        filename: "local.png",
-        size: 4,
-        url: `http://127.0.0.1:${String(basePort)}/attachments/300/601/local.png`,
-      },
-    ],
-  });
-  const refusal = await local.text();
-  assert.equal(local.status, 422, refusal);
-  assert.match(refusal, /not a Discord attachment/u);
-  const incoming = join(installation, "state/components/discord-private/incoming");
-  const report = Buffer.from("%PDF-1.7 integration bytes");
-  await mkdir(join(incoming, "batch"), { recursive: true });
-  await writeFile(join(incoming, "batch", "0"), report);
-  await writeFile(join(incoming, "batch", "1"), "notes");
-  // Staging that links elsewhere is refused before anything is copied.
-  await mkdir(join(incoming, "linked"));
-  await symlink(credential("operator"), join(incoming, "linked", "0"));
-  const operatorToken = await stat(credential("operator"));
-  const linked = await postCoreEvent("attachments-linked", "", {
-    batch: "linked",
-    files: [{ name: "token", size: operatorToken.size }],
-  });
-  assert.equal(linked.status, 400, await linked.text());
-  const store = join(installation, "state/attachments");
-  assert.deepEqual(
-    await readdir(store).catch(() => []),
-    [],
-    "a refused capture left a copy behind",
-  );
-  const response = await postCoreEvent("attachments-1", "", {
-    batch: "batch",
-    files: [
-      { name: "report.pdf", size: report.length, content_type: "application/pdf" },
-      { name: "notes.txt", size: 5 },
-    ],
-  });
-  const body = await response.text();
-  assert.equal(response.status, 200, body);
-  const receipt = JSON.parse(body);
-  // The interface's staging is its own; accepted files no longer need it.
-  await rm(incoming, { recursive: true });
-  const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
-  assert.match(inspection.output, /attachment report\.pdf 26 bytes;/u);
-  assert.match(inspection.output, /attachment notes\.txt 5 bytes\./u);
-  assert.equal(inspection.attachments.length, 2);
-  assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
-  // Asked about the event again, core names the same accepted turn, in the
-  // state it has now reached.
-  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-provider": "discord-private",
-    },
-  });
-  assert.deepEqual(await status.json(), {
-    status: "accepted",
-    ...receipt,
-    state: "completed",
-    duplicate: true,
-  });
-  const delivery = await waitForDeliveryClaim("attachments-check");
-  assert.equal(delivery.turn_id, receipt.turn_id);
-  await acknowledgeDelivery(delivery.id, "attachments-check");
-  return receipt.turn_id;
-}
-
-async function postCoreEvent(eventId, content, attachments) {
-  return await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-provider": "discord-private",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      event_id: eventId,
-      agent_id: "assistant",
-      user_id: "200",
-      audience_id: "discord-100-306",
-      channel_id: "306",
-      delivery_target_id: "306",
-      feedback_target_id: `306:${eventId}`,
-      content,
-      attachments,
-    }),
-  });
-}
-
 async function submitCoreEvent(eventId, content, channel = "300") {
   const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
     method: "POST",
