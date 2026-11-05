@@ -104,7 +104,7 @@ pub(crate) async fn change(
     until: Instant,
 ) -> Result<Page, InterfaceError> {
     if ROUTE_LINES.contains(&change.setting.as_str()) {
-        let routing = reroute(core, writer, routing.channel_id(), change).await?;
+        let routing = reroute(core, writer, routing.channel_id(), change, until).await?;
         return Ok(page(core, writer, &routing, title, until).await);
     }
     let Some(route) = routing.route() else {
@@ -122,19 +122,22 @@ pub(crate) async fn change(
 }
 
 /// Writes a route line's change to the settings file and serves it, when
-/// the line is still at the revision the change was drawn from in the file.
-/// Choosing the agent of an unrouted channel creates its route, answering
-/// only when mentioned, a thread per conversation.
+/// the line is still at the revision the change was drawn from in the file
+/// and no other change holds the file until `until`. Choosing the agent of
+/// an unrouted channel creates its route, answering only when mentioned, a
+/// thread per conversation. A change whose file is in place but not
+/// confirmed durable serves, and is reported as an error.
 async fn reroute(
     core: &CoreClient,
     writer: &Writer,
     channel_id: &str,
     change: Change,
+    until: Instant,
 ) -> Result<Routing, InterfaceError> {
     let interface_id = core.provider_id();
     let agents = &writer.installation().value.agents;
     let written = writer
-        .change(|discord| {
+        .change(until, |discord| {
             let index = discord
                 .routes
                 .iter()
@@ -194,6 +197,12 @@ async fn reroute(
             Ok(route.clone())
         })
         .await?;
+    if let Some(error) = written.unsynced {
+        return Err(InterfaceError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Changed, but a system crash may undo it: {error:#}"),
+        });
+    }
     Ok(Routing::Routed(written.value))
 }
 

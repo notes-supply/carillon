@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context as _;
 use axum::{Json, Router, http::StatusCode, routing::post};
 use carillon_discord_module::contract::Notice;
 use carillon_protocol::settings::{
@@ -390,6 +391,123 @@ async fn a_change_unanswered_by_the_deadline_is_unconfirmed_and_not_retried() ->
         }
     );
     assert_eq!(shown.interface.len(), 3, "the route lines still draw");
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_route_change_held_past_its_deadline_by_a_module_change_is_unconfirmed_and_not_made()
+-> anyhow::Result<()> {
+    let (core, _, server) = core(Duration::ZERO).await?;
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let drawn = page(&core, &writer, &served(&writer), "#300".to_owned(), until()).await;
+    let before = fs::read(
+        writer
+            .installation()
+            .provider_config_path("discord-private")?,
+    )?;
+    let (holding, held) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let module = tokio::spawn({
+        let writer = writer.clone();
+        async move {
+            writer
+                .declare(
+                    |_| Ok(()),
+                    move |_, _| async move {
+                        let _ = holding.send(());
+                        let _ = released.await;
+                        Err(crate::module::ChangeError::Busy("held".into()))
+                    },
+                )
+                .await
+                .map(|_| ())
+        }
+    });
+    held.await?;
+    let started = Instant::now();
+    let (shown, notice) = tokio::time::timeout(
+        Duration::from_secs(5),
+        settled(
+            &core,
+            &writer,
+            &served(&writer),
+            "#300".to_owned(),
+            change_of(line(&drawn, "listens")?, "mention"),
+            started + Duration::from_millis(500),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the card waited for the module change past its deadline"))?;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(notice, Some(Notice::Unconfirmed));
+    assert_eq!(
+        line(&shown, "listens")?.value_name().as_deref(),
+        Some("always")
+    );
+    let _ = release.send(());
+    let refused = module.await?.err().context("the module change was made")?;
+    assert!(
+        matches!(
+            refused,
+            crate::config::Refused::Module(crate::module::ChangeError::Busy(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fs::read(
+            writer
+                .installation()
+                .provider_config_path("discord-private")?
+        )?,
+        before
+    );
+    assert_eq!(
+        writer.current().routes[0].activation,
+        DiscordActivation::Always
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_route_change_in_place_but_not_synced_shows_and_serves_it_unconfirmed()
+-> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (core, _, server) = core(Duration::ZERO).await?;
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let drawn = page(&core, &writer, &served(&writer), "#300".to_owned(), until()).await;
+    let path = writer
+        .installation()
+        .provider_config_path("discord-private")?;
+    let providers = path.parent().context("settings directory")?;
+    // Writable but not readable: the new file is renamed into place, and
+    // the directory cannot be opened to sync it.
+    fs::set_permissions(providers, fs::Permissions::from_mode(0o300))?;
+    let (shown, notice) = settled(
+        &core,
+        &writer,
+        &served(&writer),
+        "#300".to_owned(),
+        change_of(line(&drawn, "listens")?, "mention"),
+        until(),
+    )
+    .await;
+    fs::set_permissions(providers, fs::Permissions::from_mode(0o700))?;
+    let Some(Notice::Refused(warning)) = notice else {
+        anyhow::bail!("the card showed {notice:?}");
+    };
+    assert!(warning.contains("not confirmed durable"), "{warning}");
+    assert_eq!(
+        line(&shown, "listens")?.value_name().as_deref(),
+        Some("mentions")
+    );
+    assert_eq!(file(&writer)?.routes, writer.current().routes);
+    assert_eq!(
+        writer.current().routes[0].activation,
+        DiscordActivation::Mention
+    );
     server.abort();
     Ok(())
 }

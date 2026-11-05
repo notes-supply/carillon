@@ -2,10 +2,11 @@
 //! `/settings`, `carillon settings`, setup and module changes all reach it
 //! here. One change at a time reads the file, refuses it when it differs
 //! from what serves, applies the change, validates the result, writes it
-//! atomically and serves it. A change to what only a restart applies is
-//! written without serving, and later changes build on that file. Only
-//! while the provider is stopped does the CLI write the file itself, under
-//! the installation's maintenance lock.
+//! atomically and serves it. A file renamed into place serves even when its
+//! directory did not sync, so what serves is always the file. A change to
+//! what only a restart applies is written without serving, and later
+//! changes build on that file. Only while the provider is stopped does the
+//! CLI write the file itself, under the installation's maintenance lock.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -13,9 +14,13 @@ use anyhow::{Context as _, Result, anyhow};
 use axum::http::StatusCode;
 use carillon_installation::{config::LoadedConfig, maintenance::MaintenanceLock};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tokio::{
+    sync::{MutexGuard, oneshot},
+    time::{Instant, timeout_at},
+};
+use tracing::{error, info, warn};
 
-use super::{Difference, DiscordConfig, DiscordRoute, Settings};
+use super::{Difference, DiscordConfig, DiscordRoute, Settings, WriteError};
 use crate::{
     InterfaceError,
     error::discord_failure_is_terminal,
@@ -123,7 +128,12 @@ impl FileChange {
         let mut discord = file_or_defaults(config, provider_id).context(unchanged)?;
         self.apply(&mut discord)
             .map_err(|refused| anyhow!("{}", InterfaceError::from(refused).message))?;
-        discord.write(config, provider_id).context(unchanged)
+        discord
+            .write(config, provider_id)
+            .map_err(|error| match error {
+                WriteError::NotWritten(error) => error.context(unchanged),
+                WriteError::Unsynced(error) => error,
+            })
     }
 }
 
@@ -163,14 +173,26 @@ pub(crate) struct Commit {
     installation: Arc<LoadedConfig>,
     provider_id: Arc<str>,
     settings: DiscordConfig,
+    /// Tells the writer the file is in place but not confirmed durable.
+    unsynced: oneshot::Sender<anyhow::Error>,
 }
 
 impl Commit {
+    /// Writes the settings. A file in place whose directory did not sync is
+    /// written: the module it declares serves, and the writer reports it.
+    ///
     /// # Errors
     ///
-    /// Returns why the settings file was not written.
+    /// Returns why the settings file is as it was.
     pub(crate) fn write(self) -> Result<()> {
-        self.settings.write(&self.installation, &self.provider_id)
+        match self.settings.write(&self.installation, &self.provider_id) {
+            Ok(()) => Ok(()),
+            Err(WriteError::NotWritten(error)) => Err(error),
+            Err(WriteError::Unsynced(error)) => {
+                let _ = self.unsynced.send(error);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -184,6 +206,10 @@ pub(crate) struct Written<T> {
     /// a restart applies.
     pub restart: Vec<String>,
     pub module: Option<Change>,
+    /// The file is in place, and serves unless it waits for a restart, but
+    /// its directory did not sync, so a system crash may bring back the
+    /// previous file.
+    pub unsynced: Option<anyhow::Error>,
 }
 
 /// Why a change left the file and what serves as they were.
@@ -198,6 +224,8 @@ pub(crate) enum Refused {
     Invalid(String),
     Module(ChangeError),
     Write(anyhow::Error),
+    /// Another change held the file past the change's deadline.
+    Busy,
 }
 
 impl From<Refused> for InterfaceError {
@@ -238,6 +266,10 @@ impl From<Refused> for InterfaceError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("could not write the settings file: {error:#}"),
             ),
+            Refused::Busy => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "another settings change is still in progress; nothing was changed".to_owned(),
+            ),
         };
         Self { status, message }
     }
@@ -265,17 +297,26 @@ impl Writer {
     }
 
     /// Changes the file with `edit`, which never changes the module, and
-    /// serves the result.
+    /// serves the result, unless another change holds the file until
+    /// `until`.
     ///
     /// # Errors
     ///
     /// Returns why the file and what serves are unchanged.
     pub(crate) async fn change<T>(
         &self,
+        until: Instant,
         edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
     ) -> Result<Written<T>, Refused> {
-        self.write(edit, None::<fn(&DiscordConfig, Commit) -> NoModule>)
+        let written = timeout_at(until, self.settings.0.applying.lock())
             .await
+            .map_err(|_| Refused::Busy)?;
+        self.write(
+            written,
+            edit,
+            None::<fn(&DiscordConfig, Commit) -> NoModule>,
+        )
+        .await
     }
 
     /// Changes the file with `edit` and serves the result, first serving the
@@ -293,18 +334,20 @@ impl Writer {
     where
         F: Future<Output = Result<Change, ChangeError>>,
     {
-        self.write(edit, Some(module)).await
+        let written = self.settings.0.applying.lock().await;
+        self.write(written, edit, Some(module)).await
     }
 
+    /// Changes the file with `edit` while `written` holds it.
     async fn write<T, F>(
         &self,
+        mut written: MutexGuard<'_, Option<Arc<DiscordConfig>>>,
         edit: impl FnOnce(&mut DiscordConfig) -> Result<T, Refused>,
         module: Option<impl FnOnce(&DiscordConfig, Commit) -> F>,
     ) -> Result<Written<T>, Refused>
     where
         F: Future<Output = Result<Change, ChangeError>>,
     {
-        let mut written = self.settings.0.applying.lock().await;
         let serving = self.settings.current();
         let file = DiscordConfig::load(&self.installation, &self.provider_id)
             .map_err(Refused::Unreadable)?;
@@ -328,12 +371,14 @@ impl Writer {
                 restart: difference.restart,
             }));
         }
-        let module = match module {
+        let (module, unsynced) = match module {
             Some(module) if difference.restart.is_empty() => {
+                let (unsynced, mut committed) = oneshot::channel();
                 let commit = Commit {
                     installation: Arc::clone(&self.installation),
                     provider_id: Arc::clone(&self.provider_id),
                     settings: next.clone(),
+                    unsynced,
                 };
                 let module = module(&next, commit)
                     .await
@@ -348,14 +393,20 @@ impl Writer {
                 {
                     difference.live.push("module".to_owned());
                 }
-                Some(module)
+                (Some(module), committed.try_recv().ok())
             }
-            _ => {
-                next.write(&self.installation, &self.provider_id)
-                    .map_err(Refused::Write)?;
-                None
-            }
+            _ => match next.write(&self.installation, &self.provider_id) {
+                Ok(()) => (None, None),
+                Err(WriteError::Unsynced(error)) => (None, Some(error)),
+                Err(WriteError::NotWritten(error)) => return Err(Refused::Write(error)),
+            },
         };
+        if let Some(error) = &unsynced {
+            warn!(
+                error = format!("{error:#}"),
+                "Discord settings written, but not confirmed durable"
+            );
+        }
         if difference.restart.is_empty() {
             if !difference.live.is_empty() {
                 info!(
@@ -377,6 +428,7 @@ impl Writer {
             },
             restart: difference.restart,
             module,
+            unsynced,
         })
     }
 }

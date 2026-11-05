@@ -582,7 +582,7 @@ async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Re
         let mut discord = crate::config::DiscordConfig::read(&config, "discord-private")?;
         discord.module.enabled = path.is_some();
         discord.module.path = path.map(Path::to_path_buf);
-        discord.write(&config, "discord-private")
+        Ok(discord.write(&config, "discord-private")?)
     };
 
     // With the bundled module or a usable custom one, the saved file waits

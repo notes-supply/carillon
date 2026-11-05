@@ -598,6 +598,18 @@ async fn change_settings(
     })?;
     let serving = state.module.serving();
     match written {
+        Ok(config::Written {
+            unsynced: Some(error),
+            ..
+        }) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Refusal {
+                error: format!("{error:#}; the change is made and a system crash may undo it"),
+                serving,
+                restart: Vec::new(),
+            }),
+        )
+            .into_response()),
         Ok(written) => Ok(Json(config::Applied {
             changed: written.changed,
             module: written.module.unwrap_or_else(|| discord_module::Change {
