@@ -8,10 +8,7 @@ use carillon_protocol::{
 };
 
 use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report};
-use crate::{
-    answers::Kept,
-    db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement},
-};
+use crate::db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement};
 
 impl Core {
     /// Settles a turn `runtime_id` holds as it says the turn ended, with the
@@ -33,18 +30,22 @@ impl Core {
                 files,
             } => {
                 let activity = kept_report(turn_id, activity);
-                let kept = if files.is_empty() || !self.database.unsettled(runtime_id, turn_id)? {
-                    Kept::default()
+                let kept = if files.is_empty() {
+                    None
                 } else {
-                    self.keep_answer_files(&files)?
+                    Some(self.keep_answer_files(runtime_id, turn_id, &files)?)
                 };
                 let settled = settle(Settlement::Answered {
                     output: &output,
-                    content: &kept.content(&output),
+                    content: &kept
+                        .as_ref()
+                        .map_or_else(|| output.clone(), |kept| kept.content(&output)),
                     activity: activity.as_ref(),
-                    files: &kept.files,
+                    files: kept.as_ref().map_or(&[], |kept| &kept.files),
                 });
-                kept.settled(self);
+                if let Some(kept) = kept {
+                    kept.settled(self);
+                }
                 settled?
             }
             TurnOutcome::Failed {

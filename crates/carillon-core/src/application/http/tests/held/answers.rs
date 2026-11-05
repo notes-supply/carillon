@@ -12,7 +12,7 @@ use super::super::{
     durable::{DurableRuntime, RUNTIME, dispatch, durable, settle},
     live::{ok, submit},
 };
-use crate::{WorkerStep, application::http::*, attachments};
+use crate::{WorkerStep, application::http::*, attachments, intake::lock};
 
 /// The one delivery waiting for the interface, claimed by `instance`.
 fn claim(core: &Core, instance: &str) -> Result<Delivery> {
@@ -225,5 +225,46 @@ async fn kept_files_outlast_a_stop_while_copying_and_a_restart_before_delivery()
         &fixture.config.value.data_dir,
         &state.core.database.captured_files()?,
     )?;
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
+async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let chart = directory.path().join("chart.png");
+    fs::write(&chart, b"chart")?;
+    let receipt = ok(submit(&state, "chart it", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    let answer = json!({"outcome": "answered", "output": "Here.", "files": [chart]});
+    let stall = state.core.intake.signals.stall.clone();
+    let held = stall.lock().map_err(|_| anyhow!("poisoned"))?;
+    let first = {
+        let (state, turn, answer) = (state.clone(), receipt.turn_id.clone(), answer.clone());
+        tokio::spawn(async move { settle(&state, RUNTIME, &turn, &answer).await })
+    };
+    let started = std::time::Instant::now();
+    while !lock(&state.core.intake.keeping).contains(&receipt.turn_id) {
+        anyhow::ensure!(started.elapsed() < Duration::from_secs(30), "no copy began");
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(held);
+    assert_eq!(first.await??, StatusCode::NO_CONTENT);
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    let store = fixture.config.value.data_dir.join("attachments");
+    assert_eq!(fs::read_dir(&store)?.count(), 1);
+    assert!(lock(&state.core.intake.keeping).is_empty());
     Ok(())
 }

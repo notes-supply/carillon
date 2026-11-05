@@ -18,7 +18,7 @@
 //! them retries, and none overtakes the earlier message.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -60,6 +60,8 @@ pub(crate) struct Intake {
     pub(crate) reserved: Arc<Mutex<u64>>,
     /// Shared by every capture's signal; stopping it stops them all.
     pub(crate) signals: Cancel,
+    /// The turns whose answers' files core is keeping now.
+    pub(crate) keeping: Mutex<HashSet<String>>,
 }
 
 /// Check a manifest against core's own limits before anything is read.
@@ -113,7 +115,7 @@ fn total(staged: &StagedAttachments) -> u64 {
     staged.files.iter().map(|file| file.size).sum()
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -126,6 +128,7 @@ impl Intake {
             settled: Notify::new(),
             reserved: Arc::default(),
             signals: Cancel::default(),
+            keeping: Mutex::default(),
         }
     }
 

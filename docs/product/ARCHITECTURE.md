@@ -181,8 +181,9 @@ the conversation's native session. It keeps each turn core hands it at
 through core's `POST /v1/runtime/turns/{id}/outcome`. An answer may name
 files by absolute path. Before it records the answer, core copies each into
 its attachment store with its digest, within its attachment limits, and adds
-a line to the delivered text for each file it cannot keep; a repeated outcome
-copies nothing. It opens turns of its
+a line to the delivered text for each file it cannot keep. The same outcome
+again copies nothing; while the files are being copied, it is refused as
+unavailable, to be asked again. It opens turns of its
 own through `POST /v1/runtime/turns`, reads back the turns core records
 running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. A turn's activity snapshot lists the
