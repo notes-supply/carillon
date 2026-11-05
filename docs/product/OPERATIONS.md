@@ -297,22 +297,37 @@ settings it was admitted with. While the provider runs, it is the only
 program that writes its settings file: setup, `carillon discord module` and
 route changes send their change to it, and it writes and serves the file.
 It writes only the values a change makes differ, each in its place, so the
-file keeps its comments, its order, its line endings and the defaults it
-leaves unstated. Routes are matched by channel and users by ID, each keeping
-its line and comments; setup answers that list them in another order change
-nothing, and new ones are added at the end. A changed string keeps its
-single quotes when the new value fits in them; other changed values are
-written in their plain form. A change and its undo leave the file byte for
-byte as it was, except that:
+file keeps its comments, its order, its line endings, a missing final
+newline and the defaults it leaves unstated. Routes are matched by channel
+and users by ID, each keeping its line and comments. A removed one goes with
+its line and the comments above it, except comments a blank line sets off;
+one that shares its line with another goes alone. Setup answers that list
+them in another order change nothing, and new ones are added at the end. A
+changed string keeps its single quotes when the new value fits in them,
+holding no single quote or line break. Other changed values are written in
+their plain form: a string in double quotes, in single quotes when it holds
+a `"` or a backslash but no single quote, or in `"""` when it holds a line
+break. A change and its undo leave the file byte for byte as it was, except
+that:
 
-- A user or route the change removed comes back without its comments.
-- A value or `[module]` table the change sets back to its default goes, as a
-  new file leaves it unstated, unless a comment is on it. An uncommented
-  `enabled = false` goes when a module is enabled and then disabled.
-- A string written over several lines comes back on one line, and an
-  escaped character comes back as itself.
-- A user list that names a user twice, when a change drops one of them, is
-  written again whole, on one line.
+- A user or route the change removed comes back without its comments, and
+  setup adds it at the end of its list. In a list written over several
+  lines, a line the removed user shared with another can come back split in
+  two.
+- The comments a blank line sets off above the last `[[routes]]` table go
+  with it when a change removes that route and adds none after it.
+- `carillon discord module disable` keeps the module's path, so a module
+  enabled with a path the file lacked, then disabled, leaves `[module]` with
+  `enabled = false` and that path.
+- Module settings that the undo leaves at their defaults, disabled with no
+  path, go unless a comment is on or above them, as a new file leaves them
+  unstated.
+- A changed string comes back in its plain form, unless it was in single
+  quotes and both values fit in them. So `'''x'''` comes back as `'x'` when
+  both fit, `"\u0061"` as `"a"`, and `'x'` as `"x"` when the change's value
+  held a single quote.
+- A user list that names a user twice is written again whole, on one line,
+  when a change drops one of them.
 - A file with CRLF line endings anywhere comes back with CRLF throughout.
 
 A change whose file is in place but whose folder could not be synced
