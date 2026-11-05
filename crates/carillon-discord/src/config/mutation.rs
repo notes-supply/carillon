@@ -311,6 +311,11 @@ impl Writer {
         let written = timeout_at(until, self.settings.0.applying.lock())
             .await
             .map_err(|_| Refused::Busy)?;
+        // A lock that frees while the executor is held past `until` still
+        // reads as acquired in time.
+        if Instant::now() >= until {
+            return Err(Refused::Busy);
+        }
         self.write(
             written,
             edit,

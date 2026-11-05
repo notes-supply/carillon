@@ -471,6 +471,83 @@ async fn a_route_change_held_past_its_deadline_by_a_module_change_is_unconfirmed
 }
 
 #[tokio::test]
+async fn a_route_change_whose_writer_frees_only_after_its_deadline_is_unconfirmed_and_not_made()
+-> anyhow::Result<()> {
+    let (core, _, server) = core(Duration::ZERO).await?;
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let drawn = page(&core, &writer, &served(&writer), "#300".to_owned(), until()).await;
+    let before = fs::read(
+        writer
+            .installation()
+            .provider_config_path("discord-private")?,
+    )?;
+    let (holding, held) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let module = tokio::spawn({
+        let writer = writer.clone();
+        async move {
+            writer
+                .declare(
+                    |_| Ok(()),
+                    move |_, _| async move {
+                        let _ = holding.send(());
+                        let _ = released.await;
+                        // Blocks the executor past the card's deadline, so
+                        // the writer is free when the card next looks.
+                        std::thread::sleep(Duration::from_millis(150));
+                        Err(crate::module::ChangeError::Busy("held".into()))
+                    },
+                )
+                .await
+                .map(|_| ())
+        }
+    });
+    held.await?;
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let change = change_of(line(&drawn, "listens")?, "mention");
+    let (starting, started) = tokio::sync::oneshot::channel();
+    let card = tokio::spawn({
+        let writer = writer.clone();
+        async move {
+            let routing = served(&writer);
+            let _ = starting.send(());
+            settled(
+                &core,
+                &writer,
+                &routing,
+                "#300".to_owned(),
+                change,
+                deadline,
+            )
+            .await
+        }
+    });
+    started.await?;
+    let _ = release.send(());
+    assert!(module.await?.is_err(), "the module change was made");
+    let (shown, notice) = card.await?;
+    assert_eq!(notice, Some(Notice::Unconfirmed));
+    assert_eq!(
+        line(&shown, "listens")?.value_name().as_deref(),
+        Some("always")
+    );
+    assert_eq!(
+        writer.current().routes[0].activation,
+        DiscordActivation::Always
+    );
+    assert_eq!(
+        fs::read(
+            writer
+                .installation()
+                .provider_config_path("discord-private")?
+        )?,
+        before
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_route_change_in_place_but_not_synced_shows_and_serves_it_unconfirmed()
 -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
