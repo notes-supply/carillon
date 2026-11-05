@@ -36,6 +36,7 @@ export interface PiRuntimeOptions {
   }[];
   /** The runtime's private state: agents' storage and Carillon's settings ledger. */
   readonly componentDirectory: string;
+  readonly skillsDirectory: string;
   readonly catalogue: PiCatalogue;
   readonly core: CoreClient;
   readonly images: ImageProcessor;
@@ -56,10 +57,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
   await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
   const ledger = await SettingsLedger.open(join(options.componentDirectory, "settings.json"));
   const models = modelSettings(options.catalogue, ledger);
-  const storage =
-    options.storage ??
-    ((agentId: string) =>
-      openNodeSqliteStorage(join(options.componentDirectory, "agents", `${agentId}.sqlite`)));
+  const store = (agentId: string) =>
+    join(options.componentDirectory, "agents", `${agentId}.sqlite`);
+  const storage = options.storage ?? ((agentId: string) => openNodeSqliteStorage(store(agentId)));
   const agents = new Map<string, DurableAgent>();
   try {
     for (const agent of options.agents)
@@ -69,6 +69,8 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           id: agent.id,
           workspace: agent.workspace,
           storage: await storage(agent.id),
+          storePath: store(agent.id),
+          skillsDirectory: options.skillsDirectory,
           catalogue: options.catalogue,
           models,
           core: options.core,

@@ -15,7 +15,8 @@ printf '[workspace.package]\nversion = "1.2.3"\n' >"$FIXTURE/Cargo.toml"
 cp "$ROOT/scripts/carillon-pi.sh" "$ROOT/scripts/register-services.sh" \
   "$ROOT/scripts/install-release.sh" "$ROOT/scripts/uninstall-release.sh" \
   "$ROOT/scripts/npm-notices.mjs" "$FIXTURE/scripts/"
-mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discord-pi/skill"
+mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discord-pi/skill" \
+  "$FIXTURE/packages/runtime-pi"
 cp "$ROOT/LICENSE" "$FIXTURE/"
 cp "$ROOT/licenses/MIT.txt" "$ROOT/licenses/bun.md" "$FIXTURE/licenses/"
 # One npm dependency with a licence file, one without, as pnpm lists them.
@@ -24,6 +25,7 @@ printf 'fixture licence text\n' >"$FIXTURE/npm/with-file/LICENSE"
 printf '{"MIT":[{"name":"with-file","versions":["1.0.0"],"paths":["%s"],"license":"MIT"},{"name":"without-file","versions":["2.0.0"],"paths":["%s"],"license":"MIT","author":"Someone"}]}\n' \
   "$FIXTURE/npm/with-file" "$FIXTURE/npm/without-file" >"$FIXTURE/npm/listing.json"
 cp "$ROOT/packages/discord-pi/skill/SKILL.md" "$FIXTURE/packages/discord-pi/skill/SKILL.md"
+cp -R "$ROOT/packages/runtime-pi/skills" "$FIXTURE/packages/runtime-pi/skills"
 printf unit >"$FIXTURE/deploy/systemd/example.service"
 printf license >"$FIXTURE/licenses/pi-coding-agent.txt"
 PI=$FIXTURE/packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent
@@ -135,7 +137,8 @@ for arch in x86_64 aarch64; do
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
     'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
-    'r lib/carillon-discord-SKILL.md' \
+    'r lib/carillon-discord-SKILL.md' 'r lib/pi-skills/conversation-history/SKILL.md' \
+    'r lib/pi-skills/conversation-history/views.sql' \
     'r bin/photon_rs_bg.wasm' 'r systemd/example.service' 'r licenses/Apache-2.0.txt' \
     'r licenses/MIT.txt' 'r licenses/bun.md' 'r licenses/pi-coding-agent.txt' \
     'r licenses/rust.txt' 'r licenses/npm.txt'; do

@@ -70,6 +70,7 @@ printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
   >"$BUNDLE/src/utils/image-resize-worker.ts"
 
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
+cp -R packages/runtime-pi/skills "$STAGE/lib/pi-skills"
 
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
 # The Discord modules run in the provider's Wasm sandbox; they are data, not

@@ -36,6 +36,8 @@ const BUSY = ["queue", "steer", "interrupt"] as const;
 type Busy = (typeof BUSY)[number];
 const DEFAULT_BUSY: Busy = "steer";
 
+export const BUILT_IN_SKILLS = new URL("../skills/", import.meta.url);
+
 /** The runtime's own extension, always selected: the prompt from the agent's resources. */
 const CARILLON = "carillon";
 /** A module file, named without a comma, since `carillon settings` separates names with one. */
@@ -120,13 +122,15 @@ export interface Extensions {
 
 /**
  * Reads a snapshot core captured: settings, prompt files and the listed
- * user extensions. Settings or a module that cannot be used, also beside
- * the runtime's own extensions, refuse the turn that brought them.
+ * user extensions. Its skills join the runtime's `builtInSkills`, replacing
+ * any of the same name. Settings or a module that cannot be used, also
+ * beside the runtime's own extensions, refuse the turn that brought them.
  */
 export async function loadSnapshot(
   root: string,
   workspace: string,
   extensions: Extensions,
+  builtInSkills: string,
 ): Promise<Snapshot> {
   const settings = await readSettings(join(root, "settings.json"));
   const selected = selection(settings.extensions, extensions.defaults);
@@ -159,7 +163,13 @@ export async function loadSnapshot(
     : selected.includes("codemode")
       ? "indirect"
       : undefined;
-  const { skills } = loadSkillsFromDir({ dir: join(root, "skills"), source: "carillon" });
+  const own = loadSkillsFromDir({ dir: join(root, "skills"), source: "carillon" }).skills;
+  const skills = [
+    ...loadSkillsFromDir({ dir: builtInSkills, source: "builtin" }).skills.filter(
+      (skill) => !own.some(({ name }) => name === skill.name),
+    ),
+    ...own,
+  ];
   const skillsPrompt =
     reader === undefined || skills.length === 0 ? "" : formatSkillsForPrompt(skills, reader).trim();
   return {
@@ -187,11 +197,13 @@ export async function loadSnapshot(
 
 /**
  * The runtime's own extension: the latest snapshot's prompt, the agent's
- * workspace, and where attached files are kept once a conversation has any.
+ * workspace and conversation store, and where attached files are kept once
+ * a conversation has any.
  */
 export function carillonExtension(
   latest: () => Snapshot | undefined,
   workspace: string,
+  store: string,
   tasks: readonly AnyTask[],
 ): Extension {
   return defineExtension({
@@ -201,6 +213,7 @@ export function carillonExtension(
       section("project_context", () => latest()?.prompt.context),
       section("skills", () => latest()?.prompt.skills, { tag: false }),
       section("cwd", () => workspace),
+      section("conversation_store", () => store),
       section("attachments", async (input, context) => {
         const conversation = await input.read.snapshot(
           ConversationInfo,

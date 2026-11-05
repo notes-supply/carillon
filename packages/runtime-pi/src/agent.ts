@@ -80,6 +80,8 @@ export interface AgentOptions {
   readonly id: string;
   readonly workspace: string;
   readonly storage: Storage;
+  readonly storePath: string;
+  readonly skillsDirectory: string;
   readonly catalogue: PiCatalogue;
   readonly models: ModelSettings;
   readonly core: CoreClient;
@@ -157,7 +159,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     },
   });
   const extensions: Extensions = {
-    carillon: carillonExtension(() => latest, workspace, [delivery, opening]),
+    carillon: carillonExtension(() => latest, workspace, options.storePath, [delivery, opening]),
     builtIn: [
       ...options.builtIns,
       createSchedulesExtension({
@@ -211,7 +213,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const recorded = (await harness.snapshot(Resources, context))?.root;
   if (recorded !== undefined)
     try {
-      await adopt(await loadSnapshot(recorded, workspace, extensions));
+      await adopt(await loadSnapshot(recorded, workspace, extensions, options.skillsDirectory));
     } catch (failure) {
       unloaded = true;
       console.error(
@@ -305,7 +307,12 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     const snapshot =
       latest?.root === resolve(request.resource_root)
         ? latest
-        : await loadSnapshot(resolve(request.resource_root), workspace, extensions);
+        : await loadSnapshot(
+            resolve(request.resource_root),
+            workspace,
+            extensions,
+            options.skillsDirectory,
+          );
     const { interface_id, channel_id, agent_id } = request;
     const choice = await options.models.forTurn({ interface_id, channel_id, agent_id });
     const model =

@@ -1,5 +1,7 @@
 import {
   fauxAssistantMessage,
+  fauxText,
+  fauxThinking,
   fauxToolCall,
   Type,
   type FauxResponseStep,
@@ -10,8 +12,11 @@ import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
+import { BUILT_IN_SKILLS } from "./resources.ts";
 
 const fixtures: Fixture[] = [];
 afterEach(async () => {
@@ -105,6 +110,64 @@ it("renders a snapshot's prompt once, and only what an edit changed", async () =
   expect(delta["system"]).toBe("You are the installation's careful assistant.");
   expect(delta["skills"]).toContain(edited);
   expect(delta).not.toHaveProperty("cwd");
+});
+
+it("offers every agent the conversation history skill and its store, unless it has its own", async () => {
+  const { requests, answers } = recording(2);
+  const agent = await fixture({ builtIns: [{ ...echo, name: "coding" }], answers });
+  const coding = { "settings.json": JSON.stringify({ extensions: ["coding"] }) };
+  const own = await agent.snapshot({
+    ...coding,
+    "skills/conversation-history/SKILL.md":
+      "---\nname: conversation-history\ndescription: The agent's own.\n---\nAsk the archive.",
+  });
+  await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(coding) });
+  await agent.ask("turn-2", "again", { resource_root: own, audience_id: "elsewhere" });
+  const [builtIn = {}, replaced = {}] = requests.map(sections);
+  expect(builtIn["skills"]).toContain(
+    fileURLToPath(new URL("conversation-history/SKILL.md", BUILT_IN_SKILLS)),
+  );
+  expect(builtIn["conversation_store"]).toBe(
+    `<conversation_store>\n${join(agent.componentDirectory, "agents", "default.sqlite")}\n</conversation_store>`,
+  );
+  expect(replaced["skills"]).toContain(join(own, "skills/conversation-history/SKILL.md"));
+  expect(replaced["skills"]).not.toContain(fileURLToPath(BUILT_IN_SKILLS));
+});
+
+it("reads conversations and usage from a live store through the skill's views", async () => {
+  const agent = await fixture({
+    durable: true,
+    answers: [fauxAssistantMessage([fauxThinking("Private."), fauxText("Plant in May.")])],
+  });
+  const origin = { guild_id: "900", channel_id: "555", parent_channel_id: "100" };
+  await agent.ask("turn-1", "When do tomatoes go out?", {
+    audience_id: "discord-900-555",
+    native: { origin },
+  });
+  const store = new DatabaseSync(join(agent.componentDirectory, "agents", "default.sqlite"), {
+    readOnly: true,
+  });
+  try {
+    store.exec(await readFile(new URL("conversation-history/views.sql", BUILT_IN_SKILLS), "utf8"));
+    const [conversation] = store.prepare("SELECT * FROM conversation_list").all();
+    expect(conversation).toMatchObject({
+      guild: "900",
+      channel: "555",
+      thread_of: "100",
+      messages: 1,
+    });
+    expect(store.prepare("SELECT role, text FROM messages ORDER BY entry").all()).toEqual([
+      { role: "user", text: "When do tomatoes go out?" },
+      { role: "assistant", text: "Plant in May." },
+    ]);
+    const [usage] = store
+      .prepare("SELECT model, sum(total) AS total FROM usage GROUP BY model")
+      .all();
+    expect(usage?.["model"]).toBe(`${agent.model.provider.id}/scripted`);
+    expect(usage?.["total"]).toBeGreaterThan(0);
+  } finally {
+    store.close();
+  }
 });
 
 it("applies a toggled extension from the next request of a conversation", async () => {

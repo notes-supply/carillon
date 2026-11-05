@@ -9,7 +9,8 @@ import { createDiscordExtension, DISCORD_SKILL } from "@carillon/discord-pi";
 import type { Setting } from "@carillon/protocol";
 import { once } from "node:events";
 import { mkdir, readFile, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
@@ -22,6 +23,7 @@ import { deterministicCatalogue } from "./deterministic.ts";
 import { ConversationInfo } from "./documents.ts";
 import { createMcpServer, loadMcpConfig, mcpTransport } from "./mcp.ts";
 import { modelSettings, openPiCatalogue, type PiCatalogue } from "./models.ts";
+import { BUILT_IN_SKILLS } from "./resources.ts";
 import { createPiRuntime } from "./runtime.ts";
 import { createCoreClient } from "@carillon/runtime/core";
 import { createRuntimeServer } from "@carillon/runtime/http";
@@ -151,6 +153,10 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   const runtime = await createPiRuntime({
     agents: config.agents,
     componentDirectory: config.componentDirectory,
+    skillsDirectory:
+      embedded === undefined
+        ? fileURLToPath(BUILT_IN_SKILLS)
+        : join(dirname(process.execPath), "..", "lib", "pi-skills"),
     catalogue,
     core: createCoreClient({ url: config.coreUrl, providerId: config.runtime.id, token }),
     images,

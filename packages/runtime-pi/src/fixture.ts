@@ -31,10 +31,12 @@ import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Parse } from "typebox/value";
 import type { Clock } from "./agent.ts";
 import type { McpServer } from "./mcp.ts";
 import type { PiCatalogue } from "./models.ts";
+import { BUILT_IN_SKILLS } from "./resources.ts";
 import { createPiRuntime } from "./runtime.ts";
 
 /** Passes images through as they are. */
@@ -141,6 +143,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         ...(resources === undefined ? {} : { resources }),
       })),
       componentDirectory,
+      skillsDirectory: fileURLToPath(BUILT_IN_SKILLS),
       catalogue,
       core: createCoreClient({ url: core.url, providerId: "runtime-pi", token: "test-only" }),
       images,
