@@ -444,7 +444,7 @@ function refuseUnknown(names: readonly string[], builtIn: readonly string[]): vo
       );
     throw new ExplainedFailure(
       422,
-      `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor extensions/<file>.js, .mjs or .ts named without a comma.`,
+      `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor a .js, .mjs or .ts file in extensions/ whose name has no comma.`,
     );
   }
 }

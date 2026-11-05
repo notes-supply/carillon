@@ -6,6 +6,7 @@ import {
   type Message,
   type SystemMessage,
 } from "@earendil-works/pi-ai";
+import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -247,7 +248,9 @@ it.each([
   const agent = await fixture({ answers: [fauxAssistantMessage("unused")] });
   const root = await agent.snapshot(files);
   const turn = agent.turn("turn-1", "hello", { resource_root: root });
-  await expect(agent.runtime.turns.submit(turn)).rejects.toThrow(message);
+  await expect(agent.runtime.turns.submit(turn)).rejects.toSatisfy(
+    (failure: Error) => displayableExplanation(failure.message)?.includes(message) === true,
+  );
   await expect(agent.runtime.turns.submit(turn)).rejects.toMatchObject({ status: 422 });
   expect(agent.model.state.callCount).toBe(0);
 });
