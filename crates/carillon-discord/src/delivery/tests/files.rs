@@ -3,7 +3,7 @@
 
 use std::{fs, path::Path as FilePath};
 
-use axum::{body::Bytes, http::HeaderMap};
+use axum::{body::Bytes, http::HeaderMap, routing::put};
 use carillon_installation::config::MIB;
 use carillon_protocol::model::AnswerFile;
 use sha2::{Digest as _, Sha256};
@@ -70,15 +70,25 @@ fn split<'a>(body: &'a [u8], separator: &[u8]) -> Vec<&'a [u8]> {
     parts
 }
 
+/// What the delivery loop sent: the messages Discord received, the
+/// reactions it was asked to add, and the acknowledgements core received.
+#[derive(Default)]
+struct Uploaded {
+    messages: Vec<Received>,
+    reactions: Vec<String>,
+    acks: Vec<serde_json::Value>,
+}
+
 /// Core handing out `claims` in order, a transient failure where one is
 /// `None`, then refusing to end the loop; beside Discord, which records
-/// each message it receives.
+/// what it receives and fails the message numbered `refused`, if any.
 fn uploading_core(
     claims: Vec<Option<Delivery>>,
-    messages: Arc<tokio::sync::Mutex<Vec<Received>>>,
-    acks: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    refused: Option<usize>,
+    uploaded: Arc<tokio::sync::Mutex<Uploaded>>,
 ) -> Router {
     let claims = Arc::new(std::sync::Mutex::new(claims.into_iter()));
+    let (acked, sent, reacted) = (uploaded.clone(), uploaded.clone(), uploaded);
     Router::new()
         .route(
             "/v1/deliveries",
@@ -104,7 +114,7 @@ fn uploading_core(
         .route(
             "/v1/deliveries/{id}/ack",
             post(move |Json(ack): Json<serde_json::Value>| async move {
-                acks.lock().await.push(ack);
+                acked.lock().await.acks.push(ack);
                 StatusCode::NO_CONTENT
             }),
         )
@@ -114,35 +124,52 @@ fn uploading_core(
                 let Ok(message) = received(&headers, &body) else {
                     return StatusCode::BAD_REQUEST.into_response();
                 };
-                let mut messages = messages.lock().await;
+                let messages = &mut sent.lock().await.messages;
                 let body = json!({"content": message.content});
                 messages.push(message);
+                if refused == Some(messages.len()) {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
                 Json(created(900 + messages.len(), &body)).into_response()
             }),
+        )
+        .route(
+            "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+            put(
+                move |Path((channel, message, emoji)): Path<(String, String, String)>| async move {
+                    reacted
+                        .lock()
+                        .await
+                        .reactions
+                        .push(format!("{channel}:{message} {emoji}"));
+                    StatusCode::NO_CONTENT
+                },
+            ),
         )
         .fallback(|| async { StatusCode::NO_CONTENT })
 }
 
-/// Runs the delivery loop against `claims` with core's copies in `store`:
-/// the messages Discord received and the acknowledgements core received.
-async fn upload(
+/// Runs the delivery loop against `claims` with core's copies in `store`,
+/// Discord failing the message numbered `refused`, until its reactions end.
+async fn upload_refusing(
     claims: Vec<Option<Delivery>>,
     store: &FilePath,
-) -> anyhow::Result<(Vec<Received>, Vec<serde_json::Value>)> {
-    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let app = uploading_core(claims, messages.clone(), acks.clone());
+    refused: Option<usize>,
+) -> anyhow::Result<Uploaded> {
+    let uploaded = Arc::new(tokio::sync::Mutex::new(Uploaded::default()));
+    let app = uploading_core(claims, refused, uploaded.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = discord_client(address);
     let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
     let ended = tokio::time::timeout(
         Duration::from_secs(10),
         delivery_loop(
             core_client(format!("http://{address}"))?,
-            Reactions::new(http.clone(), crate::config::Settings::new(config)),
+            reactions.clone(),
             http,
             store.to_path_buf(),
             outcomes,
@@ -150,6 +177,7 @@ async fn upload(
         ),
     )
     .await?;
+    reactions.stop(Duration::from_secs(5)).await;
     server.abort();
     assert!(
         ended
@@ -158,10 +186,12 @@ async fn upload(
             .to_string()
             .contains("delivery claim rejected")
     );
-    Ok((
-        std::mem::take(&mut *messages.lock().await),
-        std::mem::take(&mut *acks.lock().await),
-    ))
+    Ok(std::mem::take(&mut *uploaded.lock().await))
+}
+
+/// As [`upload_refusing`], with Discord taking every message.
+async fn upload(claims: Vec<Option<Delivery>>, store: &FilePath) -> anyhow::Result<Uploaded> {
+    upload_refusing(claims, store, None).await
 }
 
 /// Keeps `bytes` in `store` as core does, as file `ordinal` of a capture.
@@ -200,7 +230,7 @@ async fn an_answers_files_reach_discord_with_its_text_once_a_lost_claim_is_taken
         ],
         ..answer(1, TurnState::Completed)
     };
-    let (messages, acks) = upload(vec![None, Some(delivery)], store.path()).await?;
+    let Uploaded { messages, acks, .. } = upload(vec![None, Some(delivery)], store.path()).await?;
     assert_eq!(
         messages,
         [Received {
@@ -229,7 +259,7 @@ async fn a_file_over_discords_limit_is_named_in_the_answer_and_the_rest_sent() -
         ],
         ..answer(1, TurnState::Completed)
     };
-    let (messages, acks) = upload(vec![Some(delivery)], store.path()).await?;
+    let Uploaded { messages, acks, .. } = upload(vec![Some(delivery)], store.path()).await?;
     assert_eq!(
         messages,
         [Received {
@@ -252,9 +282,64 @@ async fn a_copy_that_changed_after_it_was_kept_is_never_sent() -> anyhow::Result
         files: vec![chart],
         ..answer(1, TurnState::Completed)
     };
-    let (messages, acks) = upload(vec![Some(delivery)], store.path()).await?;
+    let Uploaded { messages, acks, .. } = upload(vec![Some(delivery)], store.path()).await?;
     assert!(messages.is_empty(), "{messages:?}");
     assert_eq!(acks[0]["outcome"], "uncertain");
+    Ok(())
+}
+
+/// Twelve small files, kept in `store`: ten on the answer's message, two on
+/// one after it.
+fn overflowing(store: &FilePath) -> anyhow::Result<Delivery> {
+    Ok(Delivery {
+        content: "Here they are.".to_owned(),
+        files: (0..12)
+            .map(|ordinal| kept(store, ordinal, &format!("{ordinal}.txt"), &[b'x'; 3]))
+            .collect::<anyhow::Result<_>>()?,
+        ..answer(1, TurnState::Completed)
+    })
+}
+
+#[tokio::test]
+async fn files_past_a_messages_limits_follow_the_answer_once_each() -> anyhow::Result<()> {
+    let store = tempfile::tempdir()?;
+    let delivery = overflowing(store.path())?;
+    let delivered = discord_config(DiscordActivation::Always, DiscordConversation::Channel)
+        .delivered_emoji
+        .clone();
+    let uploaded = upload(vec![None, Some(delivery)], store.path()).await?;
+    let counts = uploaded
+        .messages
+        .iter()
+        .map(|message| (message.content.as_str(), message.files.len()))
+        .collect::<Vec<_>>();
+    assert_eq!(counts, [("Here they are.", 10), ("", 2)]);
+    assert_eq!(uploaded.acks.len(), 1);
+    assert_eq!(uploaded.acks[0]["outcome"], "delivered");
+    assert_eq!(uploaded.acks[0]["native_ref"], "901,902");
+    assert_eq!(uploaded.reactions, [format!("300:400 {delivered}")]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_following_message_discord_fails_leaves_the_answer_uncertain_and_sends_nothing_again()
+-> anyhow::Result<()> {
+    let store = tempfile::tempdir()?;
+    let delivery = overflowing(store.path())?;
+    let uncertain = discord_config(DiscordActivation::Always, DiscordConversation::Channel)
+        .uncertain_emoji
+        .clone();
+    let uploaded = upload_refusing(vec![Some(delivery)], store.path(), Some(2)).await?;
+    let counts = uploaded
+        .messages
+        .iter()
+        .map(|message| message.files.len())
+        .collect::<Vec<_>>();
+    assert_eq!(counts, [10, 2], "each message is tried once");
+    assert_eq!(uploaded.acks.len(), 1);
+    assert_eq!(uploaded.acks[0]["outcome"], "uncertain");
+    assert_eq!(uploaded.acks[0]["native_ref"], serde_json::Value::Null);
+    assert_eq!(uploaded.reactions, [format!("300:400 {uncertain}")]);
     Ok(())
 }
 

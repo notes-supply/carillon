@@ -4,6 +4,7 @@
 use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 
 use carillon_installation::config::{AttachmentLimits, MIB};
+use carillon_protocol::model::DeliveryState;
 use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
 
@@ -266,5 +267,109 @@ async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> R
     let store = fixture.config.value.data_dir.join("attachments");
     assert_eq!(fs::read_dir(&store)?.count(), 1);
     assert!(lock(&state.core.intake.keeping).is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
+async fn a_file_that_fails_while_core_copies_it_costs_only_itself() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let made = directory.path().join("made");
+    fs::create_dir(&made)?;
+    let (report, log, table) = (
+        made.join("report.txt"),
+        made.join("run.log"),
+        made.join("data.csv"),
+    );
+    fs::write(&report, b"report")?;
+    fs::write(&log, b"a long log")?;
+    fs::write(&table, b"a,b\n")?;
+    let receipt = ok(submit(&state, "send them", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    // A proc file says it is empty and then reads as more.
+    let answer = json!({
+        "outcome": "answered",
+        "output": "Here.",
+        "files": [report, "/proc/self/maps", log, table],
+    });
+    let stall = state.core.intake.signals.stall.clone();
+    let held = stall.lock().map_err(|_| anyhow!("poisoned"))?;
+    let settling = {
+        let (state, turn) = (state.clone(), receipt.turn_id.clone());
+        tokio::spawn(async move { settle(&state, RUNTIME, &turn, &answer).await })
+    };
+    let store = fixture.config.value.data_dir.join("attachments");
+    let started = std::time::Instant::now();
+    while !fs::read_dir(&store).is_ok_and(|mut entries| entries.next().is_some()) {
+        anyhow::ensure!(started.elapsed() < Duration::from_secs(30), "no copy began");
+        tokio::task::yield_now().await;
+    }
+    fs::write(&log, b"cut")?;
+    drop(held);
+    assert_eq!(settling.await??, StatusCode::NO_CONTENT);
+    let claimed = claim(&state.core, "instance")?;
+    assert_eq!(
+        claimed.content,
+        format!(
+            "Here.\n\n\
+             Could not attach /proc/self/maps: it changed while Carillon copied it.\n\
+             Could not attach {}: it changed while Carillon copied it.",
+            source(&log)
+        )
+    );
+    assert_eq!(
+        sent(&store, &claimed)?,
+        [
+            ("report.txt".to_owned(), source(&report), b"report".to_vec()),
+            ("data.csv".to_owned(), source(&table), b"a,b\n".to_vec()),
+        ]
+    );
+    attachments::validate_store(
+        &fixture.config.value.data_dir,
+        &state.core.database.captured_files()?,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_answer_whose_upload_a_crash_cut_off_is_uncertain_and_never_sent_again() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let chart = directory.path().join("chart.png");
+    fs::write(&chart, b"chart")?;
+    let receipt = ok(submit(&state, "chart it", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    let answer = json!({"outcome": "answered", "output": "Here.", "files": [chart]});
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(claim(&state.core, "crashed")?.files.len(), 1);
+    let reconciled = state
+        .core
+        .reconcile_deliveries("test-interface", "instance")?;
+    assert_eq!(reconciled.feedback_target_ids, ["test-feedback"]);
+    assert!(
+        state
+            .core
+            .claim_delivery("test-interface", "instance")?
+            .is_none()
+    );
+    let inspected = state
+        .core
+        .inspect_turn(&receipt.turn_id)?
+        .context("no turn")?;
+    assert_eq!(inspected.delivery_state, Some(DeliveryState::Uncertain));
+    assert_eq!(inspected.answer_files.len(), 1);
+    attachments::validate_store(
+        &fixture.config.value.data_dir,
+        &state.core.database.captured_files()?,
+    )?;
     Ok(())
 }
