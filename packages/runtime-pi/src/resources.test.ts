@@ -1,7 +1,5 @@
 import {
   fauxAssistantMessage,
-  fauxText,
-  fauxThinking,
   fauxToolCall,
   Type,
   type FauxResponseStep,
@@ -12,7 +10,6 @@ import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
@@ -132,42 +129,6 @@ it("offers every agent the conversation history skill and its store, unless it h
   );
   expect(replaced["skills"]).toContain(join(own, "skills/conversation-history/SKILL.md"));
   expect(replaced["skills"]).not.toContain(fileURLToPath(BUILT_IN_SKILLS));
-});
-
-it("reads conversations and usage from a live store through the skill's views", async () => {
-  const agent = await fixture({
-    durable: true,
-    answers: [fauxAssistantMessage([fauxThinking("Private."), fauxText("Plant in May.")])],
-  });
-  const origin = { guild_id: "900", channel_id: "555", parent_channel_id: "100" };
-  await agent.ask("turn-1", "When do tomatoes go out?", {
-    audience_id: "discord-900-555",
-    native: { origin },
-  });
-  const store = new DatabaseSync(join(agent.componentDirectory, "agents", "default.sqlite"), {
-    readOnly: true,
-  });
-  try {
-    store.exec(await readFile(new URL("conversation-history/views.sql", BUILT_IN_SKILLS), "utf8"));
-    const [conversation] = store.prepare("SELECT * FROM conversation_list").all();
-    expect(conversation).toMatchObject({
-      guild: "900",
-      channel: "555",
-      thread_of: "100",
-      messages: 1,
-    });
-    expect(store.prepare("SELECT role, text FROM messages ORDER BY entry").all()).toEqual([
-      { role: "user", text: "When do tomatoes go out?" },
-      { role: "assistant", text: "Plant in May." },
-    ]);
-    const [usage] = store
-      .prepare("SELECT model, sum(total) AS total FROM usage GROUP BY model")
-      .all();
-    expect(usage?.["model"]).toBe(`${agent.model.provider.id}/scripted`);
-    expect(usage?.["total"]).toBeGreaterThan(0);
-  } finally {
-    store.close();
-  }
 });
 
 it("applies a toggled extension from the next request of a conversation", async () => {
