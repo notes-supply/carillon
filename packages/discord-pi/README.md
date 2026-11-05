@@ -49,7 +49,8 @@ attachment URLs.
 Requests time out after 30 seconds in the provider and 35 in the client. A
 write whose answer was lost is reported as `uncertain` and never repeated
 automatically; check before trying again. Explicit sends are separate from
-the agent's normal reply.
+the agent's normal reply; on Pi, a file for the reply goes with the runtime's
+`attach` tool.
 
 ## Where things live
 

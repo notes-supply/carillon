@@ -504,6 +504,17 @@ digest before the turn runs. The agent sees every file in its working tools,
 and suitable images (PNG, JPEG, WebP, GIF) are also given to the model as
 images. Nothing is extracted, converted or executed on arrival.
 
+The agent can send files with its answer. On Pi it attaches them with its
+`attach` tool; T3 answers are text only. Before core records the answer, it
+copies each file into `state/attachments`, within the limits below, and keeps
+it with the turn. Discord uploads the files with the answer, at most 10 and
+25 MiB to a message. A file core couldn't keep, or one over Discord's 20 MiB
+upload limit, is named in the answer with where the agent had it. Delivery
+sends core's copies, so the agent's own files may change or go once the
+answer is recorded, and an answer that waits for Discord, even across
+restarts, never runs the model again. To post files elsewhere, the agent
+uses its [Discord tools](#agent-discord-tools).
+
 Limits, each applied when its service restarts:
 
 ```toml
@@ -518,9 +529,9 @@ staging_mib = 2048
 
 # carillon.toml
 [core.attachments]
-max_files = 10            # 0 refuses every attachment
+max_files = 10            # per message or answer; 0 refuses every file
 max_file_mib = 1024
-max_event_mib = 2048
+max_event_mib = 2048      # a message's or an answer's files together
 storage_mib = 10240       # all kept files together
 free_space_mib = 2048     # space a new file must leave free on the disk
 concurrent_captures = 2

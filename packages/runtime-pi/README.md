@@ -89,6 +89,14 @@ with `pi` as its first argument, the same executable is Pi's own command line
   `inline_images` limits go along inline, prepared with Photon for the model
   the turn runs. Once a conversation has had files, its prompt says where
   they are kept.
+- **Answer files.** The runtime's own `attach` tool checks that a path names
+  a regular file it can read and records it, once, in the conversation's
+  `carillon.attached` document, with the conversation's newest entry. An
+  answer takes every file attached before its answer entry, in the commit
+  that decides it, and posts their paths with the outcome, so a restart
+  before or after keeps them. Files attached in a run that ended without an
+  answer wait for the next one. A subagent's conversation is not offered
+  `attach`: its answer goes to the agent that started it.
 
 ## Resources
 

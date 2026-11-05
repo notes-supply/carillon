@@ -9,7 +9,8 @@ new interface or runtime doesn't mean rebuilding the rest.
 
 1. Install Carillon as an ordinary Unix user.
 2. Configure a Discord server, allowlisted users and routed channels.
-3. Talk to the agent in channels or threads, with files and images.
+3. Talk to the agent in channels or threads, with files and images, and
+   receive the files it makes with its answers.
 4. Let the agent use its runtime's native tools, extensions and skills with
    the owner's authority, and watch a running turn on a Discord card.
 5. Route each channel to an agent: Carillon's assistant, on Pi, or plain T3
@@ -53,7 +54,10 @@ native state between engines or T3 projects.
   never starts a second turn.
 - **Files.** A message is accepted with all its files or not at all. Files
   are kept with the turn and checked before it runs; nothing is extracted or
-  executed on arrival.
+  executed on arrival. An answer can carry files too: on Pi the agent
+  attaches them, and core keeps a copy of each with the answer, which
+  Discord uploads with it. A file that can't be kept or sent never fails
+  the answer; the answer names it and where it is. T3 answers are text.
 - **Turns.** Core stores each accepted turn before acknowledging it, hands it
   once to its runtime, and stores the answer and its delivery together. Pi
   holds the turns it accepts and finishes them across its own restarts; a
