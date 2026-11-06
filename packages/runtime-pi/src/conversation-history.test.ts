@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -236,13 +236,66 @@ it("counts subagent runs under the conversation that started them, and finds the
   const conversations = history(agent, query("FROM conversation_list"));
   expect(conversations).toMatchObject([{ messages: "1" }]);
   const [{ conversation = "" } = {}] = conversations;
-  const found = history(agent, query("LIKE '%invoice%'"));
-  expect(found.map(({ text }) => text)).toEqual(
-    expect.arrayContaining(["Check the invoices.", "Find invoice K-729."]),
+  const [{ subagent = "" } = {}] = read(
+    agent,
+    "SELECT id AS subagent FROM conversations WHERE owner_conversation_id IS NOT NULL",
   );
-  expect(found.every((row) => row["conversation"] === conversation)).toBe(true);
+  expect(history(agent, query("WITH search"))).toMatchObject([
+    { conversation, position: "1", subagent: "", hit: ">", text: "Check the invoices." },
+    {
+      conversation,
+      position: "2",
+      subagent: String(subagent),
+      hit: ">",
+      text: "Find invoice K-729.",
+    },
+    { conversation, position: "3", subagent: String(subagent), hit: "", text: "It is due Friday." },
+  ]);
   expect(history(agent, query("GROUP BY conversation"))).toMatchObject([
     { conversation, total: String(durableTotals(agent).total) },
+  ]);
+});
+
+it("shows each match with its neighbours, once, from a conversation's start to its end", async () => {
+  const late = `${"Long. ".repeat(60)}Prune kiwi in winter.`;
+  const agent = await fixture({
+    durable: true,
+    answers: ["In spring.", "Plant in May.", "Kiwi vines want frost cover.", late].map((text) =>
+      fauxAssistantMessage(text),
+    ),
+  });
+  for (const [turn, said] of ["When is kiwi season?", "Tomatoes?", "Thanks.", "Noted."].entries())
+    await agent.ask(`turn-${String(turn)}`, said);
+  const found = history(agent, query("WITH search").replace("'invoice'", "'KIWI'"));
+  expect(found.map(({ position, role, hit }) => [position, role, hit])).toEqual([
+    ["1", "user", ">"],
+    ["2", "assistant", ""],
+    ["5", "user", ""],
+    ["6", "assistant", ">"],
+    ["7", "user", ""],
+    ["8", "assistant", ">"],
+  ]);
+  expect(found.at(-1)?.["text"]).toContain("Prune kiwi in winter.");
+});
+
+it("opens each conversation with the person's first words, past Carillon's notes and quotes", async () => {
+  const agent = await fixture({
+    durable: true,
+    answers: [fauxAssistantMessage("A file."), fauxAssistantMessage("Peppers too.")],
+  });
+  const attachments = join(agent.componentDirectory, "..", "attachments");
+  await mkdir(join(attachments, "capture"), { recursive: true });
+  await writeFile(join(attachments, "capture", "0"), "seeds");
+  await agent.ask("turn-1", "", {
+    attachment_root: attachments,
+    attachments: [{ path: "capture/0", name: "seeds.txt", size: 5, sha256: "0".repeat(64) }],
+  });
+  await agent.ask(
+    "turn-2",
+    "In reply to your message, sent 2026-11-05T10:00:00Z:\n> A file.\n\nAnd what about peppers?\nThey sprout slowly.",
+  );
+  expect(history(agent, query("FROM conversation_list"))).toMatchObject([
+    { opening: "And what about peppers? They sprout slowly." },
   ]);
 });
 
@@ -267,4 +320,13 @@ it("runs the documented commands from a Carillon home whose path has spaces", as
   ];
   expect(runDocumented(sqliteCommand, store, sql)).toEqual(said);
   expect(runDocumented(bunCommand, store, sql)).toMatchObject(said);
+  const search = query("WITH search").replace("'invoice'", "'may'");
+  const found = [
+    { position: "1", hit: "", text: "When do tomatoes go out?" },
+    { position: "2", hit: ">", text: "Plant in May." },
+  ];
+  expect(runDocumented(sqliteCommand, store, search)).toMatchObject(found);
+  expect(runDocumented(bunCommand, store, search)).toMatchObject(found);
+  const opening = [{ opening: "When do tomatoes go out?" }];
+  expect(runDocumented(bunCommand, store, query("FROM conversation_list"))).toMatchObject(opening);
 });
