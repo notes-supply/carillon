@@ -170,18 +170,30 @@ is unknown: a due schedule waits for the next message whose resources load.
 
 ## Subagents
 
-`subagents` gives the agent `subagent {task, wait?}`, which runs the task in
-a child conversation that starts as a copy of the agent's own, without
-`subagents` or `schedules`. The child serves the same Carillon
-conversation, so tools such as Discord's work there as in its parent. In
-the background, the default, the call returns at once and a reporter task
-of the conversation owns the child: stopping the answer that started it
-leaves the child working. Once the child answers, the reporter's opening
-places the answer, or why there is none, as a follow-up in a turn under
-the key `subagent:<task>`; stopping that turn stops only the report, and a
-report core refuses for good is given up. With `wait: true`, the call owns
-the child and returns its answer as its result, and stopping the answer
-that waits for it aborts the child.
+`subagents` gives the agent `subagent {task, wait?, model?, thinking?,
+speed?}`, which runs the task in a child conversation that starts as a copy
+of the agent's own, without the `subagent` tool or `schedules`. The child
+runs the caller's model, thinking level and standard speed, except what the
+call sets. `model` is a `<provider>/<model>` Pi offers when the call runs;
+another is refused with the list of those it offers. `thinking` moves to the
+nearest level the child's model supports, as Pi's default thinking does.
+`speed: "fast"` sends OpenAI's `service_tier: "priority"` from a
+`beforeProviderRequest` hook, for models on the `openai-responses` and
+`openai-codex-responses` APIs only, and is refused on any other. The call's
+result says what the child runs. pi-ai prices a response at the tier the
+response names, so where the provider names `default`, as ChatGPT's Codex
+backend can, a fast child's estimated cost reads at the standard price.
+Per-turn model resolution moves only the conversations Carillon's turns run
+in, never a child. The child serves the same Carillon conversation, so tools
+such as Discord's work there as in its parent. In the background, the
+default, the call returns at once and a reporter task of the conversation
+owns the child: stopping the answer that started it leaves the child
+working. Once the child answers, the reporter's opening places the answer,
+or why there is none, as a follow-up in a turn under the key
+`subagent:<task>`; stopping that turn stops only the report, and a report
+core refuses for good is given up. With `wait: true`, the call owns the
+child and returns its answer as its result, and stopping the answer that
+waits for it aborts the child.
 
 ## MCP servers
 

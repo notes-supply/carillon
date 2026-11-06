@@ -18,6 +18,16 @@ import type { Catalogue, Channel, SettingsLedger } from "@carillon/runtime/setti
 import { join } from "node:path";
 
 const THINKING_OPTION = "thinking";
+/** Pi's thinking levels, lowest first. */
+export const THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const satisfies readonly ModelThinkingLevel[];
 const THINKING_NAMES: Record<ModelThinkingLevel, string> = {
   off: "Off",
   minimal: "Minimal",
