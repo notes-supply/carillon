@@ -3,6 +3,7 @@
 - [PRODUCT.md](PRODUCT.md): what Carillon does and its behaviour.
 - [OPERATIONS.md](OPERATIONS.md): install, run, configure, update, back up.
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, ownership and boundaries.
+- [WEB_SEARCH.md](WEB_SEARCH.md): add web search to a Pi agent with a skill.
 
 ## Components
 
