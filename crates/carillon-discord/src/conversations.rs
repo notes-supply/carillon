@@ -115,7 +115,7 @@ impl From<&Attachment> for SourceAttachment {
 /// `created_threads` maps a root message to the thread already created for
 /// it, so a retried message never creates a second thread. `senders` and
 /// `unanswered` are what [`sent`] records.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct ParticipationState {
     pub(crate) threads: BTreeMap<String, String>,
     #[serde(default)]
@@ -201,14 +201,19 @@ impl Participation {
         })
     }
 
-    /// Records what the bot sent: a record that cannot be kept is logged,
-    /// as the message is sent all the same.
+    /// Records what the bot sent, writing only when that changes the
+    /// record: a record that cannot be kept is logged, as the message is sent
+    /// all the same.
     pub(crate) fn record(&self, change: impl FnOnce(&mut ParticipationState)) {
         if let Err(failure) = self.change(|state| {
+            let before = state.clone();
             change(state);
-            true
+            *state != before
         }) {
-            warn!(error = %failure, "what the Discord bot sent could not be recorded");
+            warn!(
+                error = format!("{failure:#}"),
+                "what the Discord bot sent could not be recorded"
+            );
         }
     }
 
@@ -219,7 +224,10 @@ impl Participation {
             return;
         };
         if let Err(failure) = self.change(|state| state.answered(person, message)) {
-            warn!(error = %failure, "a quoted direct message could not be forgotten; the next one quotes it again");
+            warn!(
+                error = format!("{failure:#}"),
+                "a quoted direct message could not be forgotten; the next one quotes it again"
+            );
         }
     }
 
