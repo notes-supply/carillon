@@ -38,7 +38,9 @@ carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \
 ```
 
 `discover --agent ID` offers the models to that agent, refusing one this
-runtime does not serve.
+runtime does not serve. `model --agent ID` prints the model that agent uses
+in the settings ledger, as JSON, without reaching T3. Setup reaches T3 only
+for a kept agent without one.
 
 `configure` checks two things with T3:
 

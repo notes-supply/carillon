@@ -6,8 +6,8 @@ use std::{
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
-    Options, Runtime, SavedT3, create_missing_database, initialize, registered_runtimes, run,
-    saved_t3, set_up_t3, setup,
+    Options, Runtime, SavedT3, initialize, registered_runtimes, run, saved_t3, set_up_t3, setup,
+    start_fresh,
 };
 use crate::application::admin::{ASSISTANT, assistant, backup, register_runtime, set_provider};
 
@@ -256,8 +256,12 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<PathBu
     std::fs::write(
         &program,
         format!(
-            "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
-             discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
+            "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\n\
+             agent=; previous=; for arg; do [ \"$previous\" != --agent ] || agent=$arg; previous=$arg; done\n\
+             case \"$1\" in\n  \
+             discover) if [ -e '{directory}/unreachable' ]; then echo 'error: T3 is unreachable: fetch failed' >&2; exit 1; fi; \
+             if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
+             model) if [ -f '{directory}/model-'\"$agent\" ]; then printf '{{\"value\":\"%s\"}}' \"$(cat '{directory}/model-'\"$agent\")\"; else printf '{{\"value\":null}}'; fi ;;\n  \
              check|configure) settings=\"${{3%/carillon.toml}}/providers/runtime-t3.toml\"; \
              if grep -qs '\\.model]' \"$settings\"; then echo \"error: $1 refuses $settings\" >&2; exit 1; fi; \
              [ \"$1\" = check ] || echo \"configured $3 $4\" ;;\n  *) exit 2 ;;\nesac\n",
@@ -554,6 +558,7 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
 }
 
 mod added_pi;
+mod carried;
 mod pi_models;
 mod projects;
 mod reruns;

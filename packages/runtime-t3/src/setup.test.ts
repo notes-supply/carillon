@@ -154,6 +154,27 @@ it("keeps the other agents' settings on a rerun, and the model's options while t
   expect(await agentModel(runtime, "code")).toEqual({ model: "claudeAgent/claude-haiku-4-5" });
 });
 
+it("leaves the settings file as the owner wrote it when an agent's settings stay the same", async () => {
+  const fake = await fakeT3();
+  const { workspace, config } = await installation();
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  const runtime = await loaded(config);
+  const endpoint = { url: fake.url, token: fake.token };
+  const sonnet = {
+    agentId: "code",
+    projectId: "agent",
+    instanceId: "claudeAgent",
+    model: "claude-sonnet-5",
+  };
+  await configure(runtime, endpoint, sonnet);
+  const written = await readFile(runtime.providerFile, "utf8");
+  const commented = `# T3 on this machine.\n${written}# The code project.\n`;
+  await writeFile(runtime.providerFile, commented);
+  await configure(runtime, endpoint, { ...sonnet, model: "claude-haiku-4-5" });
+  expect(await readFile(runtime.providerFile, "utf8")).toBe(commented);
+  expect(await agentModel(runtime, "code")).toEqual({ model: "claudeAgent/claude-haiku-4-5" });
+});
+
 it("drops an agent carillon.toml no longer gives the runtime, so the runtime still starts", async () => {
   const fake = await fakeT3();
   const { root, workspace, config } = await installation();
@@ -471,6 +492,29 @@ it("discovers the models offered to an agent through the CLI", async () => {
     ],
   });
   const unknown = await offered("unknown");
+  expect(unknown.status).toBe(1);
+  expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
+});
+
+it("tells the model an agent uses from its settings ledger without reaching T3", async () => {
+  const fake = await fakeT3();
+  const { config, workspace } = await installation();
+  const used = (id: string) => cli(["model", "--config", config, "--agent", id], "");
+  const none = await used("code");
+  expect(none.status, none.stderr).toBe(0);
+  expect(JSON.parse(none.stdout)).toEqual({ value: null });
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  await configure(
+    await loaded(config),
+    { url: fake.url, token: fake.token },
+    { agentId: "code", projectId: "agent", instanceId: "codex", model: "gpt-6-astra" },
+  );
+  await fake.close();
+  const chosen = await used("code");
+  expect(chosen.status, chosen.stderr).toBe(0);
+  expect(JSON.parse(chosen.stdout)).toEqual({ value: "codex/gpt-6-astra" });
+  expect(JSON.parse((await used("notes")).stdout)).toEqual({ value: null });
+  const unknown = await used("unknown");
   expect(unknown.status).toBe(1);
   expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
 });

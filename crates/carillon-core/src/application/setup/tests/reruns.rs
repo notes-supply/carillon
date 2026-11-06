@@ -1,6 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, create_missing_database, fake_t3,
-    initialized, model, options, saved_t3, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, fake_t3, initialized, model, options,
+    saved_t3, set_up_t3, start_fresh,
 };
 use crate::application::{
     admin::set_agents,
@@ -191,20 +191,98 @@ fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Re
 }
 
 #[test]
-fn a_carried_registry_without_state_gets_a_new_database() -> anyhow::Result<()> {
+fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::Pi)?;
+    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    let agent = |id: &str, name: &str| carillon_installation::config::AgentConfig {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        runtime: Runtime::T3.id().to_owned(),
+        workspace: directory.path().to_path_buf(),
+        resources: None,
+    };
+    set_agents(
+        &path,
+        vec![
+            agent("t3-notes", "T3 Code · Notes"),
+            agent("t3-other", "T3 Code · Other"),
+        ],
+    )?;
+    std::fs::write(home.join("credentials/t3.token"), "saved-token\n")?;
+    std::fs::write(
+        home.join("providers/runtime-t3.toml"),
+        "url = 'http://127.0.0.1:3999'\ntoken_file = 'credentials/t3.token'\n\
+         [agents.t3-notes]\nproject_id = 'notes'\n[agents.t3-other]\nproject_id = 'other'\n",
+    )?;
+    let models = [model("codex", "gpt", "GPT")];
+    let program = fake_t3(
+        directory.path(),
+        &serde_json::json!({"projects": [], "models": models}),
+    )?;
+    std::fs::write(directory.path().join("model-t3-other"), "codex/gpt")?;
+    let mut questions = Shown::answering(&["0"]);
+    set_up_t3(
+        &home,
+        &options(),
+        false,
+        &program,
+        SavedT3::Kept,
+        &mut questions,
+    )?;
+    assert_eq!(
+        questions.transcript,
+        [
+            "GPT (codex)",
+            "Which model should T3 Code · Notes use?",
+            &format!("configured {} --url", path.display()),
+        ]
+    );
+    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
+    let configured = format!(
+        "configure --config {} --url http://127.0.0.1:3999 --agent t3-notes --project notes \
+         --model codex/gpt\n  stdin: saved-token\n",
+        path.display()
+    );
+    assert!(calls.contains(&configured), "{configured}\nnot in\n{calls}");
+    assert!(!calls.contains("--agent t3-other --project"), "{calls}");
+    assert!(
+        !calls
+            .lines()
+            .any(|call| call.starts_with("discover") && call.ends_with("--agent t3-other")),
+        "{calls}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_carried_registry_without_state_starts_fresh_on_this_release() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    let path = initialized(&home, directory.path(), Runtime::Pi)?;
+    let note = "# Carried from the previous installation.\n";
+    let current = format!("{note}{}", std::fs::read_to_string(&path)?);
+    let carried: String = current
+        .lines()
+        .map(|line| {
+            if line.starts_with("version = ") {
+                "version = \"0.0.1-previous\"\n".to_owned()
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    assert_ne!(carried, current);
+    std::fs::write(&path, &carried)?;
     let database = home.join("state/carillon.sqlite3");
     std::fs::remove_file(&database)?;
-    create_missing_database(&home)?;
+    start_fresh(&home)?;
     crate::db::Database::open(&database)?;
+    assert_eq!(std::fs::read_to_string(&path)?, current);
     let created = std::fs::read(&database)?;
-    create_missing_database(&home)?;
-    assert_eq!(
-        std::fs::read(&database)?,
-        created,
-        "an existing database is left as it is"
-    );
+    std::fs::write(&path, &carried)?;
+    start_fresh(&home)?;
+    assert_eq!(std::fs::read(&database)?, created);
+    assert_eq!(std::fs::read_to_string(&path)?, carried);
     Ok(())
 }

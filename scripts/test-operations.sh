@@ -543,6 +543,35 @@ carillon stop >/dev/null
 rm -f "$TRACE"
 printf 'update failures passed: registration, start and health report state and recovery\n'
 
+# A release that changes the database format is installed fresh with the
+# previous installation's configuration, credentials and custom Discord
+# module, as OPERATIONS.md's Update section says. Without questions, it
+# starts ready from new state, with carillon.toml as its owner wrote it but
+# for the bundled providers' versions.
+mkdir -m 0700 "$INSTALLATION/modules"
+cp "$EXAMPLE" "$INSTALLATION/modules/card-colours.wasm"
+carillon discord module enable "$INSTALLATION/modules/card-colours.wasm" >/dev/null
+sed -i "s|^path = \"$INSTALLATION/|path = \"|" "$INSTALLATION/providers/discord-private.toml"
+grep -Fx 'path = "modules/card-colours.wasm"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
+sed -i '1i # Owner note.' "$INSTALLATION/carillon.toml"
+mv "$INSTALLATION" "$TEST_ROOT/previous"
+mkdir -m 0700 "$INSTALLATION"
+cp -a "$TEST_ROOT/previous/carillon.toml" "$TEST_ROOT/previous/providers" \
+  "$TEST_ROOT/previous/credentials" "$TEST_ROOT/previous/agents" \
+  "$TEST_ROOT/previous/modules" "$INSTALLATION/"
+sed -i 's/^version = .*/version = "0.0.1-previous"/' "$INSTALLATION/carillon.toml"
+install_release "$BASE_PORT" >"$TEST_ROOT/fresh.log"
+cmp "$TEST_ROOT/previous/carillon.toml" "$INSTALLATION/carillon.toml"
+carillon start >"$TEST_ROOT/fresh-start.log"
+grep -Fx "  discord-private: ready ($VERSION)" "$TEST_ROOT/fresh-start.log" >/dev/null
+grep -F 'runtime-pi: ready' "$TEST_ROOT/fresh-start.log" >/dev/null
+carillon discord module | grep -Fx "discord-private serves the custom Discord module $INSTALLATION/modules/card-colours.wasm: /settings, /command." >/dev/null
+carillon settings --agent assistant model=local/echo | grep -Ex 'Model +Local echo' >/dev/null
+case "$(simulate fresh-1)" in *'Local provider response 1'*) ;; *) fail 'the fresh installation did not answer' ;; esac
+carillon stop >/dev/null
+rm -f "$TRACE"
+printf 'fresh install passed: a previous configuration starts ready from new state\n'
+
 # A second installation neither takes the entry point nor lets the first
 # installation's commands control the units it now owns.
 install_release "$ALT_PORT" CARILLON_HOME="$ALTERNATE" >"$TEST_ROOT/alternate.log"

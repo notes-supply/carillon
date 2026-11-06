@@ -16,7 +16,7 @@ import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
-import { configure, discover, openLedger, plain } from "./setup.ts";
+import { configure, discover, ledgerModel, openLedger, plain } from "./setup.ts";
 import { loadSettings, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -168,6 +168,18 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
 }
 
 /**
+ * `model --agent ID`: the model that agent of the installation `--config`
+ * names, or `CARILLON_HOME`'s, uses in the settings ledger, as JSON `value`,
+ * `null` when it has none. It reaches no T3 server.
+ */
+async function modelCommand(values: readonly string[]): Promise<void> {
+  const args = parseArguments(values);
+  const { installation } = await serving(args);
+  const value = await ledgerModel(installation, requiredArgument(args, "agent"));
+  process.stdout.write(`${JSON.stringify({ value })}\n`);
+}
+
+/**
  * `configure --url URL --agent ID --project ID --model INSTANCE/MODEL`: an
  * agent's settings, for the installation `--config` names, or
  * `CARILLON_HOME`'s.
@@ -253,6 +265,7 @@ function explained(failure: unknown): string {
 
 const commands = {
   discover: discoverCommand,
+  model: modelCommand,
   configure: configureCommand,
   check: checkCommand,
 };

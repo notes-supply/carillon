@@ -7,9 +7,15 @@
  */
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { publish, Unsynced } from "@carillon/runtime/publish";
-import { modelChoiceId, SettingsLedger, type CatalogueModel } from "@carillon/runtime/settings";
+import {
+  modelChoiceId,
+  SettingsLedger,
+  type Catalogue,
+  type CatalogueModel,
+} from "@carillon/runtime/settings";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -64,6 +70,27 @@ export async function discover(
   if (scope !== undefined) plain(agentOf(scope.installation, scope.agentId));
   const { projects, catalogue } = await serverOffer(endpoint, connect);
   return { projects, models: catalogue.models };
+}
+
+/**
+ * The model the installation's agent `agentId` uses in the settings ledger,
+ * `null` when it has none, read without reaching T3.
+ */
+export async function ledgerModel(
+  installation: Installation,
+  agentId: string,
+): Promise<string | null> {
+  plain(agentOf(installation, agentId));
+  const ledger = await openLedger(installation);
+  const { value } = await modelLine(ledger, { providers: [], models: [] }, agentId);
+  return value?.kind === "one" ? value.id : null;
+}
+
+async function modelLine(ledger: SettingsLedger, catalogue: Catalogue, agentId: string) {
+  const lines = await ledger.settings(catalogue, { kind: "agent", agent_id: agentId });
+  const line = lines.find(({ id }) => id === "model");
+  if (line === undefined) throw new Error("the settings ledger shows no model line");
+  return line;
 }
 
 async function serverOffer(
@@ -178,8 +205,7 @@ export async function configure(
     throw new Error(`T3 offers ${agent.name} no usable model ${model}`);
   const ledger = await openLedger(installation);
   const subject = { kind: "agent", agent_id: choice.agentId } as const;
-  const line = (await ledger.settings(offer.catalogue, subject)).find(({ id }) => id === "model");
-  if (line === undefined) throw new Error("the settings ledger shows no model line");
+  const line = await modelLine(ledger, offer.catalogue, choice.agentId);
   // Choosing the model again keeps the options chosen for it.
   if (line.value?.kind !== "one" || line.value.id !== model)
     await ledger.change(offer.catalogue, subject, {
@@ -236,11 +262,14 @@ async function publishSettings(
     token_file: tokenFile,
     ...(served.length === 0 ? {} : { agents: Object.fromEntries(served) }),
   });
+  let parsed: SettingsFile;
   try {
-    parseSettings(installation.providerFile, settings);
+    parsed = parseSettings(installation.providerFile, settings);
   } catch (failure) {
     throw new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   }
+  // The same settings leave the owner's file, comments and all, as it is.
+  if (isDeepStrictEqual(parsed, existing)) return;
   if (tokenFile !== existing?.token_file)
     await publish(resolve(installation.root, tokenFile), `${endpoint.token}\n`).catch(
       (failure: unknown) => {

@@ -7,13 +7,17 @@ use std::{
     collections::BTreeSet,
     fs,
     net::SocketAddr,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use toml::Table;
 use uuid::Uuid;
+
+use crate::{edit::edited, filesystem::atomic_write};
 
 /// The workspace release version shared by every bundled Rust component.
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -371,6 +375,34 @@ impl Config {
             .iter()
             .find(|agent| agent.id == id)
             .with_context(|| format!("agent {id} is not configured"))
+    }
+
+    /// Writes this registry to the file at `path` as an edit of the one
+    /// there: only the values that differ change, each in its place, and
+    /// the file keeps its mode. Providers and agents are matched by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file is as it was: the registry does not validate, or
+    /// the file does not read or cannot be replaced.
+    pub fn write(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        let file = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let previous: Self =
+            toml::from_str(&file).with_context(|| format!("parse {}", path.display()))?;
+        let text = edited(
+            &file,
+            &Table::try_from(&previous)?,
+            &Table::try_from(self)?,
+            "id",
+            &Table::new(),
+        )?;
+        if text != file {
+            let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+            atomic_write(path, text.as_bytes(), mode)
+                .with_context(|| format!("write {}", path.display()))?;
+        }
+        Ok(())
     }
 
     /// Each distinct resource directory the agents name, in registry order.

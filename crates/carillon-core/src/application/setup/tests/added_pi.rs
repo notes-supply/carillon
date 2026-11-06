@@ -42,6 +42,7 @@ impl Fixture {
                 "models": [model("codex", "gpt", "GPT")],
             }),
         )?;
+        std::fs::write(directory.path().join("model-t3-notes"), "codex/gpt")?;
         for (name, script) in [
             (
                 "runtime-pi",

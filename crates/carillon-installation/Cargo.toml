@@ -14,7 +14,8 @@ reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-toml.workspace = true
+toml = { workspace = true, features = ["preserve_order"] }
+toml_edit = { version = "0.25.17", default-features = false, features = ["display", "parse"] }
 uuid.workspace = true
 
 [dev-dependencies]

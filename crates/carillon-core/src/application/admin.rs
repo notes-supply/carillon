@@ -62,7 +62,7 @@ impl Runtime {
     }
 
     /// The version of the runtime this release bundles.
-    fn version(self) -> Result<String> {
+    pub(super) fn version(self) -> Result<String> {
         #[derive(serde::Deserialize)]
         struct Package {
             version: String,
@@ -166,10 +166,10 @@ pub(super) fn assistant(workspace: &Path) -> AgentConfig {
 /// The installation's own agent resources, relative to its root.
 const RESOURCES: &str = "agents/default";
 
-/// Registers the bundled `runtime` beside the installation's providers, on
+/// Registers the bundled `runtime` after the installation's providers, on
 /// the first loopback port after theirs, with a credential of its own; it
-/// does nothing when the runtime is registered already. The registry is
-/// rewritten whole, under the caller's maintenance lock.
+/// does nothing when the runtime is registered already. The caller holds
+/// the maintenance lock.
 pub(super) fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
     let config_path = config_path
         .canonicalize()
@@ -196,19 +196,23 @@ pub(super) fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<(
     config.validate()?;
     create_runtime_directories(root, runtime)?;
     write_credentials(root, &[(runtime.id(), &token)])?;
-    write_config(&config_path, &config)
+    config.write(&config_path)
 }
 
 /// Replaces the installation's agents with `agents`, validated with the
-/// rest of the registry before anything is written.
-pub(super) fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result<()> {
+/// rest of the registry before anything is written. An agent already there
+/// keeps its place; a new one goes after them.
+pub(super) fn set_agents(config_path: &Path, mut agents: Vec<AgentConfig>) -> Result<()> {
     let config_path = config_path
         .canonicalize()
         .context("resolve configuration path")?;
     let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    agents.sort_by_key(|agent| {
+        let kept = config.agents.iter().position(|kept| kept.id == agent.id);
+        kept.unwrap_or(usize::MAX)
+    });
     config.agents = agents;
-    config.validate()?;
-    write_config(&config_path, &config)
+    config.write(&config_path)
 }
 
 fn default_providers(
@@ -299,18 +303,7 @@ pub(super) fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Resul
         .find(|provider| provider.id == id)
         .with_context(|| format!("provider {id} is not configured"))?;
     provider.enabled = enabled;
-    config.validate()?;
-    write_config(&config_path, &config)
-}
-
-fn write_config(config_path: &Path, config: &Config) -> Result<()> {
-    let mode = fs::metadata(config_path)?.permissions().mode() & 0o777;
-    atomic_write(
-        config_path,
-        toml::to_string_pretty(config)?.as_bytes(),
-        mode,
-    )?;
-    Ok(())
+    config.write(&config_path)
 }
 
 pub(super) fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {

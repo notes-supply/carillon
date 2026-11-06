@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{Runtime, assistant, backup, initialize, restore, set_provider},
+    admin::{Runtime, backup, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
@@ -33,7 +33,7 @@ use super::{
         operator_url, print_health, registry_status, status, wait_until_healthy,
     },
     settings::settings,
-    setup::{Options as SetupOptions, setup},
+    setup::{Options as SetupOptions, init, setup},
     update::update,
 };
 
@@ -93,7 +93,9 @@ struct Drained {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new installation, with Carillon's assistant on Pi.
+    /// Create a new installation, with Carillon's assistant on Pi. Over a
+    /// `carillon.toml` carried from another installation, create the database
+    /// it lacks and expect the providers this release bundles.
     Init {
         #[arg(long)]
         workspace: PathBuf,
@@ -261,15 +263,7 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
-        } => {
-            let path = initialize(
-                &home()?,
-                base_port,
-                Runtime::Pi,
-                vec![assistant(&workspace)],
-            )?;
-            println!("{}", path.display());
-        }
+        } => println!("{}", init(&home()?, &workspace, base_port)?.display()),
         Command::Setup {
             workspace,
             base_port,
