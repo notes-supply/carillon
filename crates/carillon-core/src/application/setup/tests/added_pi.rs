@@ -12,7 +12,7 @@ struct Fixture {
 
 impl Fixture {
     /// An installation of T3 Code agent `t3-notes` alone, whose T3 settings
-    /// the runtime's check reads, using a model.
+    /// the runtime's check reads.
     fn new() -> anyhow::Result<Self> {
         let directory = tempfile::tempdir()?;
         let home = directory.path().join("home");

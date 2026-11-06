@@ -17,10 +17,6 @@ fn bundled() -> anyhow::Result<[String; 3]> {
     ])
 }
 
-/// A registry as its owner keeps it, with the versions of Discord, Pi and
-/// T3 given: notes of the owner's own, a version in single quotes with a
-/// comment, a provider installed separately, and the assistant before a T3
-/// agent.
 fn carried(workspace: &Path, [discord, pi, t3]: [&str; 3]) -> String {
     let hash = "0".repeat(64);
     let workspace = workspace.display();
@@ -83,7 +79,6 @@ workspace = "{workspace}"
     )
 }
 
-/// The same registry with its providers in one inline list.
 fn carried_inline(workspace: &Path, [discord, pi, _]: [&str; 3]) -> String {
     let hash = "0".repeat(64);
     let workspace = workspace.display();
@@ -109,8 +104,6 @@ resources = "agents/default"
     )
 }
 
-/// An installation at `home` whose `carillon.toml` is `registry`, carried
-/// without its state.
 fn carry(home: &Path, workspace: &Path, registry: &str) -> anyhow::Result<std::path::PathBuf> {
     let path = initialized(home, workspace, Runtime::Pi)?;
     std::fs::write(&path, registry)?;
@@ -143,9 +136,6 @@ fn a_carried_registry_gets_this_releases_versions_and_keeps_the_rest_as_written(
     Ok(())
 }
 
-/// Guided setup over a carried registry, with Pi only or with T3's
-/// projects chosen again, leaves the file as its owner wrote it, but for an
-/// agent of a project chosen anew.
 #[test]
 fn setup_leaves_a_carried_registry_as_written_but_for_what_it_adds() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -176,8 +166,6 @@ fn setup_leaves_a_carried_registry_as_written_but_for_what_it_adds() -> anyhow::
     Ok(())
 }
 
-/// Kept T3 settings reach T3 only for an agent whose settings ledger has no
-/// model, so a rerun with every model chosen goes on while T3 is down.
 #[test]
 fn kept_t3_settings_need_no_t3_when_every_agent_has_a_model() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

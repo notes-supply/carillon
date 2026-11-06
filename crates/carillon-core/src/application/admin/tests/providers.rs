@@ -14,9 +14,6 @@ fn provider_command_rejects_unsafe_identity_before_mutation() -> Result<()> {
     Ok(())
 }
 
-/// Enabling, disabling and registering a provider change only their own
-/// lines: the owner's notes and line endings stay, and a registered runtime
-/// follows the providers before it.
 #[test]
 fn provider_commands_change_only_their_own_lines() -> Result<()> {
     let directory = tempdir()?;

@@ -283,8 +283,6 @@ fn choose_pi_models(
     Ok(())
 }
 
-/// `carillon init` at `home`, with the assistant in `workspace`. Returns the
-/// registry's path.
 pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
     let path = home.join("carillon.toml");
     if !path.exists() {
@@ -300,11 +298,6 @@ pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<Path
     Ok(path)
 }
 
-/// Starts an installation without a database, as one set up with another's
-/// carried configuration, on this release: its registry expects the versions
-/// of the providers this release bundles, and it gets the database core
-/// itself never creates. An installation with a database, in whatever
-/// format, is left as it is. The caller holds the maintenance lock.
 fn start_fresh(home: &Path) -> Result<()> {
     let config_path = home.join("carillon.toml");
     let database = LoadedConfig::load(&config_path)?
@@ -380,7 +373,6 @@ impl Server<'_> {
         serde_json::from_str(&offer).context("carillon-runtime-t3 discovered something unreadable")
     }
 
-    /// What the runtime offers the installation's agent `id` on the server.
     fn offer(&self, home: &Path, id: &str) -> Result<Offer> {
         let offer = self.run(home, "discover", &["--agent", id], None)?;
         serde_json::from_str(&offer).context("carillon-runtime-t3 discovered something unreadable")
@@ -414,9 +406,7 @@ impl Server<'_> {
 /// Asks for a T3 server and the projects T3 Code channels work in; creates
 /// or extends the installation with their agents, and with Carillon's
 /// `assistant` on Pi when Pi is used; then has the T3 runtime `t3` write each
-/// T3 agent's settings with the default model chosen for it. Kept settings
-/// keep their server, token and agents, and only a T3 agent without a model
-/// is asked one.
+/// T3 agent's settings with the default model chosen for it.
 fn set_up_t3(
     home: &Path,
     options: &Options,
@@ -506,9 +496,6 @@ fn configure_agents(
     Ok(())
 }
 
-/// Has the T3 runtime configure each T3 agent whose settings ledger has no
-/// model, as after kept settings over a new database, with its saved project
-/// and the default model chosen for it. Only such an agent needs T3.
 fn choose_kept_models(
     home: &Path,
     server: &Server<'_>,
@@ -543,8 +530,6 @@ fn choose_kept_models(
     Ok(())
 }
 
-/// The model the T3 agent `id` uses in the settings ledger, which the T3
-/// runtime `t3` reads without reaching T3.
 fn ledger_model(home: &Path, t3: &Path, id: &str) -> Result<Option<String>> {
     #[derive(Deserialize)]
     struct Model {
@@ -557,9 +542,6 @@ fn ledger_model(home: &Path, t3: &Path, id: &str) -> Result<Option<String>> {
     Ok(model.value)
 }
 
-/// Asks the default model of the agent `id`, called `label`, among those
-/// `offer` makes it, and has the T3 runtime configure the agent with it and
-/// its project.
 fn configure_agent(
     home: &Path,
     server: &Server<'_>,
@@ -583,7 +565,6 @@ fn configure_agent(
     questions.say(server.run(home, "configure", &args, None)?.trim())
 }
 
-/// The T3 server the saved settings name, with the token their file holds.
 fn saved_server<'a>(home: &Path, t3: &'a Path) -> Result<Server<'a>> {
     #[derive(Deserialize)]
     struct Settings {

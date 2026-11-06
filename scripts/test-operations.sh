@@ -544,10 +544,10 @@ rm -f "$TRACE"
 printf 'update failures passed: registration, start and health report state and recovery\n'
 
 # A release that changes the database format is installed fresh with the
-# previous installation's configuration and credentials, as OPERATIONS.md's
-# Update section says. Without questions, it starts ready from new state, with
-# the custom Discord module kept inside the installation, and expects the
-# providers it bundles in a carillon.toml otherwise as its owner wrote it.
+# previous installation's configuration, credentials and custom Discord
+# module, as OPERATIONS.md's Update section says. Without questions, it
+# starts ready from new state, with carillon.toml as its owner wrote it but
+# for the bundled providers' versions.
 mkdir -m 0700 "$INSTALLATION/modules"
 cp "$EXAMPLE" "$INSTALLATION/modules/card-colours.wasm"
 carillon discord module enable "$INSTALLATION/modules/card-colours.wasm" >/dev/null
