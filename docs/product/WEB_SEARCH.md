@@ -28,7 +28,9 @@ You can ask the assistant to set search up for you, for example:
 
 It writes the skill. Store the key yourself, as the next section shows. Do
 not send the key in a message. Carillon keeps messages in the conversation
-history, and the model provider receives them.
+history, and the model provider receives them. An assistant setting this up
+writes the skill, then asks the person to run the key commands in their own
+terminal. It never asks for the key in a message.
 
 ## Store the key in a header file
 
@@ -43,9 +45,10 @@ Firecrawl keys start with `fc-`. Create one on the
 bash:
 
 ```sh
-mkdir -p -m 700 ~/.config/firecrawl
+mkdir -p ~/.config/firecrawl && chmod 700 ~/.config/firecrawl
 read -rsp 'Firecrawl API key: ' key && echo
-(umask 077 && printf 'Authorization: Bearer %s\n' "$key" > ~/.config/firecrawl/auth-header)
+install -m 600 /dev/null ~/.config/firecrawl/auth-header
+printf 'Authorization: Bearer %s\n' "$key" > ~/.config/firecrawl/auth-header
 unset key
 ```
 
@@ -53,16 +56,20 @@ With `-H @file`, the command line names only the file, so activity cards
 and the process list do not show the key. The agent runs as you and can
 read the file, as it can read your other files.
 
-Keep the file outside the agent's resource root, because core copies that
-directory with every turn. The file is also outside `~/.carillon`, so
-`carillon backup` does not include it.
+Keep the file outside the agent's resource root. Core copies the root's
+`skills/` and `extensions/` into a kept snapshot with every turn, and
+backups include those snapshots. The file is also outside the installation
+(`$CARILLON_HOME`, by default `~/.carillon`), so `carillon backup` does not
+include it.
 
 ## Add the Firecrawl skill
 
 Create `skills/web-search/SKILL.md` in the agent's resource root. For the
 assistant that setup creates, the file is
+`$CARILLON_HOME/agents/default/skills/web-search/SKILL.md`, by default
 `~/.carillon/agents/default/skills/web-search/SKILL.md`. For another agent,
-use the `resources` directory of its `[[agents]]` entry in `carillon.toml`.
+use the `resources` directory of its `[[agents]]` entry in `carillon.toml`,
+which is relative to `$CARILLON_HOME`.
 
 ````markdown
 ---
@@ -85,6 +92,7 @@ curl -sS https://api.firecrawl.dev/v2/search \
 ```
 
 - Write the query as a person types it into a search engine.
+- The query sits in single quotes. Write a `'` in it as `'\''`.
 - For recent results, add `tbs` to the body: `"qdr:d"` for the past day,
   `"qdr:w"` for the past week, or `"qdr:m"` for the past month.
 - A result gives a title, a URL and a short description. Read the page
@@ -126,8 +134,9 @@ Send a question the model cannot answer from training, for example:
 
 The activity card shows a `bash` call to
 `https://api.firecrawl.dev/v2/search`, and the answer links its sources. If
-the agent answers without searching, ask it to use its web search skill. An answer that says the key is wrong
-means the header file does not hold `Authorization: Bearer fc-...`.
+the agent answers without searching, ask it to use its web search skill.
+An answer that says the key is wrong means the header file does not hold
+`Authorization: Bearer fc-...`.
 
 To remove search, delete the skill's directory.
 
@@ -137,13 +146,15 @@ Get a key from the [Brave Search API dashboard](https://api-dashboard.search.bra
 Brave reads it from the `X-Subscription-Token` header:
 
 ```sh
-mkdir -p -m 700 ~/.config/brave-search
+mkdir -p ~/.config/brave-search && chmod 700 ~/.config/brave-search
 read -rsp 'Brave Search API key: ' key && echo
-(umask 077 && printf 'X-Subscription-Token: %s\n' "$key" > ~/.config/brave-search/auth-header)
+install -m 600 /dev/null ~/.config/brave-search/auth-header
+printf 'X-Subscription-Token: %s\n' "$key" > ~/.config/brave-search/auth-header
 unset key
 ```
 
-Replace the command in the skill's Search section with this one:
+Replace the command in the skill's Search section, and its `tbs` bullet,
+with these:
 
 ```sh
 curl -sS --get https://api.search.brave.com/res/v1/web/search \
@@ -153,8 +164,12 @@ curl -sS --get https://api.search.brave.com/res/v1/web/search \
 	jq 'if .web then .web.results[] | {title, url, description} else . end'
 ```
 
-`count` takes up to 20. For recent results, add `-d freshness=pd` for the
-past day, `pw` for the past week, or `pm` for the past month. Brave returns
+```markdown
+- For recent results, add `-d freshness=pd` for the past day, `pw` for the
+  past week, or `pm` for the past month.
+```
+
+`count` takes up to 20. Brave returns
 links and snippets, not page text. Keep the Read a page section with its
 Firecrawl key, or replace that section with an instruction to fetch pages
 with `curl`. The
@@ -175,18 +190,22 @@ search:
 ```
 
 Without `json` there, a JSON request gets 403 Forbidden. Replace the
-command in the skill's Search section with this one, using your server's
-address:
+command in the skill's Search section, and its `tbs` bullet, with these,
+using your server's address:
 
 ```sh
-curl -sS --get http://127.0.0.1:8888/search \
+curl -sS --fail-with-body --get http://127.0.0.1:8888/search \
 	--data-urlencode 'q=QUERY' -d format=json |
 	jq '.results[:5][] | {title, url, content}'
 ```
 
-The [search API](https://docs.searxng.org/dev/search_api.html) also takes
-`time_range` (`day`, `month` or `year`), `categories`, `language` and
-`pageno`. Like Brave, SearXNG returns links and snippets, so read pages as
+```markdown
+- For recent results, add `-d time_range=day`, `month` or `year`.
+```
+
+With `--fail-with-body`, a refused request reports its HTTP status, such as
+403. The [search API](https://docs.searxng.org/dev/search_api.html) also
+takes `categories`, `language` and `pageno`. Like Brave, SearXNG returns links and snippets, so read pages as
 the Brave recipe says.
 
 [Vane](https://github.com/ItzCrazyKns/Vane) is a self-hosted answer engine
