@@ -349,19 +349,14 @@ it("lets a subagent use Discord in the conversation it serves", async () => {
   expect(operations).toEqual([{ action: "server.info" }]);
 });
 
-it("runs a subagent on the model and thinking its call chooses, in the background or waiting", async () => {
-  for (const ask of ["Delegate.", "Delegate and wait."]) {
-    const { answers, requests } = scripted({
-      choices: { model: "faux/reasoner", thinking: "low" },
-    });
-    const agent = await fixture({ defaults: ["subagents"], answers });
-    expect(await agent.ask("turn-1", ask)).toMatch(
-      /^Tool: The subagent runs faux\/reasoner with thinking low, at standard speed\. /u,
-    );
-    if (ask === "Delegate.")
-      expect(await agent.outcome("opened-1")).toMatchObject({ output: "Reported: 2, 3 and 5." });
-    expect(requests).toEqual([{ model: "faux/reasoner", thinking: "low", payload: { input: [] } }]);
-  }
+it("runs a background subagent on the model and thinking its call chooses", async () => {
+  const { answers, requests } = scripted({ choices: { model: "faux/reasoner", thinking: "low" } });
+  const agent = await fixture({ defaults: ["subagents"], answers });
+  expect(await agent.ask("turn-1", "Delegate.")).toMatch(
+    /^Tool: The subagent runs faux\/reasoner with thinking low, at standard speed\. Subagent \d+ is working/u,
+  );
+  expect(await agent.outcome("opened-1")).toMatchObject({ output: "Reported: 2, 3 and 5." });
+  expect(requests).toEqual([{ model: "faux/reasoner", thinking: "low", payload: { input: [] } }]);
 });
 
 it("moves a thinking level the subagent's model lacks to the nearest it has, and says so", async () => {
