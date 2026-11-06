@@ -205,3 +205,45 @@ fn kept_t3_settings_need_no_t3_when_every_agent_has_a_model() -> anyhow::Result<
     );
     Ok(())
 }
+
+#[test]
+fn kept_t3_settings_say_what_to_do_when_t3_cannot_give_an_agent_a_model() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    carry(
+        &home,
+        directory.path(),
+        &carried(directory.path(), PREVIOUS),
+    )?;
+    std::fs::write(home.join("credentials/t3.token"), "saved-token\n")?;
+    std::fs::write(
+        home.join("providers/runtime-t3.toml"),
+        "url = 'http://127.0.0.1:3999'\ntoken_file = 'credentials/t3.token'\n\
+         [agents.t3-notes]\nproject_id = 'notes'\n",
+    )?;
+    let program = fake_t3(
+        directory.path(),
+        &serde_json::json!({"projects": [], "models": [model("codex", "gpt", "GPT")]}),
+    )?;
+    std::fs::write(directory.path().join("unreachable"), "")?;
+    let failure = set_up_t3(
+        &home,
+        &options(),
+        true,
+        &program,
+        SavedT3::Kept,
+        &mut Unasked,
+    )
+    .err()
+    .map(|failure| format!("{failure:#}"))
+    .unwrap_or_default();
+    for said in [
+        "t3-notes",
+        "http://127.0.0.1:3999",
+        "run setup again",
+        "answer No to \"Keep the T3 settings and agents?\"",
+    ] {
+        assert!(failure.contains(said), "{said:?} missing from {failure}");
+    }
+    Ok(())
+}

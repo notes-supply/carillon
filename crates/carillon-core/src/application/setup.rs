@@ -512,20 +512,30 @@ fn choose_kept_models(
         if ledger_model(home, server.t3, &agent.id)?.is_some() {
             continue;
         }
-        let offer = server.offer(home, &agent.id)?;
-        let project = projects
-            .get(&agent.id)
-            .with_context(|| format!("the saved T3 settings give {} no project", agent.id))?;
         let label = agent.label(agents.iter().copied());
-        configure_agent(
-            home,
-            server,
-            &agent.id,
-            &label,
-            &project.project_id,
-            &offer,
-            questions,
-        )?;
+        let chosen = (|| {
+            let offer = server.offer(home, &agent.id)?;
+            let project = projects
+                .get(&agent.id)
+                .with_context(|| format!("the saved T3 settings give {} no project", agent.id))?;
+            configure_agent(
+                home,
+                server,
+                &agent.id,
+                &label,
+                &project.project_id,
+                &offer,
+                questions,
+            )
+        })();
+        chosen.with_context(|| {
+            format!(
+                "{} has no model yet, and T3 at {} could not give it one. Start or fix T3 and \
+                 run setup again, or answer No to \"Keep the T3 settings and agents?\" to give \
+                 T3's address, token and projects again",
+                agent.id, server.url
+            )
+        })?;
     }
     Ok(())
 }

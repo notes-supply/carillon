@@ -7,6 +7,7 @@
  */
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { publish, Unsynced } from "@carillon/runtime/publish";
 import {
@@ -261,11 +262,14 @@ async function publishSettings(
     token_file: tokenFile,
     ...(served.length === 0 ? {} : { agents: Object.fromEntries(served) }),
   });
+  let parsed: SettingsFile;
   try {
-    parseSettings(installation.providerFile, settings);
+    parsed = parseSettings(installation.providerFile, settings);
   } catch (failure) {
     throw new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   }
+  // The same settings leave the owner's file, comments and all, as it is.
+  if (isDeepStrictEqual(parsed, existing)) return;
   if (tokenFile !== existing?.token_file)
     await publish(resolve(installation.root, tokenFile), `${endpoint.token}\n`).catch(
       (failure: unknown) => {
