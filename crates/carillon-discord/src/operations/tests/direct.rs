@@ -252,3 +252,72 @@ async fn only_what_was_sent_outside_the_persons_own_conversation_is_quoted_there
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn an_edited_or_deleted_direct_message_is_quoted_as_the_person_sees_it() -> anyhow::Result<()>
+{
+    let server = send_directly(
+        "700",
+        "Deploy production?",
+        json!({"agent_id": "assistant", "channel_id": "300"}),
+    )
+    .await?;
+    let dm = json!({"id": "900", "type": 1,
+        "recipients": [{"id": "3", "username": "person", "discriminator": "0"}]});
+    let mut edited = json!({"id": "700", "channel_id": "900",
+        "author": {"id": "201", "username": "carillon", "discriminator": "0", "bot": true},
+        "content": "Deploy staging?", "attachments": [], "embeds": [], "mention_everyone": false,
+        "mention_roles": [], "mentions": [], "pinned": false, "tts": false, "type": 0,
+        "timestamp": "2026-11-05T14:03:00.000000+00:00"});
+    edited["edited_timestamp"] = json!("2026-11-05T14:04:00.000000+00:00");
+    server
+        .pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .extend([
+            get("/api/v10/channels/900", dm.clone()),
+            Step {
+                method: Method::PATCH,
+                path: "/api/v10/channels/900/messages/700",
+                status: StatusCode::OK,
+                body: edited,
+            },
+        ]);
+    server
+        .execute(json!({"action": "messages.edit", "channel_id": "900",
+            "message_id": "700", "content": "Deploy staging?"}))
+        .await?
+        .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+    assert_eq!(
+        answered(&server, direct_message("800", None))?,
+        "You sent them this direct message at 2026-11-05T14:03:00+00:00 from <#300>:\n\
+         > Deploy staging?\n\
+         \n\
+         merge it",
+        "an edit is quoted as edited"
+    );
+    server
+        .pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .extend([
+            get("/api/v10/channels/900", dm),
+            Step {
+                method: Method::DELETE,
+                path: "/api/v10/channels/900/messages/700",
+                status: StatusCode::NO_CONTENT,
+                body: Value::Null,
+            },
+        ]);
+    server
+        .execute(json!({"action": "messages.delete", "channel_id": "900", "message_id": "700"}))
+        .await?
+        .map_err(|failure| anyhow::anyhow!("{failure}"))?;
+    server.finished()?;
+    assert_eq!(
+        answered(&server, direct_message("800", None))?,
+        "merge it",
+        "a deleted message is not quoted"
+    );
+    Ok(())
+}

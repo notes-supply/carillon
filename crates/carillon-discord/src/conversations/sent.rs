@@ -57,11 +57,7 @@ impl SentDirect {
             sender,
             sent_at: rfc3339(message.timestamp),
             content: message.content.clone(),
-            files: message
-                .attachments
-                .iter()
-                .map(|attachment| attachment.filename.clone())
-                .collect(),
+            files: files(message),
         }
     }
 
@@ -106,6 +102,26 @@ impl ParticipationState {
         kept.push(message);
     }
 
+    /// Keeps a direct message the person has yet to answer as `message` now
+    /// reads, after an edit.
+    pub(crate) fn edited_directly(&mut self, message: &Message) {
+        for sent in self.unanswered.values_mut().flatten() {
+            if sent.message_id == message.id {
+                sent.content.clone_from(&message.content);
+                sent.files = files(message);
+            }
+        }
+    }
+
+    /// Forgets a direct message the person has yet to answer once it is
+    /// deleted, so nothing quotes what they can no longer see.
+    pub(crate) fn deleted_directly(&mut self, message: Id<MessageMarker>) {
+        for kept in self.unanswered.values_mut() {
+            kept.retain(|sent| sent.message_id != message);
+        }
+        self.unanswered.retain(|_, kept| !kept.is_empty());
+    }
+
     /// What was sent `person` directly before their direct message
     /// `message`, oldest first.
     pub(super) fn unanswered_before(
@@ -134,4 +150,12 @@ impl ParticipationState {
         }
         forgot
     }
+}
+
+fn files(message: &Message) -> Vec<String> {
+    message
+        .attachments
+        .iter()
+        .map(|attachment| attachment.filename.clone())
+        .collect()
 }

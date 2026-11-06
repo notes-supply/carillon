@@ -117,13 +117,16 @@ impl Messages {
                 content,
             } => {
                 direct::conversation(http, scope, channel_id).await?;
-                decoded(
-                    http.update_message(channel_id, message_id)
-                        .content(Some(&content))
-                        .allowed_mentions(Some(&AllowedMentions::default()))
-                        .await?,
-                )
-                .await
+                let message = http
+                    .update_message(channel_id, message_id)
+                    .content(Some(&content))
+                    .allowed_mentions(Some(&AllowedMentions::default()))
+                    .await?
+                    .model()
+                    .await
+                    .map_err(|_| OperationError::uncertain())?;
+                participation.record(|state| state.edited_directly(&message));
+                serde_json::to_value(&message).map_err(|_| OperationError::uncertain())
             }
             Self::Delete {
                 channel_id,
@@ -131,6 +134,7 @@ impl Messages {
             } => {
                 direct::conversation(http, scope, channel_id).await?;
                 http.delete_message(channel_id, message_id).await?;
+                participation.record(|state| state.deleted_directly(message_id));
                 Ok(json!({ "message_id": message_id, "deleted": true }))
             }
             Self::Pin {
