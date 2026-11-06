@@ -13,10 +13,11 @@ import {
   clampThinkingLevel,
   StringEnum,
   type Api,
-  type Models,
+  type Model,
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
 import {
+  AgentDoc,
   AssistantEntry,
   configure,
   defineDoc,
@@ -47,7 +48,11 @@ const REPORTER = "carillon.subagent";
 const SPEEDS = ["standard", "fast"] as const;
 type Speed = (typeof SPEEDS)[number];
 /** The pi-ai APIs whose request body takes OpenAI's `service_tier`, which `fast` sets to `priority`. */
-const SERVICE_TIER_APIS: ReadonlySet<Api> = new Set(["openai-responses", "openai-codex-responses"]);
+const SERVICE_TIER_APIS: ReadonlySet<Api> = new Set([
+  "openai-responses",
+  "openai-codex-responses",
+  "azure-openai-responses",
+]);
 
 /** Each background call, by its tool task: the reporter it started. */
 const Calls = defineDocFamily<{ reporter?: TaskId }, null>({
@@ -59,9 +64,13 @@ const Calls = defineDocFamily<{ reporter?: TaskId }, null>({
   checkpointWhen: () => true,
 });
 
-/** A child conversation's speed; pi-durable's agent holds its model and thinking. */
-const ChildSpeed = defineDoc<{ speed: Speed }>({
-  kind: "carillon.subagent-speed",
+/**
+ * A child conversation's speed, and the thinking level its call asked for
+ * when its model lacks that level; pi-durable's agent holds the model and
+ * thinking it runs.
+ */
+const ChildChoices = defineDoc<{ speed: Speed; unsupportedThinking?: ModelThinkingLevel }>({
+  kind: "carillon.subagent-choices",
   version: 1,
   scope: "conversation",
   history: "latest",
@@ -70,9 +79,10 @@ const ChildSpeed = defineDoc<{ speed: Speed }>({
   checkpointWhen: () => true,
 });
 
-interface ChildAgent {
+interface Choice {
   readonly model: ModelRef;
   readonly thinkingLevel: ModelThinkingLevel;
+  readonly unsupportedThinking: ModelThinkingLevel | undefined;
   readonly speed: Speed;
 }
 
@@ -96,11 +106,7 @@ const COMPLETED = { status: "terminal", outcome: { status: "completed", result: 
 
 /** `opening` opens the turns that bring background subagents' answers. */
 export function createSubagentsExtension(host: { readonly opening: OpeningTask }): Extension {
-  const reporter = defineTask<
-    { readonly task: string; readonly agent: ChildAgent },
-    ReporterState,
-    null
-  >({
+  const reporter = defineTask<{ readonly task: string }, ReporterState, null>({
     name: REPORTER,
     version: 1,
     initial: () => ({ phase: "start" }),
@@ -111,7 +117,7 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
             status: "running",
             checkpoint: {
               phase: "run",
-              child: await childOf(tx, task.id, runtime.conversationId, task.input.agent),
+              child: await childOf(tx, task.id, runtime.conversationId),
             },
           }),
           context,
@@ -184,7 +190,7 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
         speed: Type.Optional(
           StringEnum(SPEEDS, {
             description:
-              "fast asks the provider for priority processing, which OpenAI's Responses APIs offer; refused for other models.",
+              "fast asks the provider for priority processing, which the OpenAI and Azure OpenAI Responses APIs offer; refused for other models.",
           }),
         ),
       },
@@ -193,26 +199,41 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
     // A rerun after a crash finds the child, the submission or the reporter its call made.
     replay: "safe",
     async execute({ task, wait, ...requested }, api, context) {
-      const { agent, note } = await choose(requested, await api.agent(context), api.models);
+      const parent = await api.agent(context);
+      const available = await api.models.getAvailable();
       if (wait !== true) {
-        const started = await api.commit(async (tx) => {
+        const { started, note } = await api.commit(async (tx) => {
           const call = await tx.doc(Calls, String(api.taskId), null);
-          call.reporter ??= await tx.createTask(
+          if (call.reporter !== undefined)
+            return {
+              started: call.reporter,
+              note: await describe(tx, await childOf(tx, call.reporter, api.conversationId)),
+            };
+          const choice = choose(requested, parent, available);
+          call.reporter = await tx.createTask(
             reporter,
-            { task, agent },
+            { task },
             { ownership: { kind: "conversation" }, background: true },
           );
-          return call.reporter;
+          const child = await createChild(tx, call.reporter, api.conversationId, choice);
+          return { started: call.reporter, note: await describe(tx, child) };
         }, context);
         return text(
           note,
           `Subagent ${String(started)} is working on it in the background; its answer will come to you as a message of its own.`,
         );
       }
-      const id = await api.commit(
-        (tx) => childOf(tx, api.taskId, api.conversationId, agent),
-        context,
-      );
+      const { id, note } = await api.commit(async (tx) => {
+        const child =
+          (await childOwnedBy(tx, api.taskId)) ??
+          (await createChild(
+            tx,
+            api.taskId,
+            api.conversationId,
+            choose(requested, parent, available),
+          ));
+        return { id: child, note: await describe(tx, child) };
+      }, context);
       const child = await api.conversation(id, context);
       if (child === undefined) throw new Error("The subagent's conversation is gone.");
       const submission = await child.submit(
@@ -230,33 +251,40 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
   });
 
   /**
-   * The child conversation `owner` owns, created once as a copy of the
-   * agent of `parent`, its conversation, running `agent`, that cannot start
-   * subagents or schedules, or attach files to an answer. It serves the
-   * parent's Carillon conversation, so tools such as Discord's find its
-   * interface and origin.
+   * Creates the child conversation `owner` owns, a copy of the agent of
+   * `parent`, its conversation, that cannot start subagents or schedules,
+   * or attach files to an answer, and runs `choice`, else what it copied at
+   * standard speed. It serves the parent's Carillon conversation, so tools
+   * such as Discord's find its interface and origin.
    */
-  async function childOf(
+  async function createChild(
     tx: Tx,
     owner: TaskId,
     parent: ConversationId,
-    agent: ChildAgent,
+    choice?: Choice,
   ): Promise<ConversationId> {
-    const [existing] = (await tx.scanConversations({ ownerTaskId: owner }, 1)).items;
-    if (existing !== undefined) return existing.id;
     const created = await tx.createConversation({ ownership: { kind: "task", taskId: owner } });
     await configure(tx, created.id, {
-      model: agent.model,
-      thinkingLevel: agent.thinkingLevel,
+      ...(choice === undefined ? {} : { model: choice.model, thinkingLevel: choice.thinkingLevel }),
       extensions: { remove: [{ name: SCHEDULES }] },
       tools: { remove: [ATTACH, subagent] },
     });
-    (await tx.doc(ChildSpeed, created.id)).speed = agent.speed;
+    if (choice !== undefined)
+      Object.assign(await tx.doc(ChildChoices, created.id), {
+        speed: choice.speed,
+        ...(choice.unsupportedThinking === undefined
+          ? {}
+          : { unsupportedThinking: choice.unsupportedThinking }),
+      });
     Object.assign(
       await tx.doc(ConversationInfo, created.id),
       copyJson(await tx.doc(ConversationInfo, parent)),
     );
     return created.id;
+  }
+
+  async function childOf(tx: Tx, owner: TaskId, parent: ConversationId): Promise<ConversationId> {
+    return (await childOwnedBy(tx, owner)) ?? createChild(tx, owner, parent);
   }
 
   return defineExtension({
@@ -266,9 +294,9 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
     hooks: [
       hook(GenerationTask, {
         async beforeProviderRequest({ model, payload }, api, context) {
-          const fast =
-            (await api.snapshot(ChildSpeed, api.conversationId, context))?.speed === "fast";
-          if (!fast || !SERVICE_TIER_APIS.has(model.api) || !isObject(payload)) return undefined;
+          if (!SERVICE_TIER_APIS.has(model.api) || !isObject(payload)) return undefined;
+          const choices = await api.snapshot(ChildChoices, api.conversationId, context);
+          if (choices?.speed !== "fast") return undefined;
           return { payload: { ...payload, service_tier: "priority" } };
         },
       }),
@@ -277,20 +305,12 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
 }
 
 /**
- * What the child runs: the requested model among those Pi offers now,
+ * What a new child runs: the requested model among those Pi offers now,
  * else the parent's; the requested thinking level, else the parent's,
- * clamped to what that model supports; and the requested speed. The note
- * tells the calling agent what it got.
+ * clamped to what that model supports; and the requested speed.
  */
-async function choose(
-  requested: Requested,
-  parent: Agent,
-  models: Models,
-): Promise<{ readonly agent: ChildAgent; readonly note: string }> {
-  const name =
-    requested.model ??
-    (parent.model === undefined ? undefined : `${parent.model.provider}/${parent.model.modelId}`);
-  const available = await models.getAvailable();
+function choose(requested: Requested, parent: Agent, available: readonly Model<Api>[]): Choice {
+  const name = requested.model ?? (parent.model === undefined ? undefined : refName(parent.model));
   const model = available.find((offered) => nameOf(offered) === name);
   if (model === undefined)
     throw new Error(
@@ -301,13 +321,29 @@ async function choose(
   const speed = requested.speed ?? "standard";
   if (speed === "fast" && !SERVICE_TIER_APIS.has(model.api))
     throw new Error(
-      `${name} runs the ${model.api} API, which has no faster service tier; only OpenAI's Responses APIs do.`,
+      `${name} runs the ${model.api} API, which has no faster service tier; these APIs have one: ${[...SERVICE_TIER_APIS].join(", ")}.`,
     );
-  const clamped = thinkingLevel === wanted ? "" : ` (${name} does not support thinking ${wanted})`;
   return {
-    agent: { model: { provider: model.provider, modelId: model.id }, thinkingLevel, speed },
-    note: `The subagent runs ${name} with thinking ${thinkingLevel}${clamped}, at ${speed} speed.`,
+    model: { provider: model.provider, modelId: model.id },
+    thinkingLevel,
+    unsupportedThinking: thinkingLevel === wanted ? undefined : wanted,
+    speed,
   };
+}
+
+async function childOwnedBy(tx: Tx, owner: TaskId): Promise<ConversationId | undefined> {
+  return (await tx.scanConversations({ ownerTaskId: owner }, 1)).items[0]?.id;
+}
+
+async function describe(tx: Tx, child: ConversationId): Promise<string> {
+  const { model, thinkingLevel = "off" } = await tx.doc(AgentDoc, child);
+  const { speed, unsupportedThinking } = await tx.doc(ChildChoices, child);
+  const name = model === undefined ? "no model" : refName(model);
+  const clamped =
+    unsupportedThinking === undefined
+      ? ""
+      : ` (${name} does not support thinking ${unsupportedThinking})`;
+  return `The subagent runs ${name} with thinking ${thinkingLevel}${clamped}, at ${speed} speed.`;
 }
 
 async function answerOf(tx: Tx, settled: SettledSubmissionRecord): Promise<Answer> {
@@ -328,6 +364,10 @@ async function answerOf(tx: Tx, settled: SettledSubmissionRecord): Promise<Answe
 
 function nameOf(model: { readonly provider: string; readonly id: string }): string {
   return `${model.provider}/${model.id}`;
+}
+
+function refName(model: ModelRef): string {
+  return `${model.provider}/${model.modelId}`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

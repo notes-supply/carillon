@@ -463,10 +463,10 @@ channel's page, which has neither line.
 - `subagents` lets the assistant hand a task to a helper that starts with
   its model and tools but none of the conversation's history. The assistant
   can give the helper another model Pi offers, another thinking level, or
-  fast speed (OpenAI's priority processing); when it does so is up to your
-  own skills and instructions. The helper works in the background by
-  default, and its result arrives later as a message of its own; stopping
-  the answer that started it doesn't stop the helper.
+  fast speed (OpenAI's and Azure OpenAI's priority processing); when it
+  does so is up to your own skills and instructions. The helper works in
+  the background by default, and its result arrives later as a message of
+  its own; stopping the answer that started it doesn't stop the helper.
 - `mcp:<server>` gives the assistant the tools of an MCP server, which it
   finds with tool search. Configure servers in `CARILLON_HOME/pi/mcp.json`,
   then `carillon restart`. It holds their credentials, so make it readable

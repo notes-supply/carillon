@@ -1,3 +1,12 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  configure,
+  createSession,
+  defineTask,
+  type ConversationId,
+  type Tx,
+} from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -114,15 +123,49 @@ function scripted({
   return { answers: Array.from({ length: 20 }, () => model), asked: asked.promise, requests };
 }
 
-/** Adds `openai-test/gpt`, a faux model on OpenAI's Responses API, to the agent's catalogue. */
-function responsesModel(agent: Fixture, answers: FauxResponseStep[]): void {
+/** Adds `openai-test/gpt`, a faux model on `api`, OpenAI's Responses API unless given, to the agent's catalogue. */
+function responsesModel(
+  agent: Fixture,
+  answers: FauxResponseStep[],
+  api = "openai-responses",
+): ReturnType<typeof fauxProvider> {
   const openai = fauxProvider({
-    api: "openai-responses",
+    api,
     provider: "openai-test",
     models: [{ id: "gpt", reasoning: true }],
   });
   openai.setResponses(answers);
   agent.models.setProvider(openai.provider);
+  return openai;
+}
+
+/** A background subagent's reporter as Carillon 0.1.0-beta.6 defined it: its input only the task. */
+const BETA_6_REPORTER = defineTask<{ readonly task: string }, { readonly phase: "start" }, null>({
+  name: "carillon.subagent",
+  version: 1,
+  initial: () => ({ phase: "start" }),
+  phases: { start: () => Promise.resolve() },
+  abort: () => Promise.resolve(),
+});
+
+/** Commits `change` to the store of a closed durable agent, given its one parent conversation. */
+async function changeStore(
+  agent: Fixture,
+  change: (tx: Tx, parent: ConversationId) => Promise<unknown>,
+): Promise<void> {
+  const session = createSession(
+    await openNodeSqliteStorage(join(agent.componentDirectory, "agents", "default.sqlite")),
+  );
+  await session.commit(async (tx) => {
+    const parents = (await tx.scanConversations({}, 10)).items.filter(
+      (conversation) => conversation.owner === undefined,
+    );
+    const [parent] = parents;
+    if (parent === undefined || parents.length !== 1)
+      throw new Error("expected one parent conversation");
+    await change(tx, parent.id);
+  }, BACKGROUND_CONTEXT);
+  await session.close(BACKGROUND_CONTEXT);
 }
 
 it("runs a subagent in the background and brings its answer back in a turn it opens", async () => {
@@ -378,29 +421,32 @@ it("refuses a model Pi does not offer, naming those it does", async () => {
   expect(requests).toEqual([]);
 });
 
-it("asks OpenAI's Responses API for priority processing for a fast subagent, and only then", async () => {
-  for (const speed of ["standard", "fast"]) {
-    const { answers, requests } = scripted({ choices: { model: "openai-test/gpt", speed } });
-    const agent = await fixture({ defaults: ["subagents"], answers });
-    responsesModel(agent, answers);
-    expect(await agent.ask("turn-1", "Delegate and wait.")).toBe(
-      `Tool: The subagent runs openai-test/gpt with thinking off, at ${speed} speed. 2, 3 and 5.`,
-    );
-    expect(requests).toEqual([
-      {
-        model: "openai-test/gpt",
-        thinking: "off",
-        payload: speed === "fast" ? { input: [], service_tier: "priority" } : { input: [] },
-      },
-    ]);
-  }
-});
+it.each(["openai-responses", "azure-openai-responses"])(
+  "asks the %s API for priority processing for a fast subagent, and only then",
+  async (api) => {
+    for (const speed of ["standard", "fast"]) {
+      const { answers, requests } = scripted({ choices: { model: "openai-test/gpt", speed } });
+      const agent = await fixture({ defaults: ["subagents"], answers });
+      responsesModel(agent, answers, api);
+      expect(await agent.ask("turn-1", "Delegate and wait.")).toBe(
+        `Tool: The subagent runs openai-test/gpt with thinking off, at ${speed} speed. 2, 3 and 5.`,
+      );
+      expect(requests).toEqual([
+        {
+          model: "openai-test/gpt",
+          thinking: "off",
+          payload: speed === "fast" ? { input: [], service_tier: "priority" } : { input: [] },
+        },
+      ]);
+    }
+  },
+);
 
 it("refuses a fast subagent on a model whose API has no service tier", async () => {
   const { answers, requests } = scripted({ choices: { speed: "fast" } });
   const agent = await fixture({ defaults: ["subagents"], answers });
   expect(await agent.ask("turn-1", "Delegate and wait.")).toContain(
-    `[error] faux/scripted runs the ${agent.model.api} API, which has no faster service tier; only OpenAI's Responses APIs do.`,
+    `[error] faux/scripted runs the ${agent.model.api} API, which has no faster service tier; these APIs have one: openai-responses, openai-codex-responses, azure-openai-responses.`,
   );
   expect(requests).toEqual([]);
 });
@@ -465,4 +511,84 @@ it("answers a waited-for subagent's call once, from the child it chose, across a
   expect(requests).not.toHaveLength(0);
   for (const request of requests)
     expect(request).toEqual({ model: "faux/reasoner", thinking: "low", payload: { input: [] } });
+});
+
+it("answers a background subagent whose reporter an earlier version started, on its parent's model and thinking", async () => {
+  const { answers, requests } = scripted();
+  let agent = await fixture({
+    durable: true,
+    agentModel: "reasoner",
+    defaults: ["subagents"],
+    answers,
+  });
+  expect(await agent.ask("turn-1", "hello")).toBe("Unexpected: hello");
+  agent = await agent.restart({
+    meanwhile: () =>
+      changeStore(agent, (tx, parent) =>
+        tx.createTask(
+          BETA_6_REPORTER,
+          { task: TASK },
+          { ownership: { kind: "conversation" }, conversationId: parent, background: true },
+        ),
+      ),
+  });
+  fixtures.splice(0, 1, agent);
+  expect(await agent.outcome("opened-1")).toMatchObject({
+    outcome: "answered",
+    output: "Reported: 2, 3 and 5.",
+  });
+  expect(requests).toEqual([
+    { model: "faux/reasoner", thinking: "medium", payload: { input: [] } },
+  ]);
+});
+
+it("names what a waited-for subagent runs after a restart, though its parent has since moved", async () => {
+  const child = Promise.withResolvers<void>();
+  const { answers, asked } = scripted({ child: child.promise, choices: { thinking: "max" } });
+  let agent = await fixture({
+    durable: true,
+    agentModel: "reasoner",
+    defaults: ["subagents"],
+    answers,
+  });
+  await agent.runtime.turns.submit(agent.turn("turn-1", "Delegate and wait."));
+  await asked;
+  agent = await agent.restart({
+    meanwhile: () =>
+      changeStore(agent, (tx, parent) =>
+        configure(tx, parent, {
+          model: { provider: "faux", modelId: "scripted" },
+          thinkingLevel: "low",
+        }),
+      ),
+  });
+  fixtures.splice(0, 1, agent);
+  child.resolve();
+  expect(await agent.outcome("turn-1")).toMatchObject({
+    outcome: "answered",
+    output:
+      "Tool: The subagent runs faux/reasoner with thinking high (faux/reasoner does not support thinking max), at standard speed. 2, 3 and 5.",
+  });
+});
+
+it("answers a waited-for subagent's call after a restart, though its model is no longer offered", async () => {
+  const child = Promise.withResolvers<void>();
+  const { answers, asked } = scripted({
+    child: child.promise,
+    choices: { model: "openai-test/gpt" },
+  });
+  let agent = await fixture({ durable: true, defaults: ["subagents"], answers });
+  const openai = responsesModel(agent, answers);
+  await agent.runtime.turns.submit(agent.turn("turn-1", "Delegate and wait."));
+  await asked;
+  agent = await agent.restart({
+    meanwhile: () => agent.models.setProvider({ ...openai.provider, filterModels: () => [] }),
+  });
+  fixtures.splice(0, 1, agent);
+  child.resolve();
+  expect(await agent.outcome("turn-1")).toMatchObject({
+    outcome: "answered",
+    output:
+      "Tool: The subagent runs openai-test/gpt with thinking off, at standard speed. 2, 3 and 5.",
+  });
 });
