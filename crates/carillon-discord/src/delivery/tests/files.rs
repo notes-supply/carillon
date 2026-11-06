@@ -370,6 +370,49 @@ async fn a_following_message_discord_fails_leaves_the_answer_uncertain_and_sends
     Ok(())
 }
 
+#[tokio::test]
+async fn a_reply_to_what_arrived_of_an_uncertain_answer_names_its_agent() -> anyhow::Result<()> {
+    let (store, records) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let delivery = Delivery {
+        agent_id: "code".to_owned(),
+        ..overflowing(store.path())?
+    };
+    let uploaded =
+        upload_refusing(vec![Some(delivery)], store.path(), records.path(), Some(2)).await?;
+    assert_eq!(uploaded.acks[0]["outcome"], "uncertain");
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    "code".clone_into(&mut config.routes[0].agent);
+    let reply = IncomingMessage {
+        event_id: "903".to_owned(),
+        guild_id: Some("100".to_owned()),
+        user_id: "200".to_owned(),
+        channel_id: "300".to_owned(),
+        parent_channel_id: None,
+        content: "thanks".to_owned(),
+        attachments: Vec::new(),
+        reference: Some(Reference {
+            kind: ReferenceKind::Reply,
+            author: Some(Author::Bot {
+                message_id: twilight_model::id::Id::new(901),
+            }),
+            sent_at: "2026-11-05T14:03:00+00:00".to_owned(),
+            forwarding: false,
+            content: "Here.".to_owned(),
+            files: Vec::new(),
+        }),
+    };
+    let restarted = participation(records.path())?;
+    let plan = admit_message(&config, &restarted, reply, serde_json::Value::Null)
+        .map_err(|failure| anyhow::anyhow!(failure.message))?
+        .context("the reply was ignored")?;
+    assert!(
+        plan.quotes.concat().starts_with("In reply to your message"),
+        "{}",
+        plan.quotes.concat()
+    );
+    Ok(())
+}
+
 fn names(files: &[&AnswerFile]) -> Vec<String> {
     files.iter().map(|file| file.name.clone()).collect()
 }
