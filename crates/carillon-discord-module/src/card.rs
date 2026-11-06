@@ -472,12 +472,8 @@ fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
     }
     if let Some(context) = agent.context {
         parts.push(match context.window {
-            Some(window) => format!(
-                "context ≈ {} of {} tokens",
-                tokens(context.used),
-                tokens(window)
-            ),
-            None => format!("context ≈ {} tokens", tokens(context.used)),
+            Some(window) => format!("context {}/{}", tokens(context.used), tokens(window)),
+            None => format!("context {}", tokens(context.used)),
         });
     }
     let brand = agent
@@ -514,11 +510,21 @@ fn compact(milliseconds: u64) -> String {
     }
 }
 
+/// A token count rounded to the nearest unit it is shown in: `950`, `1.6k`,
+/// `14k`, `1.3M`.
 fn tokens(count: u64) -> String {
+    let tenths = |unit: u64| {
+        let tenths = (count + unit / 20) / (unit / 10);
+        match tenths % 10 {
+            0 => (tenths / 10).to_string(),
+            decimal => format!("{}.{decimal}", tenths / 10),
+        }
+    };
     match count {
         0..1_000 => count.to_string(),
-        1_000..1_000_000 => format!("{}k", count / 1_000),
-        _ => format!("{}.{}M", count / 1_000_000, count / 100_000 % 10),
+        1_000..9_950 => format!("{}k", tenths(1_000)),
+        9_950..999_500 => format!("{}k", (count + 500) / 1_000),
+        _ => format!("{}M", tenths(1_000_000)),
     }
 }
 

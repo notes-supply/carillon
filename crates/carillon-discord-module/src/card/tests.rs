@@ -1,4 +1,4 @@
-use super::{Shown, Status, card, compact, earned, job_card, render};
+use super::{Shown, Status, card, compact, earned, job_card, render, tokens};
 use crate::contract::{ActivityMarkers, Card, CardRequest, Seen};
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, ContextUse, DeliveryOutcome, DeliveryState, FinishedTool, Job,
@@ -441,7 +441,7 @@ fn a_job_shows_its_turns_together_and_the_latest_state_of_each_work_wins() {
     // The agent stays as last reported when a later report says nothing of it.
     assert_eq!(
         field(&embed, "Agent"),
-        Some("claude-sonnet-5 · effort high · context ≈ 45k of 200k tokens")
+        Some("claude-sonnet-5 · effort high · context 45k/200k")
     );
     assert!(text(&embed).contains("> Summarising the child's findings."));
 }
@@ -656,10 +656,7 @@ fn an_agent_the_runtime_said_nothing_of_shows_no_agent_section() {
         }),
         ..AgentInfo::default()
     };
-    assert_eq!(
-        agent_of(empty_context).0.as_deref(),
-        Some("context ≈ 0 tokens")
-    );
+    assert_eq!(agent_of(empty_context).0.as_deref(), Some("context 0"));
 }
 
 #[test]
@@ -986,3 +983,12 @@ fn only_a_settled_job_loses_its_card() {
 }
 
 mod prose;
+
+#[test]
+fn token_counts_round_to_the_unit_they_are_shown_in() {
+    let shown = [999, 1_000, 1_636, 1_979, 9_950, 14_389, 999_500, 1_250_000].map(tokens);
+    assert_eq!(
+        shown,
+        ["999", "1k", "1.6k", "2k", "10k", "14k", "1M", "1.3M"]
+    );
+}
