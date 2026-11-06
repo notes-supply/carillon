@@ -127,6 +127,36 @@ function durableTotals(agent: Fixture) {
 const sumOf = (rows: Row[], column: string) =>
   rows.reduce((sum, row) => sum + Number(row[column]), 0);
 
+const search = (...terms: string[]) =>
+  query("WITH search").replace("('invoice')", terms.map((term) => `('${term}')`).join(", "));
+
+function windowsOf(agent: Fixture, terms: string[]) {
+  const said = history(
+    agent,
+    "SELECT conversation, position, entry, text FROM messages ORDER BY conversation, position",
+  );
+  const matches = (row: Row) =>
+    terms.some((term) => (row["text"] ?? "").toLowerCase().includes(term.toLowerCase()));
+  const latest = new Map<string, number>();
+  for (const row of said)
+    if (matches(row)) latest.set(row["conversation"] ?? "", Number(row["entry"]));
+  return said
+    .filter((row, index) =>
+      [said[index - 1], row, said[index + 1]].some(
+        (near) =>
+          near !== undefined && near["conversation"] === row["conversation"] && matches(near),
+      ),
+    )
+    .toSorted(
+      (a, b) =>
+        (latest.get(b["conversation"] ?? "") ?? 0) - (latest.get(a["conversation"] ?? "") ?? 0),
+    )
+    .map((row) => [row["conversation"], row["position"], matches(row) ? ">" : ""]);
+}
+
+const windows = (rows: Row[]) =>
+  rows.map((row) => [row["conversation"], row["position"], row["hit"]]);
+
 it("reads a conversation's place, its words and its usage through the documented command", async () => {
   const agent = await fixture({
     durable: true,
@@ -284,7 +314,7 @@ it("shows each match with its neighbours, once, from a conversation's start to i
   });
   for (const [turn, said] of ["When is kiwi season?", "Tomatoes?", "Thanks.", "Noted."].entries())
     await agent.ask(`turn-${String(turn)}`, said);
-  const found = history(agent, query("WITH search").replace("'invoice'", "'KIWI'"));
+  const found = history(agent, search("KIWI"));
   expect(found.map(({ position, role, hit }) => [position, role, hit])).toEqual([
     ["1", "user", ">"],
     ["2", "assistant", ""],
@@ -294,6 +324,46 @@ it("shows each match with its neighbours, once, from a conversation's start to i
     ["8", "assistant", ">"],
   ]);
   expect(found.at(-1)?.["text"]).toContain("Prune kiwi in winter.");
+});
+
+it("shows a message matching any of several terms once, with its neighbours", async () => {
+  const turns: [audience: string, said: string, answer: string][] = [
+    ["billing", "Send the invoice with the billing note.", "Sent."],
+    ["billing", "Thanks.", "The billing run is monthly."],
+    ["billing", "Good.", "Invoices go out on the first."],
+    ["billing", "And taxes?", "Taxes are separate."],
+    ["garden", "When is kiwi season?", "In spring."],
+    ["garden", "Is billing done?", "Yes, every invoice."],
+    ["billing", "One more invoice question.", "Ask away."],
+  ];
+  const agent = await fixture({
+    durable: true,
+    answers: turns.map(([, , answer]) => fauxAssistantMessage(answer)),
+  });
+  for (const [turn, [audience, said]] of turns.entries())
+    await agent.ask(`turn-${String(turn)}`, said, { audience_id: audience });
+  const terms = ["invoice", "billing"];
+  const found = history(agent, search(...terms));
+  expect(windows(found)).toEqual(windowsOf(agent, terms));
+});
+
+it("says how many matches the default rows left out", async () => {
+  const conversations = 12;
+  const agent = await fixture({
+    durable: true,
+    answers: Array.from({ length: 2 * conversations }, () => fauxAssistantMessage("Noted.")),
+  });
+  for (let turn = 0; turn < 2 * conversations; turn += 1)
+    await agent.ask(`turn-${String(turn)}`, `invoice ${String(turn)}`, {
+      audience_id: `audience-${String(turn % conversations)}`,
+    });
+  const found = history(agent, search("invoice"));
+  expect(windows(found.slice(0, -1))).toEqual(windowsOf(agent, ["invoice"]).slice(0, 40));
+  expect(found.at(-1)).toMatchObject({
+    conversation: "",
+    hit: "more",
+    text: "4 match(es) not shown, in 2 conversation(s)",
+  });
 });
 
 it("opens each conversation with the person's first words, past Carillon's notes and quotes", async () => {
@@ -317,6 +387,76 @@ it("opens each conversation with the person's first words, past Carillon's notes
   ]);
 });
 
+it("ends an opening at the person's words, before a later note, past every Carillon quote", async () => {
+  const opened = [
+    'In reply to your message, sent 2026-11-05T10:00:00+00:00, with files ["seeds.txt"]:\n\nThe file reply.',
+    'In reply to a message from agent "code", sent 2026-11-05T14:03:00+00:00 from <#300>, forwarding a message:\n> b\n>\n> c\n\nThe forwarded reply.',
+    'In reply to a message from "Ada" (Discord user 202), sent 2026-11-05T14:00:00+00:00:\n> hi\n\nThe reply to Ada.',
+    "In reply to a message from another agent, sent 2026-11-05T14:03:27+00:00:\n> b\n\nThe reply to another agent.",
+    'Forwarding a message, sent 2026-11-04T09:00:00+00:00, with files ["notes.txt"]:\n\nThe forward.',
+    "You sent them this direct message at 2026-11-05T14:03:00+00:00 from <#300>:\n> Hi\n\n" +
+      'Agent "code" sent them this direct message at 2026-11-05T14:03:00+00:00:\n> Hello\n\n' +
+      "Another agent sent them this direct message at 2026-11-05T14:03:00+00:00:\n\nThe direct reply.",
+    "Here is my list:\n\n- tomatoes",
+    "In reply to your message, sent now:\n\nA quote Carillon never writes.",
+  ];
+  const agent = await fixture({
+    durable: true,
+    answers: Array.from({ length: opened.length + 1 }, () => fauxAssistantMessage("Noted.")),
+  });
+  const attachments = join(agent.componentDirectory, "..", "attachments");
+  await mkdir(join(attachments, "capture"), { recursive: true });
+  await writeFile(join(attachments, "capture", "0"), "seeds");
+  await agent.ask("attached", "Please check these seeds.", {
+    audience_id: "attached",
+    attachment_root: attachments,
+    attachments: [{ path: "capture/0", name: "seeds.txt", size: 5, sha256: "0".repeat(64) }],
+  });
+  for (const [turn, said] of opened.entries())
+    await agent.ask(`turn-${String(turn)}`, said, { audience_id: `audience-${String(turn)}` });
+  expect(
+    new Set(history(agent, query("FROM conversation_list")).map((row) => row["opening"])),
+  ).toEqual(
+    new Set([
+      "Please check these seeds.",
+      "The file reply.",
+      "The forwarded reply.",
+      "The reply to Ada.",
+      "The reply to another agent.",
+      "The forward.",
+      "The direct reply.",
+      "Here is my list:",
+      "In reply to your message, sent now:",
+    ]),
+  );
+});
+
+it("lists the conversations of over a thousand messages about as fast as it searches them", async () => {
+  const turns = 600;
+  const agent = await fixture({
+    durable: true,
+    answers: Array.from({ length: turns }, () => fauxAssistantMessage("No change.")),
+  });
+  for (let turn = 0; turn < turns; turn += 1)
+    await agent.ask(
+      `turn-${String(turn)}`,
+      `${turn % 40 === 0 ? "invoice" : "Message"} ${String(turn)}`,
+      {
+        audience_id: `audience-${String(turn % 20)}`,
+      },
+    );
+  const timed = (sql: string) => {
+    const times = Array.from({ length: 5 }, () => {
+      const start = performance.now();
+      history(agent, sql);
+      return performance.now() - start;
+    }).toSorted((a, b) => a - b);
+    return times[2] ?? Infinity;
+  };
+  expect(history(agent, query("FROM conversation_list"))).toHaveLength(20);
+  expect(timed(query("FROM conversation_list"))).toBeLessThan(2 * timed(search("invoice")));
+}, 60_000);
+
 it("runs the documented commands from a Carillon home whose path has spaces", async () => {
   const agent = await fixture({ durable: true, answers: [fauxAssistantMessage("Plant in May.")] });
   await agent.ask("turn-1", "When do tomatoes go out?");
@@ -338,13 +478,13 @@ it("runs the documented commands from a Carillon home whose path has spaces", as
   ];
   expect(runDocumented(sqliteCommand, store, sql)).toEqual(said);
   expect(runDocumented(bunCommand, store, sql)).toMatchObject(said);
-  const search = query("WITH search").replace("'invoice'", "'may'");
+  const searched = search("tomatoes", "may");
   const found = [
-    { position: "1", hit: "", text: "When do tomatoes go out?" },
+    { position: "1", hit: ">", text: "When do tomatoes go out?" },
     { position: "2", hit: ">", text: "Plant in May." },
   ];
-  expect(runDocumented(sqliteCommand, store, search)).toMatchObject(found);
-  expect(runDocumented(bunCommand, store, search)).toMatchObject(found);
+  expect(runDocumented(sqliteCommand, store, searched)).toMatchObject(found);
+  expect(runDocumented(bunCommand, store, searched)).toMatchObject(found);
   const opening = [{ opening: "When do tomatoes go out?" }];
   expect(runDocumented(bunCommand, store, query("FROM conversation_list"))).toMatchObject(opening);
 });
