@@ -270,6 +270,7 @@ async fn listens_and_replies_govern_the_next_message() -> anyhow::Result<()> {
         parent_channel_id: None,
         content: content.to_owned(),
         attachments: Vec::new(),
+        reference: None,
     };
     let admitted = |content: &str| {
         crate::conversations::admit_message(

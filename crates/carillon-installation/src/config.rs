@@ -162,6 +162,9 @@ pub fn attachment_store(data_dir: &Path) -> PathBuf {
     data_dir.join("attachments")
 }
 
+/// The ID of Carillon's own assistant, on Pi with the installation's resources.
+pub const ASSISTANT: &str = "assistant";
+
 /// An agent: who answers a conversation an interface routes to it, on which
 /// runtime, in which workspace. Its runtime may hold further settings of
 /// its own for it, keyed by its ID.

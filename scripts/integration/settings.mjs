@@ -77,10 +77,11 @@ export async function testSettings(services) {
   assert.equal(stale.content, card("302", low, "Changed meanwhile"));
   assert.deepEqual(await readFile(services.ledger), before, "a stale click writes nothing");
   assert.deepEqual(settings().split("\n"), [
-    "300  #300  assistant, always, channel, Local echo",
-    "301  #301  assistant, mentions, threads, Local echo",
-    "302  #302  assistant, always, threads, Local reasoner, Low",
-    "305  #305  assistant, always, channel, Local echo",
+    "300  #300             assistant, always, channel, Local echo",
+    "301  #301             assistant, mentions, threads, Local echo",
+    "302  #302             assistant, always, threads, Local reasoner, Low",
+    "305  #305             assistant, always, channel, Local echo",
+    "dm   Direct messages  assistant, Local echo",
   ]);
 
   await services.restart("runtime");
@@ -193,7 +194,7 @@ async function testRoutes(services) {
     value(unrouted, agents, "assistant"),
   ]);
   assert.equal(routed.content, card("399", lines("mentions", "threads")));
-  assert.match(settings(), /^399 {2}#399 {2}assistant, mentions, threads, Local echo$/mu);
+  assert.match(settings(), /^399 +#399 +assistant, mentions, threads, Local echo$/mu);
   await writeFile(file, saved);
   await services.restart("discord");
   assert.doesNotMatch(settings(), /^399 /mu, "the test route is removed");

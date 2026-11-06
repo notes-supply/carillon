@@ -77,13 +77,13 @@ fn serving(discord: &Substitute, records: &Path, settings: &Settings) -> Provide
 
 /// The monitor beside the delivery loop, both with `reactions`.
 fn following(discord: &Substitute, records: &Path, reactions: &Reactions) -> Provider {
-    let (http, reactions) = (reactions.http().clone(), reactions.clone());
+    let reactions = reactions.clone();
     let (delivering, heard) = mpsc::unbounded_channel();
     let stopping = CancellationToken::new();
     let delivered = delivery_loop(
         discord.client.clone(),
         reactions.clone(),
-        http,
+        unread_participation(records),
         PathBuf::new(),
         delivering,
         stopping.clone(),

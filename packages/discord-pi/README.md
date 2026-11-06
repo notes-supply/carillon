@@ -31,18 +31,22 @@ itself, so credentials never pass through model arguments.
 ## What it can do
 
 Operations run in the provider with the bot's credential, within the
-configured guild and Discord's own permissions and role hierarchy:
+configured guild, its allowlisted people's direct messages, and Discord's
+own permissions and role hierarchy:
 
 - server and bot discovery;
 - channels and categories: list, create, edit, remove, permission overwrites;
 - threads: list active, create, archive, lock;
 - messages: read history, send, reply, edit, delete, pin and react, with up
-  to ten local files (4 MiB together);
+  to ten local files (4 MiB together), in the guild's channels and in direct
+  messages with allowlisted people, which a send or a read names by
+  `user_id`;
 - roles: list, create, edit, remove;
 - members: look up, list, assign roles, time out, kick, ban and unban.
 
-It doesn't cover DMs, private-thread membership, archived threads, custom
-emoji, webhooks, voice, audit logs or bulk moderation. Sends mention only the
+It doesn't cover other direct messages, private-thread membership, archived
+threads, custom emoji, webhooks, voice channels, audit logs or bulk
+moderation. Sends mention only the
 user and role IDs listed explicitly. Results leave out Discord's signed
 attachment URLs.
 
@@ -59,9 +63,14 @@ the agent's normal reply; on Pi, a file for the reply goes with the runtime's
 - [`client.ts`](src/client.ts): the provider client, which only talks to a
   loopback address from the registry.
 - [Rust operations](../../crates/carillon-discord/src/operations.rs): Discord
-  calls and guild checks.
+  calls, guild checks and, in
+  [`direct.rs`](../../crates/carillon-discord/src/operations/direct.rs), the
+  allowlist check for direct messages.
 - [`skill`](skill/SKILL.md): the agent's instructions.
 
-The runtime gives the tools each conversation's Discord origin, from the
-latest message it admitted there, and its provider connection, from the
-installation's registry; never from the model's arguments.
+The runtime gives the tools each conversation's agent and Discord origin,
+from the latest message it admitted there, and its provider connection,
+from the installation's registry; never from the model's arguments. A send
+carries the agent and the origin's channel as `sender`, which the provider
+records: a reply to the message then names that agent, and a direct message
+sent from another conversation opens the person's next direct message.

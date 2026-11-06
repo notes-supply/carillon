@@ -375,10 +375,37 @@ stopped = "■"
             bot_token_file: None,
             allowed_user_ids: vec!["210".to_owned()],
             routes: super::Routes::Answered(vec![routes.parse()?]),
+            direct_messages: Some("default".to_owned()),
         })
     };
     admission("310:mention:thread:default")?.write(&config, "discord-private")?;
     let reloaded = DiscordConfig::load(&config, "discord-private")?;
+    let routed = Some(super::DirectMessages {
+        agent: "default".to_owned(),
+    });
+    assert_eq!(reloaded.direct_messages, routed);
+    let mut chosen = reloaded.clone();
+    "other".clone_into(&mut chosen.direct_messages.as_mut().context("routed")?.agent);
+    admission("310:mention:thread:default")?
+        .apply(&mut chosen)
+        .map_err(|refused| anyhow::anyhow!("{refused:?}"))?;
+    assert_eq!(
+        chosen.direct_messages.map(|direct| direct.agent).as_deref(),
+        Some("other"),
+        "setup keeps the agent the settings name for direct messages"
+    );
+    let mut unknown = reloaded.clone();
+    "nobody".clone_into(&mut unknown.direct_messages.as_mut().context("routed")?.agent);
+    assert!(
+        format!(
+            "{:#}",
+            unknown
+                .validate(&config, "discord-private")
+                .err()
+                .context("valid")?
+        )
+        .contains("direct_messages names an unknown agent")
+    );
     assert_eq!(reloaded.guild_id, "110");
     assert_eq!(reloaded.bot_user_id, "111");
     assert_eq!(reloaded.allowed_user_ids, ["210"]);

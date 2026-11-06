@@ -3,7 +3,7 @@ use crate::{
     activity::Delivering,
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation},
-    conversations::tests::discord_config,
+    conversations::tests::{discord_config, participation},
 };
 use anyhow::Context as _;
 use axum::{
@@ -31,6 +31,7 @@ pub(crate) fn answer(id: i64, turn_state: TurnState) -> Delivery {
         turn_state,
         id,
         turn_id: format!("turn-{id}"),
+        agent_id: "default".to_owned(),
         target_id: "300".to_owned(),
         feedback_target_id: "300:400".to_owned(),
         content: format!("answer {id}"),
@@ -148,12 +149,13 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let expected_uncertain = config.uncertain_emoji.clone();
     let http = discord_client(address);
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
+    let directory = tempfile::tempdir()?;
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
             core,
             Reactions::new(http.clone(), crate::config::Settings::new(config)),
-            http,
+            participation(directory.path())?,
             std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -215,6 +217,7 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = discord_client(address);
     let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let directory = tempfile::tempdir()?;
     tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
@@ -226,7 +229,7 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
                     DiscordConversation::Channel,
                 )),
             ),
-            http,
+            participation(directory.path())?,
             std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -413,6 +416,8 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = discord_client(address);
     let core = core_client(format!("http://{address}"))?;
+    let directory = tempfile::tempdir()?;
+    let participation = participation(directory.path())?;
     let run = |stopping: &tokio_util::sync::CancellationToken| {
         let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(delivery_loop(
@@ -424,7 +429,7 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
                     DiscordConversation::Channel,
                 )),
             ),
-            http.clone(),
+            participation.clone(),
             std::path::PathBuf::new(),
             outcomes,
             stopping.clone(),
@@ -486,6 +491,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = discord_client(address);
     let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let directory = tempfile::tempdir()?;
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
@@ -497,7 +503,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
                     DiscordConversation::Channel,
                 )),
             ),
-            http,
+            participation(directory.path())?,
             std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -582,12 +588,13 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
         )),
     );
     let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let directory = tempfile::tempdir()?;
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}"))?,
             reactions.clone(),
-            http,
+            participation(directory.path())?,
             std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -913,5 +920,6 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     Ok(())
 }
 
+mod attribution;
 mod files;
 mod silence;

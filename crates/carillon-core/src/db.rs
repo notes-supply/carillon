@@ -323,8 +323,7 @@ impl Database {
         Ok(targets)
     }
 
-    /// Claims the oldest pending delivery for an interface instance, with its
-    /// turn's outcome and origin.
+    /// Claims the oldest pending delivery for an interface instance.
     pub(crate) fn claim_delivery(
         &self,
         interface_id: &str,
@@ -356,7 +355,7 @@ impl Database {
         let mut delivery = transaction
             .query_row(
                 "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
-                        t.id, t.accepted_at, d.silence
+                        t.agent_id, t.accepted_at, d.silence
                  FROM deliveries d
                  JOIN turns t ON t.id = d.turn_id
                  WHERE d.interface_id = ?1 AND d.state IN ('pending', 'delivering')
@@ -372,8 +371,9 @@ impl Database {
                         feedback_target_id: row.get(3)?,
                         content: row.get(4)?,
                         turn_state: state_column::<TurnState>(row, 5)?,
+                        agent_id: row.get(6)?,
                         origin: Origin {
-                            turn_id: row.get(6)?,
+                            turn_id: row.get(1)?,
                             accepted_at: row.get(7)?,
                         },
                         silence: optional_state_column(row, 8)?,

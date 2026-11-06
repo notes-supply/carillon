@@ -6,7 +6,7 @@ mod interactions;
 use interactions::interaction_source;
 use interactions::{handle_interaction, run_interaction};
 
-use crate::conversations::{InteractionSource, SourceAttachment, admit_interaction};
+use crate::conversations::{InteractionSource, admit_interaction};
 use crate::{
     attachments::Downloads,
     gateway::{Dispatch, Gateway, Identity, record_path, take_record},
@@ -31,6 +31,7 @@ use crate::{
         self as discord_module, Declared, DiscordApp, Module, ModuleFiles, Refusal, Registration,
         Status, answer::answer,
     },
+    operations::{Operation, Scope},
 };
 #[cfg(test)]
 use crate::{
@@ -279,7 +280,7 @@ async fn connect(
     let mut deliveries = tokio::spawn(delivery_loop(
         delivery_state.core,
         reactions.clone(),
-        http,
+        delivery_state.participation,
         attachment_store(&state.installation.value.data_dir),
         delivering,
         stopping.clone(),
@@ -288,9 +289,6 @@ async fn connect(
     // Interactions are this function's tasks, not the gateway's, so ending
     // the gateway does not cut short one it already took.
     let mut interactions = JoinSet::new();
-    // A session recorded by a graceful stop is resumed only by the same
-    // provider, bot, guild and token, and only once. It is consumed only now,
-    // when nothing that can still fail stands before the gateway serving it.
     let record = record_path(&state_directory(&state.installation, &state.health.id));
     let owner = Identity::new(
         &state.health.id,
@@ -448,15 +446,27 @@ async fn discord_operation(
             status: StatusCode::PAYLOAD_TOO_LARGE,
             message: "Discord operation exceeds 6 MiB; nothing was changed".to_owned(),
         })?;
-    let operation: crate::operations::Operation =
-        serde_json::from_slice(&bytes).map_err(|_| InterfaceError {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid Discord operation; check the action and its fields".to_owned(),
-        })?;
+    let operation: Operation = serde_json::from_slice(&bytes).map_err(|_| InterfaceError {
+        status: StatusCode::BAD_REQUEST,
+        message: "Invalid Discord operation; check the action and its fields".to_owned(),
+    })?;
     let Some(app) = state.app() else {
         return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"outcome":"unavailable","message":"Discord operations require a connected provider; deterministic mode does not call Discord."}))).into_response());
     };
-    Ok(match operation.execute(&app.http, app.guild_id).await {
+    let scope = Scope {
+        guild: app.guild_id,
+        people: state
+            .settings
+            .current()
+            .allowed_user_ids
+            .iter()
+            .filter_map(|person| person.parse().ok())
+            .collect(),
+    };
+    let executed = operation
+        .execute(&app.http, &scope, &state.participation)
+        .await;
+    Ok(match executed {
         Ok(result) => Json(result).into_response(),
         Err(failure) => {
             let status = match failure.outcome {
@@ -702,6 +712,7 @@ async fn simulate(
             );
         }
     }
+    let direct = plan.direct();
     let mut resolved = prepare_deterministic_conversation(&state.participation, plan)?;
     resolved.event.attachments = staged.as_ref().map(|staged| staged.manifest.clone());
     let mut feedback = Vec::new();
@@ -725,6 +736,9 @@ async fn simulate(
         drop(staged);
         settled?
     };
+    if let Some((person, message)) = direct {
+        state.participation.answered(&person, &message);
+    }
     let native_ref = format!("local:{}", resolved.event.event_id);
     let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
     let messages = match &delivery {
@@ -889,25 +903,7 @@ fn take_event(
             {
                 return None;
             }
-            let request = IncomingMessage {
-                event_id: message.id.to_string(),
-                guild_id: guild,
-                user_id: message.author.id.to_string(),
-                channel_id: message.channel_id.to_string(),
-                parent_channel_id: None,
-                content: message.content.clone(),
-                attachments: message
-                    .attachments
-                    .iter()
-                    .map(|attachment| SourceAttachment {
-                        id: attachment.id.to_string(),
-                        filename: attachment.filename.clone(),
-                        size: attachment.size,
-                        content_type: attachment.content_type.clone(),
-                        url: attachment.url.clone(),
-                    })
-                    .collect(),
-            };
+            let request = IncomingMessage::received(&message, &settings.bot_user_id);
             Some(QueuedMessage {
                 request,
                 native: native_message(&message),

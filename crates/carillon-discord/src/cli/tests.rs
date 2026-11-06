@@ -181,6 +181,16 @@ fn call_requires_the_intent_of_toggle_mutations_and_valid_ids() -> Result<()> {
         refused_call(&["messages", "get", "--channel-id", "0", "--message-id", "3"])?.kind(),
         ErrorKind::ValueValidation
     );
+    let direct = parsed_call(&["messages", "send", "--user-id", "3", "--content", "hi"])?;
+    assert_eq!(
+        serde_json::to_value(&direct)?,
+        json!({"action": "messages.send", "channel_id": null, "user_id": "3", "content": "hi",
+            "reply_to": null, "mention_users": [], "mention_roles": [], "attachments": []})
+    );
+    let nowhere = refused_call(&["messages", "list"])?;
+    assert_eq!(nowhere.kind(), ErrorKind::MissingRequiredArgument);
+    let both = refused_call(&["messages", "list", "--channel-id", "2", "--user-id", "3"])?;
+    assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
     Ok(())
 }
 
@@ -264,7 +274,10 @@ async fn call_authenticates_at_the_existing_endpoint_and_returns_native_json() -
             "/v1/operations".into(),
             json!({
                 "authorization": "Bearer operator",
-                "operation": {"action": "messages.list", "channel_id": "2", "before": null, "limit": 7},
+                "operation": {
+                    "action": "messages.list", "channel_id": "2", "user_id": null,
+                    "before": null, "limit": 7,
+                },
             })
         )]
     );

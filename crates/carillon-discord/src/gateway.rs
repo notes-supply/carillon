@@ -48,6 +48,8 @@ const EVENTS: EventTypeFlags = EventTypeFlags::MESSAGE_CREATE
 const INTENTS: Intents = Intents::GUILDS
     .union(Intents::GUILD_MESSAGES)
     .union(Intents::GUILD_MESSAGE_REACTIONS)
+    .union(Intents::DIRECT_MESSAGES)
+    .union(Intents::DIRECT_MESSAGE_REACTIONS)
     .union(Intents::MESSAGE_CONTENT);
 /// How long a stop waits for Discord to close the connection.
 const CLOSE_BOUND: Duration = Duration::from_secs(5);
@@ -79,8 +81,10 @@ impl Dispatch {
     }
 }
 
-/// Who may resume a recorded session: the provider, its bot and guild, and
-/// the token it connects with, which is kept only as a digest.
+/// Who may resume a recorded session: the provider, its bot and guild, the
+/// token it connects with, which is kept only as a digest, and the intents
+/// the session was opened with. A resumed session keeps its intents, so a
+/// release that asks for other events starts a new one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Identity {
@@ -88,6 +92,7 @@ pub(crate) struct Identity {
     bot_user_id: String,
     guild_id: String,
     token_sha256: String,
+    intents: u64,
 }
 
 impl Identity {
@@ -97,6 +102,7 @@ impl Identity {
             bot_user_id: bot_user_id.to_owned(),
             guild_id: guild_id.to_owned(),
             token_sha256: hex::encode(Sha256::digest(token.as_bytes())),
+            intents: INTENTS.bits(),
         }
     }
 }
@@ -169,7 +175,8 @@ pub(crate) enum Gap {
     NotConsumed(PublishError),
     /// The record is not one this provider writes.
     Corrupt,
-    /// The record belongs to another provider, bot, guild or token.
+    /// The record belongs to another provider, bot, guild, token or set of
+    /// intents.
     OtherIdentity,
     /// The record is older than Discord keeps sessions resumable, or from
     /// the future.
@@ -192,9 +199,9 @@ impl fmt::Display for Gap {
                 )
             }
             Self::Corrupt => formatter.write_str("the recorded session is not valid"),
-            Self::OtherIdentity => {
-                formatter.write_str("the recorded session belongs to another bot, guild or token")
-            }
+            Self::OtherIdentity => formatter.write_str(
+                "the recorded session belongs to another bot, guild, token or set of intents",
+            ),
             Self::Stale => formatter.write_str("the recorded session is too old to resume"),
             Self::UnsafeAddress => {
                 formatter.write_str("the recorded resume address is not Discord's gateway")

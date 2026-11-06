@@ -597,3 +597,71 @@ async fn a_route_change_in_place_but_not_synced_shows_and_serves_it_unconfirmed(
     server.abort();
     Ok(())
 }
+
+/// The settings file after each of `agents` is chosen on the direct
+/// messages' page, in turn, starting from `owned`.
+async fn direct_message_agents(owned: &str, agents: &[&str]) -> anyhow::Result<Vec<String>> {
+    let (core, _, server) = core(Duration::ZERO).await?;
+    let (_installation, generated) = crate::config::tests::writer()?;
+    let path = generated
+        .installation()
+        .provider_config_path("discord-private")?;
+    fs::write(&path, owned)?;
+    let writer = Writer::new(
+        crate::config::Settings::new(DiscordConfig::load(
+            generated.installation(),
+            "discord-private",
+        )?),
+        Arc::new(generated.installation().clone()),
+        "discord-private",
+    );
+    let direct = || Routing::of(&writer.current(), "dm");
+    let mut files = Vec::new();
+    for agent in agents {
+        let title = "Direct messages".to_owned();
+        let drawn = page(&core, &writer, &direct(), title.clone(), until()).await;
+        change(
+            &core,
+            &writer,
+            &direct(),
+            title,
+            change_of(line(&drawn, "agent")?, agent),
+            until(),
+        )
+        .await
+        .map_err(|refusal| anyhow::anyhow!(refusal.message))?;
+        files.push(fs::read_to_string(&path)?);
+    }
+    server.abort();
+    Ok(files)
+}
+
+#[tokio::test]
+async fn the_direct_message_agent_is_written_into_the_owners_file_and_back() -> anyhow::Result<()> {
+    let (_installation, writer) = crate::config::tests::writer()?;
+    let generated = fs::read_to_string(
+        writer
+            .installation()
+            .provider_config_path("discord-private")?,
+    )?;
+    let owned = format!(
+        "# The owner's settings.\n{}",
+        generated.replace("[[routes]]", "# Where the agent answers.\n[[routes]]")
+    );
+    let routed = |agent: &str| format!("{owned}\n[direct_messages]\nagent = \"{agent}\"\n");
+    assert_eq!(
+        direct_message_agents(&owned, &["default", "other", "default"]).await?,
+        [routed("default"), routed("other"), routed("default")]
+    );
+
+    let commented =
+        format!("{owned}\n# Who answers me directly.\n[direct_messages]\nagent = 'default' # me\n");
+    assert_eq!(
+        direct_message_agents(&commented, &["other", "default"]).await?,
+        [
+            commented.replace("'default' # me", "'other' # me"),
+            commented
+        ]
+    );
+    Ok(())
+}

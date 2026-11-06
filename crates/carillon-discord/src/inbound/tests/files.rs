@@ -299,6 +299,7 @@ fn message(
         parent_channel_id: None,
         content: content.to_owned(),
         attachments: files,
+        reference: None,
     }
 }
 
@@ -1674,8 +1675,6 @@ async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result
     assert_eq!(free.len(), slots, "the files still waited for a slot");
     drop(free);
     tokio::time::timeout(PAST_DEADLINE, dispatcher).await??;
-    // The message was admitted and its files were being prepared; none
-    // were fetched or submitted.
     let trace = trace(&world)?;
     position(&trace, "status 188")?;
     assert!(

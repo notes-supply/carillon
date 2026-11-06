@@ -114,8 +114,8 @@ try {
   assert.equal(denied.status, 403, "other guilds must fail closed");
   const deniedUser = await requestSimulation(event("denied-user", "100", "999", "300", null, "no"));
   assert.equal(deniedUser.status, 403, "users outside the allowlist must fail closed");
-  const deniedDm = await requestSimulation(event("denied-dm", null, "200", "300", null, "no"));
-  assert.equal(deniedDm.status, 403, "direct messages must fail closed");
+  const deniedDm = await requestSimulation(event("denied-dm", null, "999", "300", null, "no"));
+  assert.equal(deniedDm.status, 403, "direct messages from outside the allowlist fail closed");
   const deniedRoute = await requestSimulation(
     event("denied-route", "100", "200", "399", null, "no"),
   );

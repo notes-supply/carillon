@@ -123,6 +123,7 @@ fn message(
             attachments: cdn
                 .map(|cdn| vec![attachment(cdn, "601", "a.bin", 8)])
                 .unwrap_or_default(),
+            reference: None,
         },
         native: Value::Null,
         settings: settings.clone(),

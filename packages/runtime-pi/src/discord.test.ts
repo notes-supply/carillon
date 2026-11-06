@@ -43,37 +43,33 @@ async function provider() {
   return { url: `http://127.0.0.1:${String(address.port)}`, operations, authorizations };
 }
 
-it("loads the Discord tools on demand and runs them in the conversation's origin", async () => {
+/**
+ * Runs one conversation from `origin` whose model enables the Discord tools
+ * and then makes `calls`, returning what it saw and what the provider got.
+ */
+async function converse(
+  origin: Record<string, unknown>,
+  calls: Record<string, string | number | Record<string, string>>[],
+) {
   const root = await mkdtemp(join(tmpdir(), "carillon-discord-tools-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const token = "operator-test-token";
   const tokenFile = join(root, "operator.token");
   await writeFile(tokenFile, token);
   const discord = await provider();
-  const origin = {
-    guild_id: "1",
-    channel_id: "2",
-    source_channel_id: "2",
-    message_id: "3",
-    user_id: "4",
-  };
   const seen: (readonly Message[])[] = [];
   const model = fauxProvider();
   model.setResponses([
+    ...[
+      fauxToolCall("enable_discord", {}),
+      ...calls.map((operation) => fauxToolCall("discord_messages", { operation })),
+    ].map((call) => (request: { messages: readonly Message[] }) => {
+      seen.push(request.messages);
+      return fauxAssistantMessage(call, { stopReason: "toolUse" });
+    }),
     (request) => {
       seen.push(request.messages);
-      return fauxAssistantMessage(fauxToolCall("enable_discord", {}), { stopReason: "toolUse" });
-    },
-    (request) => {
-      seen.push(request.messages);
-      return fauxAssistantMessage(
-        fauxToolCall("discord_messages", { operation: { action: "messages.list", limit: 2 } }),
-        { stopReason: "toolUse" },
-      );
-    },
-    (request) => {
-      seen.push(request.messages);
-      return fauxAssistantMessage("Listed.");
+      return fauxAssistantMessage("Done.");
     },
   ]);
   const models = createModels();
@@ -85,6 +81,7 @@ it("loads the Discord tools on demand and runs them in the conversation's origin
       context: () =>
         Promise.resolve({
           interface_id: "discord-private",
+          agent_id: "assistant",
           native: { origin },
           connection: {
             url: discord.url,
@@ -96,16 +93,31 @@ it("loads the Discord tools on demand and runs them in the conversation's origin
   );
   const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
   cleanups.push(() => harness.close(context));
-  const root_ = await harness.root(context, {
+  const conversation = await harness.root(context, {
     agent: { model: { provider: model.provider.id, modelId: model.getModel().id } },
   });
-  const offered = (messages: readonly Message[] = []) =>
-    messages.flatMap((message) =>
-      message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [],
-    );
   const settled = await (
-    await root_.submit({ type: "input", content: "list the channel" }, context)
+    await conversation.submit({ type: "input", content: "use Discord" }, context)
   ).wait(context);
+  return { settled, seen, discord, token };
+}
+
+const offered = (messages: readonly Message[] = []) =>
+  messages.flatMap((message) =>
+    message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [],
+  );
+
+it("loads the Discord tools on demand and runs them in the conversation's origin", async () => {
+  const origin = {
+    guild_id: "1",
+    channel_id: "2",
+    source_channel_id: "2",
+    message_id: "3",
+    user_id: "4",
+  };
+  const { settled, seen, discord, token } = await converse(origin, [
+    { action: "messages.list", limit: 2 },
+  ]);
   expect(settled.status).toBe("done");
   expect(offered(seen[0])).toEqual(["enable_discord"]);
   const enabled = seen[1]?.findLast((message) => message.role === "toolResult");
@@ -121,4 +133,59 @@ it("loads the Discord tools on demand and runs them in the conversation's origin
     { action: "messages.list", limit: 2, channel_id: "2" },
   ]);
   expect(discord.authorizations).toEqual([`Bearer ${token}`, `Bearer ${token}`]);
+});
+
+it("works from a direct message and reaches a person's direct messages by their ID", async () => {
+  const origin = {
+    guild_id: null,
+    channel_id: "9",
+    source_channel_id: "9",
+    message_id: "3",
+    user_id: "4",
+    parent_channel_id: null,
+  };
+  const { settled, discord } = await converse(origin, [
+    { action: "messages.list", limit: 2 },
+    { action: "messages.send", user_id: "4", content: "An update." },
+  ]);
+  expect(settled.status).toBe("done");
+  expect(discord.operations).toEqual([
+    { action: "server.info" },
+    { action: "messages.list", limit: 2, channel_id: "9" },
+    {
+      action: "messages.send",
+      user_id: "4",
+      content: "An update.",
+      sender: { agent_id: "assistant", channel_id: "9" },
+    },
+  ]);
+});
+
+it("says which agent sends, from which conversation, and never lets the model say it", async () => {
+  const origin = {
+    guild_id: "1",
+    channel_id: "2",
+    source_channel_id: "2",
+    message_id: "3",
+    user_id: "4",
+  };
+  const { settled, discord } = await converse(origin, [
+    { action: "messages.send", user_id: "4", content: "Done in #home." },
+    {
+      action: "messages.send",
+      channel_id: "5",
+      content: "Claimed.",
+      sender: { agent_id: "someone-else", channel_id: "6" },
+    },
+  ]);
+  expect(settled.status).toBe("done");
+  expect(discord.operations).toEqual([
+    { action: "server.info" },
+    {
+      action: "messages.send",
+      user_id: "4",
+      content: "Done in #home.",
+      sender: { agent_id: "assistant", channel_id: "2" },
+    },
+  ]);
 });

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::attachments::tests::{Serve, attachment, serve_cdn};
+use twilight_model::id::Id;
 
 use super::*;
 
@@ -18,6 +19,8 @@ struct SimulatedCore {
     capturing: HashMap<String, (usize, carillon_protocol::model::ExternalEvent)>,
     /// An event whose next submission core receives but whose answer is lost.
     lose: Option<String>,
+    /// The files core keeps with every answer, in the installation's store.
+    files: Vec<carillon_protocol::model::AnswerFile>,
 }
 
 type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
@@ -61,6 +64,7 @@ impl SimulatedCore {
                 turn_state: carillon_protocol::model::TurnState::Completed,
                 id: i64::try_from(self.events.len()).unwrap_or(i64::MAX),
                 turn_id: format!("turn-{}", event.event_id),
+                agent_id: event.agent_id.clone(),
                 target_id: event.delivery_target_id.clone(),
                 feedback_target_id: event.feedback_target_id.clone(),
                 content: "answer".to_owned(),
@@ -69,7 +73,7 @@ impl SimulatedCore {
                     turn_id: format!("turn-{}", event.event_id),
                     accepted_at: 1_790_000_000,
                 },
-                files: Vec::new(),
+                files: self.files.clone(),
             },
             false,
         ));
@@ -545,5 +549,329 @@ async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Res
         "{:?}",
         core.deliveries
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reply_or_forward_opens_with_a_quote_of_the_message_it_points_at() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    let sender = |agent_id: &str| crate::conversations::Sender {
+        agent_id: agent_id.to_owned(),
+        channel_id: None,
+    };
+    state.participation.record(|recorded| {
+        recorded.sent_by([Id::new(498)], &sender("default"));
+        recorded.sent_by([Id::new(497)], &sender("code"));
+    });
+    let message = |id: &str, content: &str, reference: Value| {
+        json!({
+            "event_id": id, "guild_id": "100", "user_id": "200", "channel_id": "300",
+            "content": content, "attachments": [], "reference": reference,
+        })
+    };
+    let reply = |to: &str| {
+        json!({
+            "kind": "reply", "author": {"bot": {"message_id": to}},
+            "sent_at": "2026-11-05T14:03:00+00:00",
+            "content": "Shall I book the 9:40 train?\nIt arrives at noon.",
+            "files": ["timetable.pdf"],
+        })
+    };
+    for (id, to) in [("1", "498"), ("2", "497"), ("3", "496")] {
+        let (status, body) =
+            simulate_message(&state, &message(id, "Yes, book it.", reply(to))).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let named = json!({
+        "kind": "reply", "author": {"person": {"id": "202", "name": "Ada"}},
+        "sent_at": "2026-11-05T14:00:00+00:00", "content": "lunch?",
+    });
+    let (status, body) = simulate_message(&state, &message("4", "Count me in", named)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let forward = json!({
+        "kind": "forward", "sent_at": "2026-11-04T09:00:00+00:00",
+        "content": "x".repeat(400), "files": ["notes.txt"],
+    });
+    let (status, body) = simulate_message(&state, &message("5", "", forward)).await?;
+    assert_eq!(status, StatusCode::OK, "a bare forward is answered: {body}");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let contents: Vec<&str> = core
+        .events
+        .iter()
+        .map(|event| event.content.as_str())
+        .collect();
+    let quoted = "> Shall I book the 9:40 train?\n> It arrives at noon.\n\nYes, book it.";
+    let files = r#", with files ["timetable.pdf"]:"#;
+    assert_eq!(
+        contents[..4],
+        [
+            format!("In reply to your message, sent 2026-11-05T14:03:00+00:00{files}\n{quoted}"),
+            format!(
+                "In reply to a message from agent \"code\", sent 2026-11-05T14:03:00+00:00{files}\n{quoted}"
+            ),
+            format!(
+                "In reply to a message from another agent, sent 2026-11-05T14:03:00+00:00{files}\n{quoted}"
+            ),
+            "In reply to a message from \"Ada\" (Discord user 202), sent 2026-11-05T14:00:00+00:00:\n\
+             > lunch?\n\nCount me in"
+                .to_owned(),
+        ]
+    );
+    assert_eq!(
+        contents[4],
+        format!(
+            "Forwarding a message, sent 2026-11-04T09:00:00+00:00, with files [\"notes.txt\"]:\n> {}…",
+            "x".repeat(300)
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_direct_message_opens_with_what_was_sent_its_person_since_their_last_one()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    restarted(&mut state, |settings| {
+        settings.direct_messages = Some(crate::config::DirectMessages {
+            agent: "default".to_owned(),
+        });
+    });
+    let sent = |id: u64, agent: Option<&str>, content: &str| crate::conversations::SentDirect {
+        message_id: Id::new(id),
+        sender: agent.map(|agent| crate::conversations::Sender {
+            agent_id: agent.to_owned(),
+            channel_id: Some(Id::new(300)),
+        }),
+        sent_at: "2026-11-05T14:03:00+00:00".to_owned(),
+        content: content.to_owned(),
+        files: Vec::new(),
+    };
+    state.participation.record(|recorded| {
+        recorded.sent_directly(
+            "200",
+            sent(5, Some("default"), "PR #12 is ready for review."),
+        );
+        recorded.sent_directly("200", sent(6, Some("code"), "The tests pass."));
+        recorded.sent_directly("200", sent(7, None, "Lunch is here."));
+        recorded.sent_directly("200", sent(20, Some("default"), "Sent after."));
+        recorded.sent_directly("250", sent(8, Some("default"), "Someone else's."));
+    });
+    let direct = |id: &str| {
+        json!({
+            "event_id": id, "user_id": "200", "channel_id": "900",
+            "content": "merge it", "attachments": [],
+        })
+    };
+    for id in ["10", "11"] {
+        let (status, body) = simulate_message(&state, &direct(id)).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let contents: Vec<&str> = core
+        .events
+        .iter()
+        .map(|event| event.content.as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            "You sent them this direct message at 2026-11-05T14:03:00+00:00 from <#300>:\n\
+             > PR #12 is ready for review.\n\
+             \n\
+             Agent \"code\" sent them this direct message at 2026-11-05T14:03:00+00:00 from <#300>:\n\
+             > The tests pass.\n\
+             \n\
+             Another agent sent them this direct message at 2026-11-05T14:03:00+00:00:\n\
+             > Lunch is here.\n\
+             \n\
+             merge it",
+            "merge it",
+        ],
+        "once core holds a direct message, what it quoted is not quoted again"
+    );
+    let unanswered = &state.participation.lock().unanswered;
+    assert_eq!(
+        unanswered["200"]
+            .iter()
+            .map(|sent| sent.content.as_str())
+            .collect::<Vec<_>>(),
+        ["Sent after."]
+    );
+    assert_eq!(unanswered["250"].len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_allowlisted_persons_direct_messages_are_one_conversation_with_their_agent()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    let direct = |id: &str, user: &str| {
+        json!({
+            "event_id": id, "user_id": user, "channel_id": "900",
+            "content": "<@201> what's next?", "attachments": [],
+        })
+    };
+    let (status, _) = simulate_message(&state, &direct("1", "200")).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "direct messages are not routed yet"
+    );
+    restarted(&mut state, |settings| {
+        settings.direct_messages = Some(crate::config::DirectMessages {
+            agent: "default".to_owned(),
+        });
+    });
+    for id in ["2", "3"] {
+        let (status, body) = simulate_message(&state, &direct(id, "200")).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["conversation_id"], "discord-dm-900");
+    }
+    let (status, _) = simulate_message(&state, &direct("4", "250")).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "250 is not allowlisted");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    assert_eq!(core.events.len(), 2);
+    for event in &core.events {
+        assert_eq!(event.agent_id, "default");
+        assert_eq!(event.audience_id, "discord-dm-900");
+        assert_eq!(event.channel_id, "dm");
+        assert_eq!(event.delivery_target_id, "900");
+        assert_eq!(event.content, "what's next?");
+        assert_eq!(event.native["origin"]["channel_id"], "900");
+        assert_eq!(event.native["origin"]["guild_id"], Value::Null);
+        assert_eq!(event.native["origin"]["parent_channel_id"], Value::Null);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_voice_message_reaches_core_as_its_unconverted_audio_file() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let staging = directory.path().join("staging");
+    let audio = b"OggS\0\x02voice frames".to_vec();
+    let (cdn, _log) = serve_cdn(HashMap::from([(
+        "/attachments/300/700/voice-message.ogg".to_owned(),
+        Serve::Bytes(audio.clone()),
+    )]))
+    .await?;
+    let (core_address, core) = simulated_core(staging.clone()).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    state.downloads = Arc::new(
+        Downloads::open(staging, state.settings.current().attachments)?.with_fixture_cdn(cdn),
+    );
+    let voice = crate::conversations::SourceAttachment {
+        content_type: Some("audio/ogg".to_owned()),
+        ..attachment(cdn, "700", "voice-message.ogg", audio.len().try_into()?)
+    };
+    let (status, body) = simulate(&state, "1", "200", &[voice]).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let [event] = core.events.as_slice() else {
+        anyhow::bail!("expected the voice message to be accepted");
+    };
+    assert_eq!(event.content, "");
+    let files = &event.attachments.as_ref().context("no files")?.files;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "voice-message.ogg");
+    assert_eq!(files[0].content_type.as_deref(), Some("audio/ogg"));
+    assert_eq!(core.staged, vec![vec![audio]]);
+    Ok(())
+}
+
+/// A forward's file reaches core as the person's; what Discord would send
+/// back is the answer's own file, read from core's copy.
+#[tokio::test]
+async fn a_forwarded_file_goes_to_core_and_only_the_answers_file_comes_back() -> anyhow::Result<()>
+{
+    use sha2::{Digest as _, Sha256};
+    let directory = tempfile::tempdir()?;
+    let staging = directory.path().join("staging");
+    let notes = b"forwarded notes".to_vec();
+    let (cdn, _log) = serve_cdn(HashMap::from([(
+        "/attachments/300/700/notes.txt".to_owned(),
+        Serve::Bytes(notes.clone()),
+    )]))
+    .await?;
+    let (core_address, core) = simulated_core(staging.clone()).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    state.downloads = Arc::new(
+        Downloads::open(staging, state.settings.current().attachments)?.with_fixture_cdn(cdn),
+    );
+    let chart = b"\x89PNG chart";
+    let kept = "0190a6e0-0000-7000-8000-000000000001/0";
+    let store = carillon_installation::config::attachment_store(&state.installation.value.data_dir);
+    std::fs::create_dir_all(store.join(kept).parent().context("no capture")?)?;
+    std::fs::write(store.join(kept), chart)?;
+    let digest = hex::encode(Sha256::digest(chart));
+    core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.files =
+        vec![carillon_protocol::model::AnswerFile {
+            path: kept.to_owned(),
+            name: "chart.png".to_owned(),
+            source: "/home/owner/out/chart.png".to_owned(),
+            size: chart.len().try_into()?,
+            sha256: digest.clone(),
+        }];
+    let forward = json!({
+        "event_id": "1", "guild_id": "100", "user_id": "200", "channel_id": "300",
+        "content": "",
+        "attachments": [attachment(cdn, "700", "notes.txt", notes.len().try_into()?)],
+        "reference": {
+            "kind": "forward", "sent_at": "2026-11-04T09:00:00+00:00", "files": ["notes.txt"],
+        },
+    });
+    let (status, body) = simulate_message(&state, &forward).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["messages"],
+        json!([{"content": "answer", "files": [["chart.png", digest]]}])
+    );
+
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let [event] = core.events.as_slice() else {
+        anyhow::bail!("expected the forward to be accepted");
+    };
+    assert_eq!(
+        event.content,
+        r#"Forwarding a message, sent 2026-11-04T09:00:00+00:00, with files ["notes.txt"]:"#
+    );
+    let files = &event.attachments.as_ref().context("no files")?.files;
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>(),
+        ["notes.txt"]
+    );
+    assert_eq!(core.staged, [vec![notes]]);
     Ok(())
 }

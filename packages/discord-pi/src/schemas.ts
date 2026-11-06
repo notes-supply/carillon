@@ -2,6 +2,7 @@ import { Type, type TProperties } from "typebox";
 
 const id = Type.String({ pattern: "^[1-9][0-9]{0,19}$", description: "Discord ID as a string" });
 const channel = { channel_id: Type.Optional(id) };
+const person = { user_id: Type.Optional(id) };
 const message = { ...channel, message_id: id };
 const limit = Type.Optional(Type.Integer({ minimum: 1, maximum: 100 }));
 const bits = Type.String({ pattern: "^[0-9]+$", description: "Decimal permission bitfield" });
@@ -23,12 +24,13 @@ export const groups = [
     name: "discord_messages",
     label: "Discord messages",
     description:
-      "Read, send, edit, delete, pin or react to guild messages. Omitted channel uses this turn's destination. Sends are explicit effects, separate from your normal reply. Mentions are off unless explicitly listed. After an uncertain write inspect the target; do not blindly repeat it.",
+      "Read, send, edit, delete, pin or react to guild messages and to direct messages with allowlisted people. Omitted channel uses this turn's destination; user_id lists or sends your direct messages with that person. Sends are explicit effects, separate from your normal reply. Mentions are off unless explicitly listed. After an uncertain write inspect the target; do not blindly repeat it.",
     schema: Type.Union([
-      action("messages.list", { ...channel, before: Type.Optional(id), limit }),
+      action("messages.list", { ...channel, ...person, before: Type.Optional(id), limit }),
       action("messages.get", message),
       action("messages.send", {
         ...channel,
+        ...person,
         content: Type.String({ maxLength: 2000 }),
         files: Type.Optional(
           Type.Array(Type.String({ minLength: 1 }), {

@@ -3,8 +3,9 @@ use crate::{
     activity::Delivering,
     client::CoreClient,
     config::{DiscordConfig, DiscordEmoji, Settings},
+    conversations::{Participation, Sender},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use carillon_protocol::{
     model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState},
     turns::{ControlAction, Silence},
@@ -550,13 +551,15 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 /// Claims, sends and acknowledges deliveries until the provider stops.
 /// Stopping ends the wait for work, never a delivery already claimed: it is
 /// sent and its outcome recorded first. Answers are text, with the files
-/// core keeps for them in `store`. `delivering` hears of each claimed
-/// delivery's job before it is sent, and of its outcome once core recorded
-/// it, without waiting for whoever receives it.
+/// core keeps for them in `store`, sent with the reactions' client, and
+/// `participation` records the agent each of their messages came from.
+/// `delivering` hears of each claimed delivery's job before it is sent, and
+/// of its outcome once core recorded it, without waiting for whoever
+/// receives it.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     reactions: Reactions,
-    http: Arc<DiscordHttp>,
+    participation: Arc<Participation>,
     store: PathBuf,
     delivering: mpsc::UnboundedSender<Delivering>,
     stopping: CancellationToken,
@@ -584,7 +587,20 @@ pub(crate) async fn delivery_loop(
         };
         // Nobody may be listening: activity cards can be disabled.
         let _ = delivering.send(Delivering::Claimed(delivery.origin.turn_id.clone()));
-        let (outcome, native_ref, shown) = attempt_delivery(&http, &store, &delivery).await;
+        let (outcome, sent, shown) = attempt_delivery(reactions.http(), &store, &delivery).await;
+        if !sent.is_empty() {
+            let sender = Sender {
+                agent_id: delivery.agent_id.clone(),
+                channel_id: None,
+            };
+            participation.record(|state| state.sent_by(sent.iter().copied(), &sender));
+        }
+        let native_ref = (outcome == DeliveryOutcome::Delivered && !sent.is_empty()).then(|| {
+            sent.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -640,41 +656,42 @@ async fn attempt_delivery(
     http: &DiscordHttp,
     store: &Path,
     delivery: &Delivery,
-) -> (DeliveryOutcome, Option<String>, Feedback) {
+) -> (DeliveryOutcome, Vec<Id<MessageMarker>>, Feedback) {
     // A turn steered into another or stopped sends nothing: its message
     // shows how it ended.
     if let Some(silence) = delivery.silence {
-        return (DeliveryOutcome::Delivered, None, silence.into());
+        return (DeliveryOutcome::Delivered, Vec::new(), silence.into());
     }
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
             warn!(error = %failure, "invalid Discord delivery target");
-            return (DeliveryOutcome::Uncertain, None, Feedback::Uncertain);
+            return (DeliveryOutcome::Uncertain, Vec::new(), Feedback::Uncertain);
         }
     };
     let messages = files::compose(&delivery.content, &delivery.files);
     match send_discord_messages(http, channel, store, &messages).await {
         Ok(messages) => (
             DeliveryOutcome::Delivered,
-            Some(
-                messages
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
+            messages,
             if delivery.turn_state == TurnState::Completed {
                 Feedback::Delivered
             } else {
                 Feedback::Uncertain
             },
         ),
-        Err(failure) => {
+        Err(Unfinished { sent, failure }) => {
             warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
-            (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
+            (DeliveryOutcome::Uncertain, sent, Feedback::Uncertain)
         }
     }
+}
+
+/// A send that failed part way: the messages Discord confirmed before it,
+/// which people can see and answer, and why the rest are uncertain.
+struct Unfinished {
+    sent: Vec<Id<MessageMarker>>,
+    failure: anyhow::Error,
 }
 
 /// A message of a delivery as Discord receives it: its text, and each
@@ -716,6 +733,7 @@ pub(crate) async fn send_discord_message(
         &files::compose(content, &[]),
     )
     .await
+    .map_err(|unfinished| unfinished.failure)
 }
 
 /// Sends `messages` in order, each with its files read from `store`, and
@@ -725,28 +743,37 @@ async fn send_discord_messages(
     channel_id: Id<ChannelMarker>,
     store: &Path,
     messages: &[files::Outgoing<'_>],
-) -> Result<Vec<Id<MessageMarker>>> {
+) -> Result<Vec<Id<MessageMarker>>, Unfinished> {
     if messages.is_empty() {
-        bail!("Discord delivery content is empty");
+        return Err(Unfinished {
+            sent: Vec::new(),
+            failure: anyhow!("Discord delivery content is empty"),
+        });
     }
     // Delivered text is the agent's and the runtime's, not the user's: it
     // must not notify anyone, whatever mention syntax it contains.
     let silent = AllowedMentions::default();
-    let mut ids = Vec::with_capacity(messages.len());
+    let mut sent = Vec::with_capacity(messages.len());
     for message in messages {
-        let attachments = files::load(store, &message.files).await?;
-        let mut request = http
-            .create_message(channel_id)
-            .allowed_mentions(Some(&silent));
-        if !message.content.is_empty() {
-            request = request.content(&message.content);
+        let confirmed = async {
+            let attachments = files::load(store, &message.files).await?;
+            let mut request = http
+                .create_message(channel_id)
+                .allowed_mentions(Some(&silent));
+            if !message.content.is_empty() {
+                request = request.content(&message.content);
+            }
+            if !attachments.is_empty() {
+                request = request.attachments(&attachments);
+            }
+            anyhow::Ok(request.await?.model().await?.id)
+        };
+        match confirmed.await {
+            Ok(id) => sent.push(id),
+            Err(failure) => return Err(Unfinished { sent, failure }),
         }
-        if !attachments.is_empty() {
-            request = request.attachments(&attachments);
-        }
-        ids.push(request.await?.model().await?.id);
     }
-    Ok(ids)
+    Ok(sent)
 }
 
 pub(crate) fn discord_chunks(content: &str) -> Vec<String> {

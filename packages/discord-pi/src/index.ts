@@ -42,7 +42,7 @@ export interface DiscordOptions {
   /** What `enable_discord` tells the model: the Discord skill. */
   readonly guidance: string;
   /**
-   * The calling conversation's interface connection and origin, as
+   * The calling conversation's interface connection, agent and origin, as
    * `DiscordClient` reads them; host data, never model arguments.
    */
   context(api: ToolExecutionApi, context: Context): Promise<unknown>;
@@ -60,15 +60,19 @@ export function createDiscordExtension(options: DiscordOptions): Extension {
         const operation: Record<string, unknown> = { ...args.operation };
         if (
           channelActions.has(String(operation["action"])) &&
-          operation["channel_id"] === undefined
+          operation["channel_id"] === undefined &&
+          operation["user_id"] === undefined
         ) {
           if (!client.origin)
             throw new Error("There is no admitted Discord origin. Supply channel_id explicitly.");
           operation["channel_id"] = client.origin.channel_id;
         }
-        if (operation["action"] === "messages.send" && Array.isArray(operation["files"])) {
-          operation["attachments"] = await readAttachments(operation["files"]);
-          delete operation["files"];
+        if (operation["action"] === "messages.send") {
+          operation["sender"] = client.sender;
+          if (Array.isArray(operation["files"])) {
+            operation["attachments"] = await readAttachments(operation["files"]);
+            delete operation["files"];
+          }
         }
         try {
           const result = await client.call(operation, context.abortSignal);

@@ -280,6 +280,7 @@ pub struct Delivery {
     pub turn_state: TurnState,
     pub id: i64,
     pub turn_id: String,
+    pub agent_id: String,
     pub target_id: String,
     pub feedback_target_id: String,
     pub content: String,

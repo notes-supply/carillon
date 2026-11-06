@@ -113,6 +113,22 @@
   },
   {
     "operation": {
+      "action": "messages.send",
+      "user_id": "6",
+      "content": "An update."
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.list",
+      "user_id": "6",
+      "limit": 20
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
       "action": "messages.edit",
       "channel_id": "2",
       "message_id": "5",

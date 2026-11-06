@@ -229,6 +229,14 @@ route is not changed. The page says to run `carillon discord settings
 apply` first, or `carillon restart` when one of those changes needs a
 restart. `/settings` cannot remove a route.
 
+Direct messages have one page of their own, `dm`, at the terminal only:
+Discord offers Carillon's commands in the server, not in direct messages.
+Its only route line is Agent, the agent that answers allowlisted people's
+direct messages to the bot; its model lines apply to every person's direct
+messages. Until an agent is chosen, direct messages are refused and
+`carillon settings` doesn't list the page. Setup chooses the assistant when
+the installation has it, also when you keep the saved bot and settings.
+
 The terminal shows the same pages:
 
 ```sh
@@ -237,6 +245,7 @@ carillon settings CHANNEL_ID                   # that channel's page
 carillon settings CHANNEL_ID thinking=high     # change lines, left to right
 carillon settings CHANNEL_ID reset model       # take the agent's model again
 carillon settings CHANNEL_ID agent=t3-carillon-t3-code listens=mention
+carillon settings dm agent=assistant           # who answers direct messages
 carillon settings --agent assistant            # the agent's own values
 carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 ```
@@ -288,9 +297,18 @@ carillon discord settings apply    # serve the file's live changes
 
 `--route` only creates the first routes. Once the settings route channels,
 setup refuses other routes and leaves the file as it is; change a route
-with `carillon settings` or `/settings`.
+with `carillon settings` or `/settings`. When the settings name no agent
+for direct messages, setup names the assistant, if the installation has
+it, whether you keep the saved bot and settings or answer every question,
+and its last line says who answers direct messages:
 
-Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
+```toml
+# providers/discord-private.toml
+[direct_messages]
+agent = "assistant"
+```
+
+Users, routes, `direct_messages`, `typing`, `reactions` with their emoji, `activity_markers`
 and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
 settings it was admitted with. While the provider runs, it is the only
@@ -304,7 +322,9 @@ Routes are matched by channel and users by ID. Each keeps its line and its
 comments. A removed one goes with its line and the comments above it. Comments
 a blank line sets off from it stay. A removed one that shares its line with
 another goes alone. Setup answers that list routes or users in another order
-change nothing. New ones are added at the end.
+change nothing. New ones are added at the end. Naming an agent for direct
+messages adds the `[direct_messages]` table at the end of the file, above
+any comment that ends it, and a later change of that agent edits its line.
 
 A changed string keeps its single quotes when the new value fits in them,
 which means it holds no single quote and no line break. Other changed values
@@ -465,7 +485,80 @@ decisions`. Plain `/command` lists them.
 
 Both commands are admitted like messages: only in the guild, from allowlisted
 users, in a routed channel or a thread under a thread route. `/settings`
-also opens in a channel of the guild with no route, to route it.
+also opens in a channel of the guild with no route, to route it. Neither
+runs in direct messages.
+
+### Direct messages
+
+An allowlisted person can message the bot directly. Their direct messages
+are one rolling conversation with the agent the settings name for direct
+messages ([Settings](#settings)); there are no threads. Messages from anyone
+else, or while no agent is named, are dropped before core sees them, as in
+an unrouted channel. Files, the person's and those the agent attaches to its
+answers, and reactions work as in a channel.
+
+An agent can also write to an allowlisted person first with its
+[Discord tools](#agent-discord-tools), from any of its conversations, such
+as a `#home` thread. The provider keeps what agents send a person this way,
+the latest ten, until that person next writes to the bot. Their next direct
+message, whether or not it uses Reply, opens with a quote of each, oldest
+first, naming the agent that sent it and the channel it was sent from:
+
+```text
+You sent them this direct message at 2026-11-05T14:03:00+00:00 from <#1302543210987654321>:
+> PR #12 is ready for review.
+
+Merge it.
+```
+
+`You` is the agent the direct message goes to. Another agent is named, as
+in `Agent "code" sent them this direct message …`, and a message sent with
+`carillon discord call` is from `Another agent`. Once core accepts the
+direct message, those quotes are done: the next one doesn't repeat them.
+What an agent sends from the person's own direct-message conversation is
+already part of it and isn't quoted. While no agent is named for direct
+messages, the person's answer is dropped like any other direct message.
+
+Discord sends direct messages only to a gateway session that asked for
+them, and doesn't replay them later. A direct message sent before the
+provider first ran a release with direct messages, such as during the
+update that brought them, never reaches Carillon: it gets no reaction and
+no answer. Send it again.
+
+### Replies and forwards
+
+A message that replies to another, or forwards one, reaches the agent with
+a quote of that message before the person's own words:
+
+```text
+In reply to your message, sent 2026-11-05T14:03:00+00:00, with files ["timetable.pdf"]:
+> Shall I book the 9:40 train?
+
+Yes, book it.
+```
+
+The first line is Carillon's: whose message it is, when it was sent and
+its files' names. Every line of the quoted words starts with `>`, so nothing
+quoted can pass for Carillon's line, and the quote keeps the message's first
+300 characters. A person is named by their display name, as a JSON string,
+and their Discord user ID: `a message from "Ada" (Discord user
+1302543210987654322)`. A message of the bot is `your message` only when the
+agent the turn goes to had the bot send it, as an answer, the messages
+that carry its files included, or with its Discord tools; another agent's
+is `a message from agent "code"`. The provider records which agent had the
+bot send each of its latest 1,000 messages. A reply to an older message of
+the bot, or to one it didn't record, such as an activity card or a message
+sent with `carillon discord call`, is to `a message from another agent`. A
+message an agent sent with its tools from another channel says where:
+`sent … from <#1302543210987654321>`.
+
+Discord doesn't say who wrote a forwarded message, so its quote reads
+`Forwarding a message`. A forward's files arrive with it, downloaded like
+the message's own ([Files](#files)); a reply's quote only names the files
+of the message it answers. A reply to a forward quotes the forwarded words
+and adds `forwarding a message`. A forward with no words of its own is
+answered where a message would be. Only the new message carries the quote:
+the conversation before it is unchanged.
 
 ### Reactions
 
@@ -502,7 +595,11 @@ downloaded or kept gets a short reply saying why. Core keeps accepted files
 read-only under `state/attachments` with the turn, and checks each one's
 digest before the turn runs. The agent sees every file in its working tools,
 and suitable images (PNG, JPEG, WebP, GIF) are also given to the model as
-images. Nothing is extracted, converted or executed on arrival.
+images. A voice message arrives as its audio file, usually
+`voice-message.ogg`, and so does a forwarded one: a forward's files count
+as the message's own, under the same limits. Nothing is extracted,
+converted, transcribed or executed on arrival; an agent that should
+transcribe needs a tool for it, with your own transcription key.
 
 The agent can send files with its answer. On Pi it attaches them with its
 `attach` tool. T3 answers are text only. A file goes with the answer of the
@@ -641,8 +738,11 @@ source is in [examples/card-colours](../../examples/card-colours/README.md).
 
 A graceful stop of the Discord provider records its gateway session, and the
 next start within ten minutes resumes it, so Discord replays messages sent
-meanwhile. Core recognizes messages it already accepted and doesn't run them
-twice. Otherwise, messages sent while Discord was down are not replayed.
+meanwhile. A start of a release that asks Discord for other kinds of events
+than the recorded session did, as the first release with direct messages
+does, starts a new session instead. Core recognizes messages it already
+accepted and doesn't run them twice. Otherwise, messages sent while Discord
+was down are not replayed.
 Messages refused because too many were waiting (64 in all, 16 per
 conversation) get a "too busy" reply when possible and are not replayed;
 send them again.
@@ -650,7 +750,9 @@ send them again.
 ### Agent Discord tools
 
 The [Discord tools](../../packages/discord-pi/README.md) let the assistant
-read and manage the Discord server with the bot's permissions. On Pi they
+read and manage the Discord server with the bot's permissions, and read and
+send direct messages with allowlisted people, so it can, for example, tell
+you about work in a `#home` thread directly. On Pi they
 are a built-in extension the assistant selects by default; remove it in the
 assistant's `settings.json` to turn them off:
 

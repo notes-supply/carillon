@@ -58,12 +58,13 @@ async fn deliver(
     ));
     let reactions = Reactions::new(http.clone(), settings);
     let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let directory = tempfile::tempdir()?;
     let ended = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}"))?,
             reactions.clone(),
-            http,
+            participation(directory.path())?,
             std::path::PathBuf::new(),
             outcomes,
             tokio_util::sync::CancellationToken::new(),

@@ -12,7 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_websockets::{Message, ServerBuilder};
-use twilight_gateway::{ConfigBuilder, Event, Session};
+use twilight_gateway::{ConfigBuilder, Event, Intents, Session};
 
 use super::{
     Dispatch, Gap, Gateway, INTENTS, Identity, RECORD_AGE, Record, ResumeAddress, Start, now,
@@ -75,6 +75,12 @@ fn an_unusable_record_starts_a_new_session_and_is_never_used_again() -> anyhow::
         Identity::new("discord-private", "202", "100", TOKEN),
         Identity::new("discord-private", "201", "101", TOKEN),
         Identity::new("discord-private", "201", "100", "another-token"),
+        Identity {
+            intents: INTENTS
+                .difference(Intents::DIRECT_MESSAGES | Intents::DIRECT_MESSAGE_REACTIONS)
+                .bits(),
+            ..identity()
+        },
     ] {
         cases.push((
             "another identity",
@@ -145,6 +151,22 @@ fn an_unusable_record_starts_a_new_session_and_is_never_used_again() -> anyhow::
             "{case}: the record was left for another start"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_session_recorded_by_a_release_before_direct_messages_is_not_resumed() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = record_path(directory.path());
+    let mut recorded = serde_json::to_value(record(identity()))?;
+    recorded["identity"]
+        .as_object_mut()
+        .context("identity")?
+        .remove("intents");
+    std::fs::write(&path, serde_json::to_vec(&recorded)?)?;
+    let start = take_record(&path, &identity());
+    assert!(matches!(start, Start::Identify(_)), "{start:?}");
+    assert!(!path.exists());
     Ok(())
 }
 

@@ -3,7 +3,9 @@ use std::fs;
 use carillon_installation::config::LoadedConfig;
 
 use super::{installation, later, writer};
-use crate::config::{DiscordActivation, DiscordConfig, DiscordRoute, FileChange, Routes};
+use crate::config::{
+    DirectMessages, DiscordActivation, DiscordConfig, DiscordRoute, FileChange, Routes,
+};
 
 const ROUTED: &str = r#"guild_id = "100"
 bot_user_id = "101"
@@ -48,6 +50,7 @@ fn answer(users: &[&str], routes: Vec<DiscordRoute>) -> FileChange {
         bot_token_file: None,
         allowed_user_ids: users.iter().map(|&user| user.to_owned()).collect(),
         routes: Routes::Answered(routes),
+        direct_messages: None,
     }
 }
 
@@ -256,6 +259,7 @@ conversation = "thread"
         bot_token_file: None,
         allowed_user_ids: vec!["201".to_owned(), "200".to_owned()],
         routes: Routes::Answered(routes),
+        direct_messages: None,
     };
     let mut routes = DiscordConfig::load(&config, "discord")?.routes;
     routes.reverse();
@@ -514,5 +518,36 @@ conversation = "thread"
         settings.allowed_user_ids.pop();
     })?;
     assert_eq!(changed, ROUTED);
+    Ok(())
+}
+
+#[test]
+fn the_direct_message_route_comes_and_goes_with_the_owners_file_kept() -> anyhow::Result<()> {
+    let owned = format!("# The owner's settings.\n{ROUTED}# The end.\n");
+    let routed = format!(
+        "# The owner's settings.\n{ROUTED}\n[direct_messages]\nagent = \"default\"\n# The end.\n"
+    );
+    let (added, undone) = change_and_undo(&owned, |discord| {
+        discord.direct_messages = Some(DirectMessages {
+            agent: "default".to_owned(),
+        });
+    })?;
+    assert_eq!((added, undone), (routed.clone(), owned.clone()));
+
+    let directory = tempfile::tempdir()?;
+    let config = installation(directory.path(), "discord", 47_500)?;
+    let path = config.provider_config_path("discord")?;
+    let commented =
+        format!("{owned}\n# Who answers me directly.\n[direct_messages]\nagent = 'default' # me\n");
+    for (file, named) in [(&owned, &routed), (&commented, &commented)] {
+        fs::write(&path, file)?;
+        for _ in 0..2 {
+            FileChange::DirectMessages {
+                agent: "default".to_owned(),
+            }
+            .write(&config, "discord")?;
+            assert_eq!(&fs::read_to_string(&path)?, named);
+        }
+    }
     Ok(())
 }

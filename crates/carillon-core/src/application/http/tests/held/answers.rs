@@ -104,6 +104,37 @@ async fn an_answers_files_are_kept_before_it_is_recorded_and_sent_from_the_copie
     Ok(())
 }
 
+/// The claim names the answer's agent beside its files: an interface
+/// records that agent for every message the answer takes, its files'
+/// messages included.
+#[tokio::test]
+async fn a_claim_names_the_answers_agent_with_its_files() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let chart = directory.path().join("chart.png");
+    fs::write(&chart, b"\x89PNG chart")?;
+    let receipt = ok(submit(&state, "chart it", "conversation").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    let answer = json!({"outcome": "answered", "output": "Here it is.", "files": [chart]});
+    assert_eq!(
+        settle(&state, RUNTIME, &receipt.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    let claimed = claim(&state.core, "instance")?;
+    assert_eq!(claimed.agent_id, "test-agent");
+    let store = fixture.config.value.data_dir.join("attachments");
+    assert_eq!(
+        sent(&store, &claimed)?,
+        [(
+            "chart.png".to_owned(),
+            source(&chart),
+            b"\x89PNG chart".to_vec()
+        )]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn files_core_cannot_keep_are_named_in_the_answer_and_the_rest_sent() -> Result<()> {
     let directory = tempdir()?;

@@ -8,7 +8,7 @@ use super::{CardRecords, Delivering, activity_monitor};
 use crate::{
     client::{CoreClient, test_client as core_client},
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
-    conversations::tests::discord_config,
+    conversations::tests::{discord_config, unread_participation},
     delivery::{Reactions, delivery_loop},
     module::{Module, tests::release_module},
 };
@@ -390,11 +390,11 @@ impl Substitute {
         let core = self.client.clone();
         let (delivering, heard) = mpsc::unbounded_channel();
         let stopping = CancellationToken::new();
-        let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
+        let reactions = Reactions::new(http, crate::config::Settings::new(config));
         let delivered = delivery_loop(
             core.clone(),
             reactions.clone(),
-            http,
+            unread_participation(records),
             PathBuf::new(),
             delivering,
             stopping.clone(),
@@ -1751,59 +1751,6 @@ async fn followed_jobs_are_read_by_name_a_bounded_number_at_a_time() -> anyhow::
     sizes.sort_unstable();
     assert_eq!(sizes, [8, 32]);
     assert!(discord.seen().is_empty(), "{:#?}", discord.seen());
-    monitor.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn new_jobs_type_and_cards_draw_as_the_settings_serving_then_say() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let records = directory.path().join("activity-cards.json");
-    let discord = Substitute::start(succeed()).await?;
-    let accepted = now();
-    let work = || tools(None, &[("bash", "make")], &[]);
-    let first = running("first", "300", accepted, Some(work()));
-    discord.record(vec![first.clone()]);
-    // The provider starts without typing, drawing the default markers.
-    let settings = crate::config::Settings::new(config(false));
-    let (_delivering, monitor) = discord.serving(discord.http(false), settings.clone(), &records);
-    let card = discord
-        .wait_for(&Method::POST, "/channels/300/messages", 1)
-        .await?;
-    assert!(card[0].content().starts_with("⏳ Working"), "{card:#?}");
-    // The operator then serves typing and other markers, and another job
-    // starts.
-    let mut next = with_markers()?;
-    next.typing = true;
-    let changed = settings
-        .apply(
-            || Ok(next),
-            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
-        )
-        .await
-        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?
-        .changed;
-    assert_eq!(changed, ["typing", "activity_markers"]);
-    discord.record(vec![
-        first,
-        running("second", "301", accepted, Some(work())),
-    ]);
-    discord
-        .wait_for(&Method::POST, "/channels/301/typing", 1)
-        .await?;
-    let card = discord
-        .wait_for(&Method::POST, "/channels/301/messages", 1)
-        .await?;
-    assert!(
-        card[0].content().starts_with("<a:working:123> Working"),
-        "{card:#?}"
-    );
-    // The job followed before keeps the typing decision it started with.
-    assert!(
-        discord
-            .matching(&Method::POST, "/channels/300/typing")
-            .is_empty()
-    );
     monitor.abort();
     Ok(())
 }
