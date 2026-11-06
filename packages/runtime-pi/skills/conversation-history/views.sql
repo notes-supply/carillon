@@ -62,30 +62,47 @@ GROUP BY calls.run, calls.entry, calls.kind, calls.model
 HAVING calls.kind = 'response' OR total <> 0;
 
 CREATE TEMP VIEW conversation_list AS
-WITH RECURSIVE said(conversation, entry, rest) AS (
-  SELECT conversation, entry, text FROM messages WHERE subagent IS NULL AND role = 'user'
+WITH RECURSIVE history AS MATERIALIZED (SELECT * FROM messages),
+aside(line) AS (
+  VALUES ('[[]Carillon*'), ('In reply to *, sent [0-9]*:'), ('Forwarding a message, sent [0-9]*:'),
+    ('You sent them this direct message at [0-9]*:'),
+    ('Agent "*" sent them this direct message at [0-9]*:'),
+    ('Another agent sent them this direct message at [0-9]*:')
+),
+said(conversation, entry, rest) AS (
+  SELECT conversation, entry, text FROM history WHERE subagent IS NULL AND role = 'user'
   UNION ALL
   SELECT conversation, entry,
     CASE instr(rest, char(10, 10)) WHEN 0 THEN '' ELSE substr(rest, instr(rest, char(10, 10)) + 2) END
   FROM said
-  WHERE rest LIKE '[Carillon%' OR substr(rest, instr(rest, char(10)) - 1, 3) = ':' || char(10) || '>'
+  WHERE EXISTS (SELECT 1 FROM aside
+    WHERE substr(rest, 1, instr(rest || char(10), char(10)) - 1) GLOB aside.line)
+),
+words AS (
+  SELECT conversation, entry, rest, min(length(rest)) AS kept FROM said GROUP BY conversation, entry
 ),
 openings AS (
-  SELECT conversation, entry, rest, min(length(rest)) AS kept FROM said GROUP BY conversation, entry
+  SELECT conversation, min(entry),
+    replace(substr(rest, 1, min(100, instr(rest || char(10, 10), char(10, 10)) - 1)), char(10), ' ')
+      AS opening
+  FROM words WHERE kept > 0 GROUP BY conversation
+),
+held AS (
+  SELECT conversation, min(at) AS first, max(at) AS last,
+    sum(subagent IS NULL AND role = 'user') AS messages
+  FROM history GROUP BY conversation
 )
 SELECT c.id AS conversation,
   json_extract(info.content, '$.interface_id') AS interface,
   json_extract(info.content, '$.native.origin.guild_id') AS guild,
   json_extract(info.content, '$.native.origin.channel_id') AS channel,
   json_extract(info.content, '$.native.origin.parent_channel_id') AS thread_of,
-  (SELECT min(at) FROM messages WHERE conversation = c.id) AS first,
-  (SELECT max(at) FROM messages WHERE conversation = c.id) AS last,
-  (SELECT count(*) FROM messages
-    WHERE conversation = c.id AND subagent IS NULL AND role = 'user') AS messages,
+  held.first, held.last, coalesce(held.messages, 0) AS messages,
   (SELECT count(*) FROM conversations WHERE owner_conversation_id = c.id) AS subagents,
-  (SELECT replace(substr(rest, 1, 100), char(10), ' ') FROM openings
-    WHERE conversation = c.id AND kept > 0 ORDER BY entry LIMIT 1) AS opening
+  openings.opening
 FROM conversations AS c
+LEFT JOIN held ON held.conversation = c.id
+LEFT JOIN openings ON openings.conversation = c.id
 LEFT JOIN documents AS doc ON doc.scope_kind = 'conversation' AND doc.owner_id = c.id
   AND json_extract(doc.record, '$.kind') = 'carillon.conversation' AND doc.retired_at IS NULL
 LEFT JOIN document_revisions AS info ON info.document_id = doc.id

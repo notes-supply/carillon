@@ -13,7 +13,7 @@ sqlite3 -init "<this skill's directory>/views.sql" -box "file:<store>?mode=ro" "
 
 ## Views
 
-- `conversation_list`: one row per conversation with people. `conversation` is its ID. `interface`, `guild` and `channel` say where it is held. `thread_of` is the parent channel when the conversation is a Discord thread. `first` and `last` are when it began and last spoke, `messages` counts the person's messages, `subagents` counts the subagent runs it started, and `opening` is how the person's first message began, without Carillon's notes or quotes. Every view counts a subagent run under the conversation that started it.
+- `conversation_list`: one row per conversation with people. `conversation` is its ID. `interface`, `guild` and `channel` say where it is held. `thread_of` is the parent channel when the conversation is a Discord thread. `first` and `last` are when it began and last spoke, `messages` counts the person's messages, `subagents` counts the subagent runs it started, and `opening` is the start of the first paragraph the person wrote, past Carillon's notes and quotes. Every view counts a subagent run under the conversation that started it.
 - `messages`: what the person and you said, without thinking or tool calls. Columns `conversation`, `subagent`, `entry`, `position` (its place in the conversation, from 1), `at`, `role` (`user` or `assistant`) and `text`. The person's text includes Carillon's notes, which start `[Carillon`. A subagent run's messages have its ID in `subagent`, and their `user` text is the task it was given. They take positions in the conversation in the order they were written.
 - `usage`: the tokens pi-durable counted, with `conversation`, `at`, `kind`, `model`, `input`, `output` (which includes `reasoning`), `cache_read`, `cache_write`, `total` and `estimated_cost`. A `response` row is one model response. pi-durable counts compaction summaries and tools' own model calls without timing them, so the conversation and each of its subagent runs have one `compaction` row per model and one `tool` row per tool, with the tool in `model`, dated at that run's latest compaction or else its last entry. Sum them for a conversation's figure. Totals by conversation and model are exact; by day, a conversation's summaries all fall on the day of its latest compaction.
 
@@ -21,20 +21,31 @@ Every `at`, `first` and `last` is local time as `YYYY-MM-DD HH:MM:SS`, so compar
 
 ## Queries
 
-Search with this query first. It shows each message containing the term, marked `>` in `hit`, with one message either side, latest conversation first. For more context, widen both ends of its frame.
+Search with this query first. It shows each message containing the term, marked `>` in `hit`, with one message either side, latest conversation first. For several terms, list each in `search`, as in `VALUES ('invoice'), ('billing')`; a message matches when it contains any of them. For more context, widen both ends of its frame. It shows at most 40 rows, and when that leaves matches out, a last row marked `more` says how many and in how many conversations.
 
 ```sql
 WITH search(term) AS (VALUES ('invoice')),
-found AS (SELECT messages.*, instr(lower(text), lower(term)) AS hit FROM messages, search),
+found AS (
+  SELECT messages.*,
+    (SELECT coalesce(min(nullif(instr(lower(text), lower(term)), 0)), 0) FROM search) AS hit
+  FROM messages
+),
 near AS (
-  SELECT *, max(hit > 0) OVER (PARTITION BY conversation ORDER BY position
+  SELECT *, max(hit) OVER (PARTITION BY conversation ORDER BY position
       ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS shown,
     max(CASE WHEN hit THEN entry END) OVER (PARTITION BY conversation) AS latest
   FROM found
-)
-SELECT conversation, position, at, subagent, role, CASE WHEN hit THEN '>' ELSE '' END AS hit,
-  replace(substr(text, max(1, hit - 60), 200), char(10), ' ') AS text
-FROM near WHERE shown ORDER BY latest DESC, position LIMIT 40;
+),
+listed AS (SELECT *, row_number() OVER (ORDER BY latest DESC, position) AS n FROM near WHERE shown)
+SELECT conversation, position, at, subagent, role, hit, text FROM (
+  SELECT n, conversation, position, at, subagent, role, CASE WHEN hit THEN '>' ELSE '' END AS hit,
+    replace(substr(text, max(1, hit - 60), 200), char(10), ' ') AS text
+  FROM listed WHERE n <= 40
+  UNION ALL
+  SELECT 41, NULL, NULL, NULL, NULL, NULL, 'more', sum(hit > 0) || ' match(es) not shown, in '
+    || count(DISTINCT conversation) || ' conversation(s)'
+  FROM listed WHERE n > 40 HAVING sum(hit > 0)
+) ORDER BY n;
 ```
 
 Read a whole conversation only when the matches are not enough, and a long one in ranges, with `AND position BETWEEN 10 AND 40`.
@@ -64,6 +75,7 @@ GROUP BY every, 1 ORDER BY every, total DESC;
 
 ## Answering
 
+- When a search ends with a `more` row, say that it was cut off and how many matches it left out, or narrow it and search again: a rarer term, a conversation, or a period with `at`.
 - Summarise what was said and when, and link a Discord conversation as `https://discord.com/channels/<guild>/<channel>`.
 - Report usage in tokens. `estimated_cost` prices the tokens at the model catalogue's rates; on a subscription, such as ChatGPT's, nothing is billed per token. Call any dollar figure an estimate.
 - Report `cache_hit_pct` as a percentage of the prompt tokens read from the provider's cache. It covers every counted model call: responses, compaction summaries and tools' own calls.
