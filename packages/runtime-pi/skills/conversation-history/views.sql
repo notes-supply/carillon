@@ -64,10 +64,11 @@ HAVING calls.kind = 'response' OR total <> 0;
 CREATE TEMP VIEW conversation_list AS
 WITH RECURSIVE history AS MATERIALIZED (SELECT * FROM messages),
 aside(line) AS (
-  VALUES ('[[]Carillon*'), ('In reply to *, sent [0-9]*:'), ('Forwarding a message, sent [0-9]*:'),
-    ('You sent them this direct message at [0-9]*:'),
-    ('Agent "*" sent them this direct message at [0-9]*:'),
-    ('Another agent sent them this direct message at [0-9]*:')
+  VALUES ('[[]Carillon*'), ('In reply to *, sent [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*:'),
+    ('Forwarding a message, sent [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*:'),
+    ('You sent them this direct message at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*:'),
+    ('Agent "*" sent them this direct message at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*:'),
+    ('Another agent sent them this direct message at [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*:')
 ),
 said(conversation, entry, rest) AS (
   SELECT conversation, entry, text FROM history WHERE subagent IS NULL AND role = 'user'

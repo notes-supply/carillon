@@ -43,7 +43,7 @@ SELECT conversation, position, at, subagent, role, hit, text FROM (
   FROM listed WHERE n <= 40
   UNION ALL
   SELECT 41, NULL, NULL, NULL, NULL, NULL, 'more', sum(hit > 0) || ' match(es) not shown, in '
-    || count(DISTINCT conversation) || ' conversation(s)'
+    || count(DISTINCT CASE WHEN hit > 0 THEN conversation END) || ' conversation(s)'
   FROM listed WHERE n > 40 HAVING sum(hit > 0)
 ) ORDER BY n;
 ```

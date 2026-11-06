@@ -366,6 +366,25 @@ it("says how many matches the default rows left out", async () => {
   });
 });
 
+it("counts only conversations with a left-out match, not one whose context alone was cut", async () => {
+  const turns: [audience: string, said: string][] = [
+    ["oldest", "invoice last"],
+    ["split", "hello"],
+    ["split", "invoice split"],
+    ...Array.from({ length: 19 }, (_, index): [string, string] => [`a${String(index)}`, "invoice"]),
+  ];
+  const agent = await fixture({
+    durable: true,
+    answers: turns.map(() => fauxAssistantMessage("Noted.")),
+  });
+  for (const [turn, [audience, said]] of turns.entries())
+    await agent.ask(`turn-${String(turn)}`, said, { audience_id: audience });
+  expect(history(agent, search("invoice")).at(-1)).toMatchObject({
+    hit: "more",
+    text: "1 match(es) not shown, in 1 conversation(s)",
+  });
+});
+
 it("opens each conversation with the person's first words, past Carillon's notes and quotes", async () => {
   const agent = await fixture({
     durable: true,
@@ -399,6 +418,8 @@ it("ends an opening at the person's words, before a later note, past every Caril
       "Another agent sent them this direct message at 2026-11-05T14:03:00+00:00:\n\nThe direct reply.",
     "Here is my list:\n\n- tomatoes",
     "In reply to your message, sent now:\n\nA quote Carillon never writes.",
+    "In reply to your message, sent 2 invoices:\n\nMy own words came first.",
+    "You sent them this direct message at 3 pm:\n\nAlso mine.",
   ];
   const agent = await fixture({
     durable: true,
@@ -427,6 +448,8 @@ it("ends an opening at the person's words, before a later note, past every Caril
       "The direct reply.",
       "Here is my list:",
       "In reply to your message, sent now:",
+      "In reply to your message, sent 2 invoices:",
+      "You sent them this direct message at 3 pm:",
     ]),
   );
 });
