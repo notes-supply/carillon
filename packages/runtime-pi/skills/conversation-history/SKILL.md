@@ -53,12 +53,20 @@ GROUP BY day, model ORDER BY day;
 SELECT conversation, channel, thread_of, sum(total) AS total
 FROM usage JOIN conversation_list USING (conversation)
 GROUP BY conversation ORDER BY total DESC;
+
+SELECT CASE WHEN every THEN 'all' ELSE conversation END AS conversation,
+  sum(kind = 'response') AS responses, sum(total) AS total,
+  round(100.0 * sum(cache_read) / sum(input + cache_read + cache_write), 1) AS cache_hit_pct
+FROM usage, (SELECT 0 AS every UNION ALL SELECT 1)
+WHERE at >= date('now', 'localtime', '-6 days')
+GROUP BY every, 1 ORDER BY every, total DESC;
 ```
 
 ## Answering
 
 - Summarise what was said and when, and link a Discord conversation as `https://discord.com/channels/<guild>/<channel>`.
 - Report usage in tokens. `estimated_cost` prices the tokens at the model catalogue's rates; on a subscription, such as ChatGPT's, nothing is billed per token. Call any dollar figure an estimate.
+- Report `cache_hit_pct` as a percentage of the prompt tokens read from the provider's cache. It covers every counted model call: responses, compaction summaries and tools' own calls.
 
 ## Without sqlite3
 

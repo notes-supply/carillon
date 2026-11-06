@@ -95,7 +95,10 @@ function read(agent: Fixture, sql: string) {
 function durableTotals(agent: Fixture) {
   const items = read(
     agent,
-    `SELECT doc.owner_id AS conversation, item.key, json_extract(item.value, '$.totalTokens') AS total
+    `SELECT doc.owner_id AS conversation, item.key, json_extract(item.value, '$.totalTokens') AS total,
+       json_extract(item.value, '$.cacheRead') AS cache_read,
+       json_extract(item.value, '$.input') + json_extract(item.value, '$.cacheRead')
+         + json_extract(item.value, '$.cacheWrite') AS prompt
      FROM documents AS doc
      JOIN document_revisions AS revision ON revision.document_id = doc.id
        AND revision.seq = (SELECT max(seq) FROM document_revisions WHERE document_id = doc.id)
@@ -108,13 +111,17 @@ function durableTotals(agent: Fixture) {
   const byKey = new Map<string, number>();
   const byConversation = new Map<number, number>();
   let total = 0;
+  let cacheRead = 0;
+  let prompt = 0;
   for (const item of items) {
     const tokens = Number(item["total"]);
     add(byKey, String(item["key"]), tokens);
     add(byConversation, Number(item["conversation"]), tokens);
     total += tokens;
+    cacheRead += Number(item["cache_read"]);
+    prompt += Number(item["prompt"]);
   }
-  return { byKey, byConversation, total };
+  return { byKey, byConversation, total, cacheRead, prompt };
 }
 
 const sumOf = (rows: Row[], column: string) =>
@@ -195,8 +202,19 @@ it("counts compaction summaries and tools' model calls in every usage total, as 
   expect(
     read(agent, "SELECT 1 FROM entries WHERE json_extract(record, '$.kind') = 'pi.compaction'"),
   ).toHaveLength(1);
-  const { byKey, byConversation, total } = durableTotals(agent);
+  const { byKey, byConversation, total, cacheRead, prompt } = durableTotals(agent);
   expect(byKey.get("estimate")).toBe(1000);
+  expect(cacheRead).toBeGreaterThan(0);
+  const [conversation] = byConversation.keys();
+  const responses = String(
+    read(agent, "SELECT 1 FROM entries WHERE json_extract(record, '$.kind') = 'pi.assistant'")
+      .length,
+  );
+  const rate = String(Math.round((1000 * cacheRead) / prompt) / 10);
+  expect(history(agent, query("cache_hit_pct"))).toEqual([
+    { conversation: String(conversation), responses, total: String(total), cache_hit_pct: rate },
+    { conversation: "all", responses, total: String(total), cache_hit_pct: rate },
+  ]);
   const byDay = history(agent, query("GROUP BY day, model"));
   expect(sumOf(byDay, "total")).toBe(total);
   for (const [model, tokens] of byKey)
