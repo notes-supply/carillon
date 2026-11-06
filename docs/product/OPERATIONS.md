@@ -413,6 +413,9 @@ the dollar figure is the model catalogue's estimate, not a bill, and a
 ChatGPT subscription is not billed per token. A skill of the same name in
 the agent's `resources` replaces it.
 
+Pi has no web search of its own. [Add web search](WEB_SEARCH.md) gives it
+one as a skill that calls a search provider's API.
+
 The agent's Extensions setting selects more of Pi's built-in extensions.
 None of these is selected by default:
 
