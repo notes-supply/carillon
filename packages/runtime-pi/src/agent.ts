@@ -53,6 +53,7 @@ import {
   type Snapshot,
 } from "./resources.ts";
 import { createSchedulesExtension } from "./schedules.ts";
+import { expandSkills } from "./skills.ts";
 import { createSubagentsExtension } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -303,6 +304,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
             extensions,
             options.skillsDirectory,
           );
+    const input = await expandSkills(request.input, snapshot.skills);
     const { interface_id, channel_id, agent_id } = request;
     const choice = await options.models.forTurn({ interface_id, channel_id, agent_id });
     const model =
@@ -340,7 +342,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     }, context);
     if (!admitted && (snapshot !== latest || incomplete)) await adopt(snapshot);
     const parts: Exclude<UserInput, string> = [
-      ...(request.input.length === 0 ? [] : [{ type: "text" as const, text: request.input }]),
+      ...(input.length === 0 ? [] : [{ type: "text" as const, text: input }]),
       ...(attachments.note === undefined
         ? []
         : [{ type: "text" as const, text: attachments.note }]),

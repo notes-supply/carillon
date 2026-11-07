@@ -138,7 +138,7 @@ for arch in x86_64 aarch64; do
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
     'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
     'r lib/carillon-discord-SKILL.md' 'r lib/pi-skills/conversation-history/SKILL.md' \
-    'r lib/pi-skills/conversation-history/views.sql' \
+    'r lib/pi-skills/conversation-history/views.sql' 'r lib/pi-skills/carillon-hooks/SKILL.md' \
     'r bin/photon_rs_bg.wasm' 'r systemd/example.service' 'r licenses/Apache-2.0.txt' \
     'r licenses/MIT.txt' 'r licenses/bun.md' 'r licenses/pi-coding-agent.txt' \
     'r licenses/rust.txt' 'r licenses/npm.txt'; do
