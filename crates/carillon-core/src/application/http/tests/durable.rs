@@ -10,10 +10,10 @@ use tempfile::tempdir;
 
 use super::{
     Fixture, configured, installation,
-    live::{lock, ok, operator, submit},
+    live::{event, lock, ok, operator, submit, submit_event},
 };
 use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
-use carillon_protocol::model::RuntimeTurnRequest;
+use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest};
 
 /// A durable runtime that keeps every turn core hands it, answering each
 /// hand-over with the next scripted answer (202 once they run out), and
@@ -281,7 +281,7 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
 }
 
 #[tokio::test]
-async fn a_refused_turn_is_interrupted_with_the_runtimes_explanation() -> Result<()> {
+async fn a_refused_turn_is_interrupted_with_only_the_runtimes_explanation() -> Result<()> {
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
     let (_fixture, state) = durable(directory.path(), &runtime)?;
@@ -315,23 +315,86 @@ async fn a_refused_turn_is_interrupted_with_the_runtimes_explanation() -> Result
             (unexplained.turn_id.as_str(), TurnState::Interrupted),
         ]
     );
-    assert!(
-        notices[0]
-            .content
-            .starts_with("That turn was interrupted: That agent is not set up here.\n"),
-        "{}",
-        notices[0].content
-    );
-    assert!(
-        notices[1]
-            .content
-            .starts_with("That turn was interrupted. ")
+    assert_eq!(notices[0].content, "That agent is not set up here.");
+    assert_eq!(
+        notices[1].content,
+        "The agent's runtime refused that message without saying why."
     );
     // Its refusal is the outcome: a late answer cannot replace it.
     let answer = json!({"outcome": "answered", "output": "Late."});
     assert_eq!(
         settle(&state, RUNTIME, &refused.turn_id, &answer).await?,
         StatusCode::CONFLICT
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Result<()> {
+    let directory = tempdir()?;
+    let state = configured(&installation(directory.path())?);
+    let refused = ok(submit(&state, "one", "conversation").await)?;
+    let step = state
+        .core
+        .dispatch_next("test-runtime", &CancellationToken::new(), async |_| {
+            Err(InboxFailure::Refused {
+                status: 422,
+                explanation: Some(" \n".to_owned()),
+            })
+        })
+        .await?;
+    assert_eq!(step, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &refused.turn_id)?, TurnState::Interrupted);
+    let notices = delivered(&state)?;
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| notice.content.as_str())
+            .collect::<Vec<_>>(),
+        ["The agent's runtime refused that message without saying why."]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn context_the_interface_adds_reaches_the_runtime_apart_from_the_persons_words() -> Result<()>
+{
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let quote = "Forwarding a message, sent 2026-11-04T09:00:00+00:00:\n> Book the train.";
+    let with = |id: &str, native: Value| ExternalEvent {
+        native,
+        content: String::new(),
+        ..event(id, "conversation")
+    };
+    let forward =
+        ok(submit_event(&state, with("forward", json!({ NATIVE_CONTEXT: quote }))).await)?;
+    for (id, native) in [
+        ("bare", Value::Null),
+        ("blank", json!({ NATIVE_CONTEXT: " \n" })),
+        ("number", json!({ NATIVE_CONTEXT: 7 })),
+    ] {
+        let refused = submit_event(&state, with(id, native)).await;
+        assert_eq!(
+            refused.map_err(|refusal| refusal.status).err(),
+            Some(StatusCode::BAD_REQUEST),
+            "{id} has no text"
+        );
+    }
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert_eq!(lock(&runtime.handed).len(), 1);
+    let handed = runtime.request(0)?;
+    assert_eq!(handed.input, "");
+    assert_eq!(handed.native[NATIVE_CONTEXT], quote);
+    let inspected = state
+        .core
+        .inspect_turn(&forward.turn_id)?
+        .context("no such turn")?;
+    assert_eq!(
+        (inspected.input.as_str(), inspected.context.as_deref()),
+        ("", Some(quote))
     );
     Ok(())
 }

@@ -482,6 +482,17 @@ fn gateway(fields: &Value) -> Result<Message> {
     Ok(serde_json::from_value(message)?)
 }
 
+pub(crate) fn agent_reads(event: &ExternalEvent) -> String {
+    [
+        event.native[NATIVE_CONTEXT].as_str().unwrap_or_default(),
+        &event.content,
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n")
+}
+
 fn sent(id: &str, author: &Value, content: &str, files: &Value) -> Value {
     json!({
         "id": id, "channel_id": "300", "author": author, "content": content,

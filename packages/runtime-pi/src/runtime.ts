@@ -18,10 +18,12 @@ import type { McpServer } from "./mcp.ts";
 import { modelSettings, type PiCatalogue } from "./models.ts";
 import {
   changeResourceSetting,
+  loadSkills,
   RESOURCE_SETTINGS,
   resourceSettings,
   type ResourceSource,
 } from "./resources.ts";
+import { skillCommands } from "./skills.ts";
 
 export interface PiRuntimeOptions {
   /**
@@ -126,8 +128,12 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       const { settings } = await models.settings(ownsChange ? { subject } : request);
       return { settings: [...settings, ...(await resourceSettings(source, subject))] };
     },
-    // The durable runtime runs no commands of its own yet.
-    commands: () => Promise.resolve({ commands: [] }),
+    // The skills the agent's next turn captures, as its expansion reads them.
+    async commands({ agent_id }) {
+      agentOf(agent_id);
+      const root = options.agents.find(({ id }) => id === agent_id)?.resources;
+      return { commands: skillCommands(loadSkills(root, options.skillsDirectory)) };
+    },
     restartReadiness() {
       return [...agents.values()].some((agent) => agent.calling)
         ? { state: "unready", reason: "a tool call is running" }

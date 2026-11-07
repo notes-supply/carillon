@@ -74,9 +74,15 @@ said(conversation, entry, rest) AS (
   SELECT conversation, entry, text FROM history WHERE subagent IS NULL AND role = 'user'
   UNION ALL
   SELECT conversation, entry,
-    CASE instr(rest, char(10, 10)) WHEN 0 THEN '' ELSE substr(rest, instr(rest, char(10, 10)) + 2) END
+    CASE
+      WHEN rest GLOB '<skill name="*' THEN
+        CASE instr(rest, char(10) || '</skill>') WHEN 0 THEN ''
+        ELSE ltrim(substr(rest, instr(rest, char(10) || '</skill>') + 9), char(10)) END
+      WHEN instr(rest, char(10, 10)) = 0 THEN ''
+      ELSE substr(rest, instr(rest, char(10, 10)) + 2)
+    END
   FROM said
-  WHERE EXISTS (SELECT 1 FROM aside
+  WHERE rest GLOB '<skill name="*' OR EXISTS (SELECT 1 FROM aside
     WHERE substr(rest, 1, instr(rest || char(10), char(10)) - 1) GLOB aside.line)
 ),
 words AS (

@@ -602,10 +602,10 @@ async fn a_reply_or_forward_opens_with_a_quote_of_the_message_it_points_at() -> 
     assert_eq!(status, StatusCode::OK, "a bare forward is answered: {body}");
 
     let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
-    let contents: Vec<&str> = core
+    let contents: Vec<String> = core
         .events
         .iter()
-        .map(|event| event.content.as_str())
+        .map(crate::conversations::tests::agent_reads)
         .collect();
     let quoted = "> Shall I book the 9:40 train?\n> It arrives at noon.\n\nYes, book it.";
     let files = r#", with files ["timetable.pdf"]:"#;
@@ -681,10 +681,10 @@ async fn a_direct_message_opens_with_what_was_sent_its_person_since_their_last_o
     }
 
     let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
-    let contents: Vec<&str> = core
+    let contents: Vec<String> = core
         .events
         .iter()
-        .map(|event| event.content.as_str())
+        .map(crate::conversations::tests::agent_reads)
         .collect();
     assert_eq!(
         contents,
@@ -860,8 +860,9 @@ async fn a_forwarded_file_goes_to_core_and_only_the_answers_file_comes_back() ->
     let [event] = core.events.as_slice() else {
         anyhow::bail!("expected the forward to be accepted");
     };
+    assert_eq!(event.content, "");
     assert_eq!(
-        event.content,
+        event.native[carillon_protocol::model::NATIVE_CONTEXT],
         r#"Forwarding a message, sent 2026-11-04T09:00:00+00:00, with files ["notes.txt"]:"#
     );
     let files = &event.attachments.as_ref().context("no files")?.files;

@@ -166,12 +166,11 @@ fn answered(
         crate::conversations::admit_message(&config, &server.participation, message, Value::Null)
             .map_err(|failure| anyhow::anyhow!(failure.message))?
             .context("the direct message was ignored")?;
-    Ok(
-        crate::conversations::prepare_deterministic_conversation(&server.participation, plan)
+    Ok(crate::conversations::tests::agent_reads(
+        &crate::conversations::prepare_deterministic_conversation(&server.participation, plan)
             .map_err(|failure| anyhow::anyhow!(failure.message))?
-            .event
-            .content,
-    )
+            .event,
+    ))
 }
 
 fn direct_message(

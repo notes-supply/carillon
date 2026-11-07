@@ -144,6 +144,50 @@ A recorded snapshot that no longer loads at startup is logged, and the agent
 uses the default extensions until the next one is admitted; what it selects
 is unknown meanwhile, so schedules wait for it.
 
+## Skills
+
+A person invokes a skill of the snapshot by naming `$<name>` anywhere
+outside code in their own words, or by opening them with Pi's
+`/skill:<name>`. Only the turn's `input` counts: the interface's context
+(`native.context`, such as Discord's quote of the message replied to) comes
+first and invokes nothing. Code is what Discord shows as code: a run of
+backticks up to the next run of as many, across lines, so fences and spans
+alike, with backslashes inside kept as they are. Discord shows a backtick
+escaped as `` \` ``, indented lines and `~~~` fences as plain text, and so
+does this. Only a skill's exact name counts, as a word of its own, so
+`$HOME` or `$triaged` stays as written, but plain text such as an unquoted
+shell variable named like a skill invokes it; backticks keep it literal.
+Each skill invoked, once and in the order first named, precedes the
+person's words in Pi's own block, after the context:
+
+```text
+<skill name="triage" location="<snapshot>/skills/triage/SKILL.md">
+References are relative to <snapshot>/skills/triage.
+
+<SKILL.md without its front matter>
+</skill>
+```
+
+`$<name>` keeps the person's words whole after the blocks. `/skill:<name>
+text` leaves `text`. `/skill:` without a name, or with a name no skill has,
+refuses the turn with 422, listing the skills, and so does invoking a skill
+whose `SKILL.md` can no longer be read; core sends that explanation as the
+turn's notice. Files and images go along as they are. The runtime expands the
+message as it admits the turn, so the message it keeps, and a restart
+replays, is the expanded one. Turns the runtime opens itself, for a
+schedule's run or a subagent's report, are not expanded.
+
+A skill whose front matter sets `disable-model-invocation: true` stays out of
+the prompt and is invoked like any other. The built-in
+[`carillon-hooks`](skills/carillon-hooks/SKILL.md) is one: it explains user
+extensions and pi-durable's hooks, with examples the tests load and run.
+
+`/v1/commands` lists every skill as `skill:<name>` with its description, read
+from the agent's own resource root and the built-in skills, never a captured
+snapshot, so it lists what the next turn brings. A name too long for the
+100-character command name is left out of the list and still invoked by
+`$<name>`.
+
 ## Schedules
 
 `schedules` gives the agent `schedule`, `schedule_list` and
@@ -257,6 +301,8 @@ A message `hold <path>` is answered once that file exists.
 - [`schedules.ts`](src/schedules.ts), [`subagents.ts`](src/subagents.ts): the
   `schedules` and `subagents` extensions and their tasks.
 - [`mcp.ts`](src/mcp.ts): `mcp.json` and each MCP server's extension.
+- [`skills.ts`](src/skills.ts): the skills a message invokes, and `/command`'s
+  list of them.
 - [`resources.ts`](src/resources.ts), [`attachments.ts`](src/attachments.ts),
   [`activity.ts`](src/activity.ts), [`models.ts`](src/models.ts): snapshots
   and settings, files, activity, and the catalogue.

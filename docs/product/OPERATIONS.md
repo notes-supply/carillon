@@ -416,6 +416,49 @@ the agent's `resources` replaces it.
 Pi has no web search of its own. [Add web search](WEB_SEARCH.md) gives it
 one as a skill that calls a search provider's API.
 
+### Skills you call by name
+
+A skill can also be one that only you invoke, such as a checklist you want
+followed exactly, kept out of the agent's prompt until you ask for it. Write
+it to `skills/<name>/SKILL.md` in the agent's `resources` directory,
+`CARILLON_HOME/agents/default/skills/weekly-review/SKILL.md` for the
+assistant setup creates:
+
+```markdown
+---
+name: weekly-review
+description: Review the week's conversations and list what is still open.
+disable-model-invocation: true
+---
+
+Read this week's conversations and list each question still open, newest first.
+```
+
+The next message brings it; nothing needs a restart. Call it in any message
+with `$weekly-review`, as in `$weekly-review only the garden threads`, or
+open the message with `/skill:weekly-review only the garden threads`. The
+agent receives the skill's text before your message, along with any files
+and images you attach. Only your own words count: the quote Carillon adds
+before a reply or forward ([Replies and forwards](#replies-and-forwards))
+invokes nothing, and `/skill:` must start your own words, even when a quote
+comes before them. In Discord's message box, press Escape before Enter after
+typing `/skill:…`, or Discord's command picker may choose another bot's
+`/skill` command instead of sending your message. In your words, `$` and the
+skill's exact name count anywhere outside code, such as an unquoted shell
+variable of that name or a line you quote with `>`. Code is what Discord
+shows as code, text between backticks or in a ```` ``` ```` block; put a `$`
+name in backticks to keep it literal. A backtick escaped as `` \` `` and
+indented lines are not code in Discord, so a name there counts. `/skill:`
+with no name, or with a name the agent has no skill for, is refused with that
+reason, listing its skills. Without `disable-model-invocation: true`, the
+prompt also offers the skill, and the agent may use it unasked. Any skill can
+be called these ways, including the built-in `conversation-history`.
+
+Pi also ships `carillon-hooks`, which only you invoke: `$carillon-hooks`
+gives the agent the rules for an extension of its own in
+`extensions/<file>.ts`, and what each pi-durable hook can do, with examples
+that refuse a command, log each response and change a model request.
+
 The agent's Extensions setting selects more of Pi's built-in extensions.
 None of these is selected by default:
 
@@ -496,7 +539,10 @@ channel's page, which has neither line.
 `/command` runs one of the runtime's own commands or skills in the
 conversation, exactly as written:
 `/command invocation:compact keep the decisions` sends `/compact keep the
-decisions`. Plain `/command` lists them.
+decisions`. Plain `/command` lists them. On Pi they are the agent's skills,
+each listed as `skill:<name>`: `/command invocation:skill:weekly-review only
+the garden threads` sends `/skill:weekly-review only the garden threads`,
+which [calls the skill](#skills-you-call-by-name).
 
 Both commands are admitted like messages: only in the guild, from allowlisted
 users, in a routed channel or a thread under a thread route. `/settings`
@@ -573,7 +619,9 @@ the message's own ([Files](#files)); a reply's quote only names the files
 of the message it answers. A reply to a forward quotes the forwarded words
 and adds `forwarding a message`. A forward with no words of its own is
 answered where a message would be. Only the new message carries the quote:
-the conversation before it is unchanged.
+the conversation before it is unchanged. The quote is context, apart from
+your words, so a skill it names is not invoked
+([Skills you call by name](#skills-you-call-by-name)).
 
 ### Reactions
 

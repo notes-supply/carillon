@@ -13,8 +13,8 @@ use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
-    EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, RuntimeTurnRequest,
-    SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
+    EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
+    RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
 };
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
@@ -94,11 +94,11 @@ impl CoreError {
 }
 
 /// An attachment that no longer matches its capture runs nothing.
-const ALTERED_ATTACHMENT: &str = "a file attached to that message was changed or removed after \
-Carillon accepted it, so the message was not run";
+const ALTERED_ATTACHMENT: &str = "A file attached to that message was changed or removed after \
+Carillon accepted it, so the message was not run.";
 /// Nor does one that cannot be read when the turn starts.
-const UNREADABLE_ATTACHMENT: &str = "a file attached to that message could not be read, so the \
-message was not run";
+const UNREADABLE_ATTACHMENT: &str = "A file attached to that message could not be read, so the \
+message was not run.";
 
 /// A core handle does not spawn workers or initialize any provider.
 /// Clones share the same SQLite authority. The application owns the exclusive worker lifetime.
@@ -614,10 +614,14 @@ impl Core {
             || event.audience_id.is_empty()
             || event.delivery_target_id.is_empty()
             || event.feedback_target_id.is_empty()
-            || (event.content.trim().is_empty() && event.attachments.is_none())
+            || (event.content.trim().is_empty()
+                && event.attachments.is_none()
+                && event.native[NATIVE_CONTEXT]
+                    .as_str()
+                    .is_none_or(|context| context.trim().is_empty()))
         {
             return Err(CoreError::InvalidInput(
-                "event identity, agent, audience, targets, user, and content or attachments are required"
+                "event identity, agent, audience, targets, user, and content, context or attachments are required"
                     .to_owned(),
             ));
         }

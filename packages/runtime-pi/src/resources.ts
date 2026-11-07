@@ -9,6 +9,7 @@ import {
   formatSkillsForPrompt,
   loadProjectContextFiles,
   loadSkillsFromDir,
+  type Skill,
 } from "@earendil-works/pi-coding-agent";
 import {
   createRegistry,
@@ -104,6 +105,8 @@ export interface Snapshot {
   readonly selected: readonly string[];
   /** The user extensions the snapshot lists, each named as its settings select it. */
   readonly modules: readonly Extension[];
+  /** The skills a message may invoke; the prompt offers those not invocation-only. */
+  readonly skills: readonly Skill[];
   /** Prompt sections, read once per snapshot so requests on it render the same prompt. */
   readonly prompt: {
     readonly system?: string;
@@ -164,13 +167,7 @@ export async function loadSnapshot(
     : selected.includes("codemode")
       ? "indirect"
       : undefined;
-  const own = loadSkillsFromDir({ dir: join(root, "skills"), source: "carillon" }).skills;
-  const skills = [
-    ...loadSkillsFromDir({ dir: builtInSkills, source: "builtin" }).skills.filter(
-      (skill) => !own.some(({ name }) => name === skill.name),
-    ),
-    ...own,
-  ];
+  const skills = loadSkills(root, builtInSkills);
   const skillsPrompt =
     reader === undefined || skills.length === 0 ? "" : formatSkillsForPrompt(skills, reader).trim();
   return {
@@ -178,6 +175,7 @@ export async function loadSnapshot(
     busy: settings.busy ?? DEFAULT_BUSY,
     selected,
     modules,
+    skills,
     prompt: {
       ...(system === undefined || system.trim().length === 0 ? {} : { system }),
       ...(context.length === 0
@@ -194,6 +192,23 @@ export async function loadSnapshot(
       ...(skillsPrompt.length === 0 ? {} : { skills: skillsPrompt }),
     },
   };
+}
+
+/**
+ * The skills of the resource root's `skills/` and the runtime's
+ * `builtInSkills`, which one of the same name replaces, by name.
+ */
+export function loadSkills(root: string | undefined, builtInSkills: string): Skill[] {
+  const own =
+    root === undefined
+      ? []
+      : loadSkillsFromDir({ dir: join(root, "skills"), source: "carillon" }).skills;
+  return [
+    ...loadSkillsFromDir({ dir: builtInSkills, source: "builtin" }).skills.filter(
+      (skill) => !own.some(({ name }) => name === skill.name),
+    ),
+    ...own,
+  ].toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 /**

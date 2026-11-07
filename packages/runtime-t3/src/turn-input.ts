@@ -1,14 +1,14 @@
-import { turnIntent } from "@carillon/protocol";
+import { turnContext, turnIntent } from "@carillon/protocol";
 import type { TurnRequest } from "@carillon/runtime/operations";
 
 /**
  * The message T3 is sent for the turn: a command invocation verbatim, so
- * T3 runs it as its own; else the person's text as written, followed by
- * Carillon's note of the files T3 cannot take.
+ * T3 runs it as its own; else the interface's context, the person's text
+ * as written, and Carillon's note of the files T3 cannot take.
  */
 export function compose(request: TurnRequest, unavailable: readonly string[]): string {
   if (turnIntent(request.native) === "command") return request.input;
-  return joined(request.input, unavailableNote(unavailable));
+  return joined(turnContext(request.native) ?? "", request.input, unavailableNote(unavailable));
 }
 
 /**

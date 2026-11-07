@@ -131,7 +131,9 @@ pub struct ExternalEvent {
     pub channel_id: String,
     pub delivery_target_id: String,
     pub feedback_target_id: String,
-    /// The person's text; may be empty when the event carries attachments.
+    /// Only what the person wrote; text the interface adds is
+    /// [`NATIVE_CONTEXT`]. May be empty when the event carries attachments
+    /// or context.
     pub content: String,
     #[serde(default)]
     pub native: Value,
@@ -273,6 +275,11 @@ where
 pub const NATIVE_INTENT: &str = "intent";
 /// The value of [`NATIVE_INTENT`] for a command invocation.
 pub const INTENT_COMMAND: &str = "command";
+/// The neutral key of a turn's `native` metadata holding text the
+/// interface adds for the model to read before the person's own, such as
+/// a quote of the message they reply to. An event's `content` is only what
+/// the person wrote.
+pub const NATIVE_CONTEXT: &str = "context";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Delivery {
@@ -742,6 +749,9 @@ pub struct TurnInspection {
     pub audience_id: String,
     pub user_id: String,
     pub input: String,
+    /// The interface's [`NATIVE_CONTEXT`] for the person's text, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     pub state: TurnState,
     pub output: Option<String>,
     pub providers: Value,

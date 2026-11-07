@@ -174,6 +174,28 @@ pub(super) async fn submit(
     input: &str,
     conversation: &str,
 ) -> Result<EventReceipt, ApiError> {
+    submit_event(state, event(input, conversation)).await
+}
+
+pub(super) fn event(input: &str, conversation: &str) -> ExternalEvent {
+    ExternalEvent {
+        event_id: input.to_owned(),
+        agent_id: "test-agent".to_owned(),
+        user_id: "test-user".to_owned(),
+        audience_id: conversation.to_owned(),
+        channel_id: "test-channel".to_owned(),
+        delivery_target_id: "test-destination".to_owned(),
+        feedback_target_id: "test-feedback".to_owned(),
+        content: input.to_owned(),
+        native: Value::Null,
+        attachments: None,
+    }
+}
+
+pub(super) async fn submit_event(
+    state: &AppState,
+    event: ExternalEvent,
+) -> Result<EventReceipt, ApiError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         PROVIDER_HEADER,
@@ -183,24 +205,9 @@ pub(super) async fn submit(
         http::header::AUTHORIZATION,
         "Bearer test-only".parse().map_err(anyhow::Error::from)?,
     );
-    accept_event(
-        State(state.clone()),
-        headers,
-        Json(ExternalEvent {
-            event_id: input.to_owned(),
-            agent_id: "test-agent".to_owned(),
-            user_id: "test-user".to_owned(),
-            audience_id: conversation.to_owned(),
-            channel_id: "test-channel".to_owned(),
-            delivery_target_id: "test-destination".to_owned(),
-            feedback_target_id: "test-feedback".to_owned(),
-            content: input.to_owned(),
-            native: Value::Null,
-            attachments: None,
-        }),
-    )
-    .await
-    .map(|Json(receipt)| receipt)
+    accept_event(State(state.clone()), headers, Json(event))
+        .await
+        .map(|Json(receipt)| receipt)
 }
 
 /// Waits until the supervisor reports the test runtime's dispatcher `wanted`.

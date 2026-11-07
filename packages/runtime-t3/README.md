@@ -147,8 +147,9 @@ report of it is refused.
   the reply say its report could not be scheduled. Neither the reply, once
   its run has answered, nor the report's turn offers controls: the work is
   T3's.
-- **The person's text as written**, with a note only of files T3 could not
-  take. T3 titles a thread from its first message.
+- **The person's text as written**, after the interface's context, such
+  as a reply's quote, and with a note only of files T3 could not take. T3
+  titles a thread from the person's words in its first message.
 - **Models.**
   - A turn runs its channel's model, else its agent's, as `/settings` and
     `carillon settings` chose them; T3's boolean options are two choices,

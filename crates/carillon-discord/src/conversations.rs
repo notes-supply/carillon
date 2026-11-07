@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
 use carillon_discord_module::contract::{Intent, Interaction, InteractionKind};
 use carillon_installation::filesystem::sync_ancestors;
-use carillon_protocol::model::{ExternalEvent, NATIVE_INTENT};
+use carillon_protocol::model::{ExternalEvent, NATIVE_CONTEXT, NATIVE_INTENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -273,7 +273,7 @@ pub struct MessagePlan {
     pub(crate) content: String,
     pub(crate) attachments: Vec<SourceAttachment>,
     pub(crate) reference: Option<Reference>,
-    /// What opens the turn's text before the person's words: what was sent
+    /// The turn's context, read before the person's words: what was sent
     /// them directly since their last direct message, then the message this
     /// one replies to or forwards.
     pub(crate) quotes: Vec<String>,
@@ -533,13 +533,15 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
         "user_id": plan.user_id,
         "parent_channel_id": parent,
     });
-    let content = plan
-        .quotes
-        .iter()
-        .chain((!plan.content.is_empty()).then_some(&plan.content))
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let mut native = json!({
+        "origin": origin,
+        "discord": plan.native,
+        "guild_id": plan.guild_id,
+        "route_channel_id": plan.route_channel_id,
+    });
+    if !plan.quotes.is_empty() {
+        native[NATIVE_CONTEXT] = plan.quotes.join("\n\n").into();
+    }
     ResolvedMessage {
         event: ExternalEvent {
             event_id: plan.message_id.clone(),
@@ -549,13 +551,8 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
             channel_id: plan.route_channel_id.clone(),
             delivery_target_id: target,
             feedback_target_id: format!("{}:{}", plan.channel_id, plan.message_id),
-            content,
-            native: json!({
-                "origin": origin,
-                "discord": plan.native,
-                "guild_id": plan.guild_id,
-                "route_channel_id": plan.route_channel_id,
-            }),
+            content: plan.content,
+            native,
             attachments: None,
         },
         conversation_id,
