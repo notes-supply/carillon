@@ -82,9 +82,7 @@ impl RuntimeClient {
         let failure = response.json::<RuntimeFailure>().await.unwrap_or_default();
         Err(InboxFailure::Refused {
             status: status.as_u16(),
-            explanation: failure
-                .error
-                .filter(|explanation| !explanation.trim().is_empty()),
+            explanation: failure.error,
         })
     }
 

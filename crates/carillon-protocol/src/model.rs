@@ -749,6 +749,9 @@ pub struct TurnInspection {
     pub audience_id: String,
     pub user_id: String,
     pub input: String,
+    /// The interface's [`NATIVE_CONTEXT`] for the person's text, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     pub state: TurnState,
     pub output: Option<String>,
     pub providers: Value,

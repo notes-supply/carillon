@@ -376,12 +376,13 @@ mod tests {
 
     #[test]
     fn a_description_longer_than_the_menu_shows_ends_at_a_word() -> Result<(), String> {
-        let mut host = host(2);
+        let mut host = host(3);
         host.catalog.commands[0].description = Some(
             "Write a Carillon user extension whose pi-durable hooks guard tool calls, log answers or change model requests."
                 .to_owned(),
         );
         host.catalog.commands[1].description = Some("x".repeat(120));
+        host.catalog.commands[2].description = Some(format!(" {}", "x".repeat(120)));
         let reply = expect_reply(interact(&mut host, &command(None, true)))?;
         let shown: Vec<&str> = reply.components[0]["components"][0]["options"]
             .as_array()
@@ -397,6 +398,7 @@ mod tests {
             [
                 "Write a Carillon user extension whose pi-durable hooks guard tool calls, log answers or change…".to_owned(),
                 format!("{}…", "x".repeat(99)),
+                format!(" {}…", "x".repeat(98)),
             ]
         );
         Ok(())

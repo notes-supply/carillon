@@ -17,10 +17,12 @@ const SIGN = /(?<![\p{L}\p{N}_$])\$/gu;
 /** A character that continues a name, so a name followed by one is not that name. */
 const NAME_CHARACTER = /^[\p{L}\p{N}_-]/u;
 /**
- * Code as Discord shows it: a run of backticks, across lines, up to the next
- * run of as many. A run never closed is text.
+ * Code as Discord shows it, opened by the run of backticks in group 1: across
+ * lines up to the next run of as many, backslashes inside kept as they are.
+ * The other matches are text: a run never closed, and a backtick or backslash
+ * escaped outside code.
  */
-const CODE = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/gu;
+const CODE = /\\[\\`]|(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)|`+/gu;
 
 /**
  * The person's text with the skills it invokes before it. `/skill:<name>
@@ -60,7 +62,9 @@ function commanded(text: string, skills: readonly Skill[]): { skill: Skill; mess
 
 /** The skills `$<name>` invokes outside code, in the order first named. */
 function mentioned(text: string, skills: readonly Skill[]): Skill[] {
-  const prose = text.replace(CODE, (code) => " ".repeat(code.length));
+  const prose = text.replace(CODE, (match, run?: string) =>
+    run === undefined ? match : " ".repeat(match.length),
+  );
   const longestFirst = skills.toSorted((a, b) => b.name.length - a.name.length);
   return [...prose.matchAll(SIGN)].flatMap(({ index }) => {
     const skill = longestFirst.find(({ name }) => {
@@ -73,6 +77,12 @@ function mentioned(text: string, skills: readonly Skill[]): Skill[] {
 
 /** The skill as Pi's `/skill:name` places it before a message. */
 async function block(skill: Skill): Promise<string> {
-  const body = stripFrontmatter(await readFile(skill.filePath, "utf8")).trim();
+  const file = await readFile(skill.filePath, "utf8").catch((failure: unknown) => {
+    throw new ExplainedFailure(
+      422,
+      `The skill ${skill.name} could not be read: ${failure instanceof Error ? failure.message : String(failure)}`,
+    );
+  });
+  const body = stripFrontmatter(file).trim();
   return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 }

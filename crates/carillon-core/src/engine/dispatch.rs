@@ -97,6 +97,7 @@ impl Core {
                 status,
                 explanation,
             }) => {
+                let explanation = explanation.filter(|explanation| !explanation.trim().is_empty());
                 let error = explanation.as_ref().map_or_else(
                     || {
                         format!(

@@ -440,16 +440,19 @@ open the message with `/skill:weekly-review only the garden threads`. The
 agent receives the skill's text before your message, along with any files
 and images you attach. Only your own words count: the quote Carillon adds
 before a reply or forward ([Replies and forwards](#replies-and-forwards))
-invokes nothing, and `/skill:` still opens your words after it. In your
-words, `$` and the skill's exact name count anywhere outside code, such as
-an unquoted shell variable of that name or a line you quote with `>`. Code
-is what Discord shows as code, text between backticks or in a ```` ``` ````
-block; put a `$` name in backticks to keep it literal. Indented lines are
-not code in Discord, so a name there counts. `/skill:` with no name, or with
-a name the agent has no skill for, is refused with that reason, listing its
-skills. Without `disable-model-invocation: true`, the prompt also offers the
-skill, and the agent may use it unasked. Any skill can be called these
-ways, including the built-in `conversation-history`.
+invokes nothing, and `/skill:` must start your own words, even when a quote
+comes before them. In Discord's message box, press Escape before Enter after
+typing `/skill:…`, or Discord's command picker may choose another bot's
+`/skill` command instead of sending your message. In your words, `$` and the
+skill's exact name count anywhere outside code, such as an unquoted shell
+variable of that name or a line you quote with `>`. Code is what Discord
+shows as code, text between backticks or in a ```` ``` ```` block; put a `$`
+name in backticks to keep it literal. A backtick escaped as `` \` `` and
+indented lines are not code in Discord, so a name there counts. `/skill:`
+with no name, or with a name the agent has no skill for, is refused with that
+reason, listing its skills. Without `disable-model-invocation: true`, the
+prompt also offers the skill, and the agent may use it unasked. Any skill can
+be called these ways, including the built-in `conversation-history`.
 
 Pi also ships `carillon-hooks`, which only you invoke: `$carillon-hooks`
 gives the agent the rules for an extension of its own in

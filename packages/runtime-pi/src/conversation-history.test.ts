@@ -454,6 +454,25 @@ it("ends an opening at the person's words, before a later note, past every Caril
   );
 });
 
+it("opens a conversation that invokes a skill with the person's words, past the skill", async () => {
+  const agent = await fixture({
+    durable: true,
+    answers: Array.from({ length: 2 }, () => fauxAssistantMessage("Sorted.")),
+  });
+  const root = await agent.snapshot({
+    "skills/triage/SKILL.md":
+      "---\nname: triage\ndescription: Sorts.\n---\n\nSort the inbox.\n\nOldest first.\n",
+  });
+  await agent.ask("turn-1", "/skill:triage review the garden threads", {
+    resource_root: root,
+    native: { context: "In reply to your message, sent 2026-11-05T10:00:00+00:00:\n> Done." },
+  });
+  await agent.ask("turn-2", "$triage what now?", { resource_root: root, audience_id: "two" });
+  expect(
+    new Set(history(agent, query("FROM conversation_list")).map((row) => row["opening"])),
+  ).toEqual(new Set(["review the garden threads", "$triage what now?"]));
+});
+
 it("lists the conversations of over a thousand messages about as fast as it searches them", async () => {
   const turns = 600;
   const agent = await fixture({

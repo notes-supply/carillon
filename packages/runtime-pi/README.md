@@ -152,7 +152,8 @@ outside code in their own words, or by opening them with Pi's
 (`native.context`, such as Discord's quote of the message replied to) comes
 first and invokes nothing. Code is what Discord shows as code: a run of
 backticks up to the next run of as many, across lines, so fences and spans
-alike. Discord shows indented lines and `~~~` fences as plain text, and so
+alike, with backslashes inside kept as they are. Discord shows a backtick
+escaped as `` \` ``, indented lines and `~~~` fences as plain text, and so
 does this. Only a skill's exact name counts, as a word of its own, so
 `$HOME` or `$triaged` stays as written, but plain text such as an unquoted
 shell variable named like a skill invokes it; backticks keep it literal.
@@ -169,8 +170,9 @@ References are relative to <snapshot>/skills/triage.
 
 `$<name>` keeps the person's words whole after the blocks. `/skill:<name>
 text` leaves `text`. `/skill:` without a name, or with a name no skill has,
-refuses the turn with 422, listing the skills, and core sends that
-explanation as the turn's notice. Files and images go along as they are. The runtime expands the
+refuses the turn with 422, listing the skills, and so does invoking a skill
+whose `SKILL.md` can no longer be read; core sends that explanation as the
+turn's notice. Files and images go along as they are. The runtime expands the
 message as it admits the turn, so the message it keeps, and a restart
 replays, is the expanded one. Turns the runtime opens itself, for a
 schedule's run or a subagent's report, are not expanded.

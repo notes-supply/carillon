@@ -36,7 +36,7 @@ A hook registration names a task and its handlers: `{ task: "pi.tool", handlers:
 
 ## Examples
 
-Refuse force pushes. The guard reads each part of a bash command between `;`, `&`, `|` and line breaks as words. It refuses a part that starts with `git` and, after the word `push`, has `--force`, a group of short options with `f` such as `-f` or `-fu`, or a refspec starting with `+`. So `--force-with-lease` passes, and so does a push run through `sudo`, a script or an alias:
+Refuse force pushes. The guard matches words, and does not parse shell. It splits a bash command into parts at `;`, `&`, `|` and line breaks, and each part into words at spaces. It refuses a part whose first word is `git` when a word after the first `push` is `--force`, a group of short options with `f` such as `-f` or `-fu`, or starts with `+`. That `push` may come anywhere after `git`, so `git stash push -f` is refused too. Quotes and aliases are not read, so `git push "-f"` and `git push origin '+main'` pass, and so do `--force-with-lease` and a push run through `sudo` or a script:
 
 ```ts
 export default {

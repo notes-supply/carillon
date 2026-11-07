@@ -107,7 +107,7 @@ pub fn text(value: &str) -> String {
 }
 
 /// Bound free-form text, marking what was cut: after the last word that
-/// fits, or inside a word longer than the limit.
+/// fits, or inside the first word when none fits whole.
 pub fn shorten(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
@@ -115,7 +115,9 @@ pub fn shorten(value: &str, limit: usize) -> String {
     let kept: String = value.chars().take(limit - 1).collect();
     let next = value.chars().nth(limit - 1);
     let words = match kept.rfind(char::is_whitespace) {
-        Some(end) if !next.is_some_and(char::is_whitespace) => &kept[..end],
+        Some(end) if !next.is_some_and(char::is_whitespace) && !kept[..end].trim().is_empty() => {
+            &kept[..end]
+        }
         _ => &kept,
     };
     format!("{}…", words.trim_end())

@@ -330,6 +330,33 @@ async fn a_refused_turn_is_interrupted_with_only_the_runtimes_explanation() -> R
 }
 
 #[tokio::test]
+async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Result<()> {
+    let directory = tempdir()?;
+    let state = configured(&installation(directory.path())?);
+    let refused = ok(submit(&state, "one", "conversation").await)?;
+    let step = state
+        .core
+        .dispatch_next("test-runtime", &CancellationToken::new(), async |_| {
+            Err(InboxFailure::Refused {
+                status: 422,
+                explanation: Some(" \n".to_owned()),
+            })
+        })
+        .await?;
+    assert_eq!(step, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &refused.turn_id)?, TurnState::Interrupted);
+    let notices = delivered(&state)?;
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| notice.content.as_str())
+            .collect::<Vec<_>>(),
+        ["The agent's runtime refused that message without saying why."]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn context_the_interface_adds_reaches_the_runtime_apart_from_the_persons_words() -> Result<()>
 {
     let directory = tempdir()?;
@@ -341,7 +368,8 @@ async fn context_the_interface_adds_reaches_the_runtime_apart_from_the_persons_w
         content: String::new(),
         ..event(id, "conversation")
     };
-    ok(submit_event(&state, with("forward", json!({ NATIVE_CONTEXT: quote }))).await)?;
+    let forward =
+        ok(submit_event(&state, with("forward", json!({ NATIVE_CONTEXT: quote }))).await)?;
     for (id, native) in [
         ("bare", Value::Null),
         ("blank", json!({ NATIVE_CONTEXT: " \n" })),
@@ -355,9 +383,19 @@ async fn context_the_interface_adds_reaches_the_runtime_apart_from_the_persons_w
         );
     }
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert_eq!(lock(&runtime.handed).len(), 1);
     let handed = runtime.request(0)?;
     assert_eq!(handed.input, "");
     assert_eq!(handed.native[NATIVE_CONTEXT], quote);
+    let inspected = state
+        .core
+        .inspect_turn(&forward.turn_id)?
+        .context("no such turn")?;
+    assert_eq!(
+        (inspected.input.as_str(), inspected.context.as_deref()),
+        ("", Some(quote))
+    );
     Ok(())
 }
 

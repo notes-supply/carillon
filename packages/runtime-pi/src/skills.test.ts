@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { displayableExplanation } from "@carillon/runtime/failure";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -117,6 +117,8 @@ it.each([
   ["a fenced block", "Look:\n```sh\necho $triage\n```\nthanks"],
   ["a fence opened mid-line", "look: ```\n$triage\n```"],
   ["a code span across lines", "Explain `echo\n$triage\n` please"],
+  ["code after an escaped backtick", "Literal \\` then `$triage`"],
+  ["code after an escaped backslash", "Literal \\\\`$triage`"],
   ["a longer code span across lines", "Explain ``echo `x`\n$triage\n`` please"],
   ["a word", "pay US$triage or a$triage"],
   ["a doubled sign", "costs $$triage"],
@@ -136,6 +138,9 @@ it.each([
   ["after a fence on one line", "```echo hi``` and $triage"],
   ["after a fence of CRLF lines", "```sh\r\necho hi\r\n```\r\nPlease $triage"],
   ["after a backtick never closed", "it costs `5 and $triage"],
+  ["between escaped backticks", "Literal \\` please $triage \\`"],
+  ["after code ending in a backslash, which code keeps", "`C:\\` and $triage`"],
+  ["after another skill named in code", "`$hooks-howto` then $triage"],
   ["in indented text, which Discord does not show as code", "Example:\n\n    echo $triage"],
   ["in a tilde fence, which Discord does not show as code", "~~~\n$triage\n~~~"],
   ["in the person's own quote", "> use $triage\n>>> and more"],
@@ -163,6 +168,22 @@ it.each([
   expect(runtime.model.state.callCount).toBe(0);
 });
 
+it("refuses a skill whose file can no longer be read", async () => {
+  const runtime = await agent();
+  const root = await runtime.snapshot(resources);
+  await runtime.ask("turn-1", "hello", { resource_root: root });
+  await rm(join(root, "skills", "triage", "SKILL.md"));
+  const turn = runtime.turn("turn-2", "/skill:triage", { resource_root: root, audience_id: "two" });
+  await expect(runtime.runtime.turns.submit(turn)).rejects.toSatisfy(
+    (failure: Error & { status?: number }) =>
+      failure.status === 422 &&
+      displayableExplanation(failure.message)?.startsWith(
+        "The skill triage could not be read: ENOENT",
+      ) === true,
+  );
+  expect(runtime.model.state.callCount).toBe(1);
+});
+
 it("invokes an invocation-only skill that the prompt never offers", async () => {
   const runtime = await agent();
   const root = await runtime.snapshot(resources);
@@ -186,6 +207,7 @@ it("keeps a message's images and files as they are beside the invoked skill", as
   );
   await mkdir(join(store, "capture"), { recursive: true });
   await writeFile(join(store, "capture", "0"), picture);
+  await writeFile(join(store, "capture", "1"), "plain notes");
   await runtime.ask("turn-1", "$triage what is this?", {
     resource_root: root,
     attachment_root: store,
@@ -197,6 +219,13 @@ it("keeps a message's images and files as they are beside the invoked skill", as
         content_type: "image/png",
         sha256: "0".repeat(64),
       },
+      {
+        path: "capture/1",
+        name: "notes.txt",
+        size: "plain notes".length,
+        content_type: "text/plain",
+        sha256: "1".repeat(64),
+      },
     ],
   });
   const message = runtime.requests[0]?.findLast((item) => item.role === "user");
@@ -204,6 +233,7 @@ it("keeps a message's images and files as they are beside the invoked skill", as
     message?.role === "user" && typeof message.content !== "string" ? message.content : [];
   expect(input).toEqual({ type: "text", text: `${triage(root)}\n\n$triage what is this?` });
   expect(note?.type === "text" && note.text).toContain('name: "picture.png"');
+  expect(note?.type === "text" && note.text).toContain('name: "notes.txt"');
   expect(image).toEqual({ type: "image", data: picture.toString("base64"), mimeType: "image/png" });
   expect(rest).toEqual([]);
 });
@@ -277,8 +307,14 @@ it("refuses only the force pushes the hooks skill's guard names", async () => {
     "git push origin +main",
     "git -C . push -f",
     "cd repo && git push --force",
+    "git stash push -f",
   ];
-  const allowed = ["git push --force-with-lease origin main", "git push origin main; rm -f x"];
+  const allowed = [
+    "git push --force-with-lease origin main",
+    "git push origin main; rm -f x",
+    'git push "-f"',
+    "git push origin '+main'",
+  ];
   const commands: string[] = [];
   const bash = defineTool({
     name: "bash",
