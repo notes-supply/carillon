@@ -146,11 +146,18 @@ is unknown meanwhile, so schedules wait for it.
 
 ## Skills
 
-A message invokes a skill of its snapshot by naming `$<name>` anywhere
-outside code spans, fenced code and `>` quoted lines, or by opening with Pi's
-`/skill:<name>`. Only a skill's exact name counts, as a word of its own, so
-`$HOME` or `$triaged` stays as written. Each skill it invokes, once and in
-the order first named, precedes the message in Pi's own block:
+A person invokes a skill of the snapshot by naming `$<name>` anywhere
+outside code in their own words, or by opening them with Pi's
+`/skill:<name>`. Only the turn's `input` counts: the interface's context
+(`native.context`, such as Discord's quote of the message replied to) comes
+first and invokes nothing. Code is what Discord shows as code: a run of
+backticks up to the next run of as many, across lines, so fences and spans
+alike. Discord shows indented lines and `~~~` fences as plain text, and so
+does this. Only a skill's exact name counts, as a word of its own, so
+`$HOME` or `$triaged` stays as written, but plain text such as an unquoted
+shell variable named like a skill invokes it; backticks keep it literal.
+Each skill invoked, once and in the order first named, precedes the
+person's words in Pi's own block, after the context:
 
 ```text
 <skill name="triage" location="<snapshot>/skills/triage/SKILL.md">
@@ -160,9 +167,10 @@ References are relative to <snapshot>/skills/triage.
 </skill>
 ```
 
-`$<name>` keeps the message whole after the blocks. `/skill:<name> text`
-leaves `text`, and a name no skill has refuses the turn with 422, listing the
-skills. Files and images go along as they are. The runtime expands the
+`$<name>` keeps the person's words whole after the blocks. `/skill:<name>
+text` leaves `text`. `/skill:` without a name, or with a name no skill has,
+refuses the turn with 422, listing the skills, and core sends that
+explanation as the turn's notice. Files and images go along as they are. The runtime expands the
 message as it admits the turn, so the message it keeps, and a restart
 replays, is the expanded one. Turns the runtime opens itself, for a
 schedule's run or a subagent's report, are not expanded.

@@ -28,7 +28,8 @@ configured model badges, and their custom IDs.
   direct messages, one conversation each. `prepare_conversation` creates or
   adopts threads; one provider process owns the participation file.
   [`reference`](src/conversations/reference.rs) quotes the message a new
-  one replies to or forwards before its text, and
+  one replies to or forwards as the event's context, apart from its text,
+  and
   [`sent`](src/conversations/sent.rs) records, with participation, which
   agent had the bot send its latest messages and what agents sent each
   person directly, which their next direct message quotes.

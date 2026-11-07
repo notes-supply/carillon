@@ -76,7 +76,28 @@ it("places a skill the message invokes before it, as Pi's /skill:name does", asy
   expect(lines).toEqual([`${triage(root)}\n\nstart with\nthe oldest`]);
 });
 
-it("invokes each named skill once, in the order first named, and nothing in code or quotes", async () => {
+it("reads only the person's own text, placing the interface's context first", async () => {
+  const runtime = await agent(3);
+  const root = await runtime.snapshot(resources);
+  const context =
+    'In reply to a message from "$triage" (Discord user 201), sent 2026-11-05T14:03:27+00:00, with files ["$triage.png"]:\n> use $hooks-howto';
+  const native = { context, origin: { channel_id: "300" } };
+  await runtime.ask("turn-1", "/skill:triage review it", { resource_root: root, native });
+  await runtime.ask("turn-2", "What does it mean?", {
+    resource_root: root,
+    audience_id: "two",
+    native,
+  });
+  await runtime.ask("turn-3", "", { resource_root: root, audience_id: "three", native });
+  const [command, plain, bare] = runtime.requests.map(said);
+  expect(command).toEqual([`${context}\n\n${triage(root)}\n\nreview it`]);
+  expect(plain).toEqual([`${context}\n\nWhat does it mean?`]);
+  expect(bare).toEqual([context]);
+  const unknown = runtime.turn("turn-4", "/skill:triag", { resource_root: root, native });
+  await expect(runtime.runtime.turns.submit(unknown)).rejects.toMatchObject({ status: 422 });
+});
+
+it("invokes each named skill once, in the order first named, and nothing in code", async () => {
   const runtime = await agent(2);
   const root = await runtime.snapshot(resources);
   const message = "$hooks-howto then $triage, again $triage and $hooks-howto";
@@ -94,11 +115,13 @@ it.each([
   ["a code span", "Run `echo $triage` for me"],
   ["a longer code span", "Run ``echo `$triage` `` for me"],
   ["a fenced block", "Look:\n```sh\necho $triage\n```\nthanks"],
-  ["a tilde fence", "Look:\n~~~\n$triage\n~~~"],
-  ["a quoted line", "In reply to your message, sent now:\n> use $triage\n\nWhat did you mean?"],
+  ["a fence opened mid-line", "look: ```\n$triage\n```"],
+  ["a code span across lines", "Explain `echo\n$triage\n` please"],
+  ["a longer code span across lines", "Explain ``echo `x`\n$triage\n`` please"],
   ["a word", "pay US$triage or a$triage"],
   ["a doubled sign", "costs $$triage"],
   ["a longer word", "$triaged $triage-next $triage_x"],
+  ["a word of astral letters", "\u{10400}$triage $triage\u{10400}"],
   ["an unknown name", "echo $HOME and $PATH"],
   ["a skill command not at the start", "try /skill:triage"],
 ])("leaves a message naming a skill in %s as it is", async (_place, message) => {
@@ -108,23 +131,34 @@ it.each([
   expect(said(runtime.requests[0])).toEqual([message]);
 });
 
-it("still invokes a skill named after code ends", async () => {
+it.each([
+  ["after code ends", "```\n$triage\n```\n`$triage` and ($triage)"],
+  ["after a fence on one line", "```echo hi``` and $triage"],
+  ["after a fence of CRLF lines", "```sh\r\necho hi\r\n```\r\nPlease $triage"],
+  ["after a backtick never closed", "it costs `5 and $triage"],
+  ["in indented text, which Discord does not show as code", "Example:\n\n    echo $triage"],
+  ["in a tilde fence, which Discord does not show as code", "~~~\n$triage\n~~~"],
+  ["in the person's own quote", "> use $triage\n>>> and more"],
+])("invokes a skill named %s", async (_place, message) => {
   const runtime = await agent();
   const root = await runtime.snapshot(resources);
-  const message = "```\n$triage\n```\n`$triage` and ($triage)";
   await runtime.ask("turn-1", message, { resource_root: root });
   expect(said(runtime.requests[0])).toEqual([`${triage(root)}\n\n${message}`]);
 });
 
-it("refuses a skill command naming no skill, listing the skills", async () => {
+it.each([
+  ["/skill:triag the inbox", 'No skill is named "triag".'],
+  ["/skill:", "Name a skill after /skill:."],
+  ["/skill: triage", "Name a skill after /skill:."],
+])("refuses %j, listing the skills", async (message, refusal) => {
   const runtime = await agent();
   const root = await runtime.snapshot(resources);
-  const turn = runtime.turn("turn-1", "/skill:triag the inbox", { resource_root: root });
+  const turn = runtime.turn("turn-1", message, { resource_root: root });
   await expect(runtime.runtime.turns.submit(turn)).rejects.toMatchObject({ status: 422 });
   await expect(runtime.runtime.turns.submit(turn)).rejects.toSatisfy(
     (failure: Error) =>
       displayableExplanation(failure.message) ===
-      'No skill is named "triag". The skills are carillon-hooks, conversation-history, hooks-howto, triage.',
+      `${refusal} The skills are carillon-hooks, conversation-history, hooks-howto, triage.`,
   );
   expect(runtime.model.state.callCount).toBe(0);
 });
@@ -223,10 +257,28 @@ it("ships the hooks skill invocation-only, and invokes it", async () => {
   expect(text).toContain("## Hooks");
   expect(text).not.toContain("disable-model-invocation");
   expect(text.endsWith("</skill>\n\nguard my pushes")).toBe(true);
+  const { commands } = await runtime.runtime.commands({
+    interface_id: "discord-private",
+    agent_id: "default",
+    channel_id: "300",
+  });
+  const hooks = commands.find(({ name }) => name === "skill:carillon-hooks");
+  expect(hooks?.description?.length, "Discord's menu shows 100 characters").toBeLessThanOrEqual(
+    100,
+  );
 });
 
-it("refuses only the force push the hooks skill's guard names", async () => {
+it("refuses only the force pushes the hooks skill's guard names", async () => {
   const [guard = ""] = await examples();
+  const forced = [
+    "git push --force origin main",
+    "git push -f",
+    "git push -fu origin main",
+    "git push origin +main",
+    "git -C . push -f",
+    "cd repo && git push --force",
+  ];
+  const allowed = ["git push --force-with-lease origin main", "git push origin main; rm -f x"];
   const commands: string[] = [];
   const bash = defineTool({
     name: "bash",
@@ -242,11 +294,7 @@ it("refuses only the force push the hooks skill's guard names", async () => {
     builtIns: [defineExtension({ name: "coding", tools: [bash] })],
     answers: [
       fauxAssistantMessage(
-        [
-          fauxToolCall("bash", { command: "git push --force origin main" }),
-          fauxToolCall("bash", { command: "git push -f" }),
-          fauxToolCall("bash", { command: "git push --force-with-lease origin main" }),
-        ],
+        [...forced, ...allowed].map((command) => fauxToolCall("bash", { command })),
         { stopReason: "toolUse" },
       ),
       (context) => {
@@ -262,12 +310,9 @@ it("refuses only the force push the hooks skill's guard names", async () => {
     "settings.json": JSON.stringify({ extensions: ["coding", "extensions/guard.ts"] }),
   });
   await runtime.ask("turn-1", "push it", { resource_root: root });
-  expect(commands).toEqual(["git push --force-with-lease origin main"]);
-  expect(results).toEqual([
-    expect.stringContaining("Force pushes are off for this agent."),
-    expect.stringContaining("Force pushes are off for this agent."),
-    "ran",
-  ]);
+  expect(commands).toEqual(allowed);
+  const refused: unknown = expect.stringContaining("Force pushes are off for this agent.");
+  expect(results).toEqual([...forced.map(() => refused), ...allowed.map(() => "ran")]);
 });
 
 it("logs each response and asks ChatGPT models for longer answers, as the hooks skill shows", async () => {

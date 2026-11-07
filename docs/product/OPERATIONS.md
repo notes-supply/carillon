@@ -438,8 +438,15 @@ The next message brings it; nothing needs a restart. Call it in any message
 with `$weekly-review`, as in `$weekly-review only the garden threads`, or
 open the message with `/skill:weekly-review only the garden threads`. The
 agent receives the skill's text before your message, along with any files
-and images you attach. A `$` name in code or in a quote doesn't count, and
-`/skill:` with a name the agent has no skill for is refused, listing its
+and images you attach. Only your own words count: the quote Carillon adds
+before a reply or forward ([Replies and forwards](#replies-and-forwards))
+invokes nothing, and `/skill:` still opens your words after it. In your
+words, `$` and the skill's exact name count anywhere outside code, such as
+an unquoted shell variable of that name or a line you quote with `>`. Code
+is what Discord shows as code, text between backticks or in a ```` ``` ````
+block; put a `$` name in backticks to keep it literal. Indented lines are
+not code in Discord, so a name there counts. `/skill:` with no name, or with
+a name the agent has no skill for, is refused with that reason, listing its
 skills. Without `disable-model-invocation: true`, the prompt also offers the
 skill, and the agent may use it unasked. Any skill can be called these
 ways, including the built-in `conversation-history`.
@@ -609,7 +616,9 @@ the message's own ([Files](#files)); a reply's quote only names the files
 of the message it answers. A reply to a forward quotes the forwarded words
 and adds `forwarding a message`. A forward with no words of its own is
 answered where a message would be. Only the new message carries the quote:
-the conversation before it is unchanged.
+the conversation before it is unchanged. The quote is context, apart from
+your words, so a skill it names is not invoked
+([Skills you call by name](#skills-you-call-by-name)).
 
 ### Reactions
 

@@ -103,14 +103,20 @@ pub fn text(value: &str) -> String {
     if value.is_empty() {
         return "(unnamed)".to_owned();
     }
-    value.chars().take(TEXT_LIMIT).collect()
+    shorten(value, TEXT_LIMIT)
 }
 
-/// Bound free-form text, marking what was cut.
+/// Bound free-form text, marking what was cut: after the last word that
+/// fits, or inside a word longer than the limit.
 pub fn shorten(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
-        value.to_owned()
-    } else {
-        value.chars().take(limit - 1).chain(['…']).collect()
+        return value.to_owned();
     }
+    let kept: String = value.chars().take(limit - 1).collect();
+    let next = value.chars().nth(limit - 1);
+    let words = match kept.rfind(char::is_whitespace) {
+        Some(end) if !next.is_some_and(char::is_whitespace) => &kept[..end],
+        _ => &kept,
+    };
+    format!("{}…", words.trim_end())
 }

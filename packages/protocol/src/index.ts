@@ -14,13 +14,16 @@ export const ConversationQuerySchema = Type.Object({
 });
 export type ConversationQuery = Static<typeof ConversationQuerySchema>;
 
+/** The longest name of a runtime's command, in UTF-16 units. */
+export const COMMAND_NAME_LIMIT = 100;
+
 /**
  * One of the runtime's own commands (or user-invocable skills), as its
  * engine names and describes it. `hint` describes the arguments the engine
  * expects, when it says.
  */
 export const RuntimeCommandSchema = Type.Object({
-  name: Type.String({ minLength: 1, maxLength: 100 }),
+  name: Type.String({ minLength: 1, maxLength: COMMAND_NAME_LIMIT }),
   description: Type.Optional(Type.String({ minLength: 1 })),
   hint: Type.Optional(Type.String({ minLength: 1 })),
 });
@@ -33,12 +36,18 @@ export type CommandCatalog = Static<typeof CommandCatalogSchema>;
 
 /**
  * A turn's `native` metadata belongs to the interface that submitted it,
- * apart from one neutral key: `intent: "command"`, set by an interface
+ * apart from two neutral keys. `intent: "command"` is set by an interface
  * whose person invoked one of the runtime's own commands rather than
- * writing a message.
+ * writing a message. `context` is text the interface adds for the model to
+ * read before the person's own, such as a quote of the message they reply
+ * to; the turn's `input` is only what the person wrote.
  */
 export function turnIntent(native: unknown): "command" | undefined {
   return isRecord(native) && native["intent"] === "command" ? "command" : undefined;
+}
+
+export function turnContext(native: unknown): string | undefined {
+  return isRecord(native) && typeof native["context"] === "string" ? native["context"] : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -375,6 +375,34 @@ mod tests {
     }
 
     #[test]
+    fn a_description_longer_than_the_menu_shows_ends_at_a_word() -> Result<(), String> {
+        let mut host = host(2);
+        host.catalog.commands[0].description = Some(
+            "Write a Carillon user extension whose pi-durable hooks guard tool calls, log answers or change model requests."
+                .to_owned(),
+        );
+        host.catalog.commands[1].description = Some("x".repeat(120));
+        let reply = expect_reply(interact(&mut host, &command(None, true)))?;
+        let shown: Vec<&str> = reply.components[0]["components"][0]["options"]
+            .as_array()
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| option["description"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            shown,
+            [
+                "Write a Carillon user extension whose pi-durable hooks guard tool calls, log answers or change…".to_owned(),
+                format!("{}…", "x".repeat(99)),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn every_command_is_reachable_through_pages_and_runs_after_a_confirmation() -> Result<(), String>
     {
         let mut host = host(64);

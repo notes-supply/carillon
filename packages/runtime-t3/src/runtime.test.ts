@@ -68,16 +68,14 @@ const answered = (response: { readonly activity?: unknown }) => ({
   activity: undefined,
 });
 
-it("gives T3 the person's text as written, without the interface's metadata", async () => {
+it("gives T3 the interface's context, then the person's text as written, and no other metadata", async () => {
   const origin = { guild_id: "1", channel_id: "2", message_id: "4", user_id: "5" };
-  const first = execute(
-    turn("turn-1", "React to my message.", {
-      native: { origin, discord: { content: "raw provider payload", attachments: ["signed URL"] } },
-    }),
-  );
+  const discord = { content: "raw provider payload", attachments: ["signed URL"] };
+  const context = "In reply to your message, sent 2026-11-05T14:03:00+00:00:\n> Shall I?";
+  const first = execute(turn("turn-1", "Yes.", { native: { origin, discord, context } }));
   answer(await started("turn-1"), "Done.");
   await first;
-  expect(userTexts()).toEqual(["React to my message."]);
+  expect(userTexts()).toEqual([`${context}\n\nYes.`]);
 });
 
 it("keeps native commands verbatim even when origin metadata is present", async () => {

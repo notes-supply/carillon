@@ -23,7 +23,12 @@ import {
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { DEFAULT_IMAGE_LIMITS, type ImageProcessor } from "@earendil-works/pi-durable/tools";
-import type { ControlAction, OpenedTurn, TurnActivity } from "@carillon/protocol";
+import {
+  turnContext,
+  type ControlAction,
+  type OpenedTurn,
+  type TurnActivity,
+} from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
 import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
 import type { TurnRequest } from "@carillon/runtime/operations";
@@ -304,7 +309,12 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
             extensions,
             options.skillsDirectory,
           );
-    const input = await expandSkills(request.input, snapshot.skills);
+    const input = [
+      turnContext(request.native) ?? "",
+      await expandSkills(request.input, snapshot.skills),
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
     const { interface_id, channel_id, agent_id } = request;
     const choice = await options.models.forTurn({ interface_id, channel_id, agent_id });
     const model =

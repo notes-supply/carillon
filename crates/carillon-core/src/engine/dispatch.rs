@@ -5,7 +5,7 @@ use carillon_protocol::model::RuntimeTurnRequest;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::{ALTERED_ATTACHMENT, Core, UNREADABLE_ATTACHMENT, WorkerStep, interrupted};
+use super::{ALTERED_ATTACHMENT, Core, UNREADABLE_ATTACHMENT, WorkerStep};
 use crate::{
     attachments::Unusable,
     db::{QueuedTurn, Settlement},
@@ -121,7 +121,9 @@ impl Core {
         explanation: Option<&str>,
     ) -> Result<()> {
         let (runtime, turn_id) = (turn.runtime_id.clone(), turn.turn_id.clone());
-        let notice = interrupted(explanation);
+        let notice = explanation
+            .unwrap_or("The agent's runtime refused that message without saying why.")
+            .to_owned();
         self.blocking(move |core| {
             let failed = Settlement::Failed {
                 error: &error,

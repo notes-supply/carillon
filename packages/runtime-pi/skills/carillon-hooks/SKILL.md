@@ -1,12 +1,12 @@
 ---
 name: carillon-hooks
-description: Write a Carillon user extension whose pi-durable hooks guard tool calls, log answers or change model requests.
+description: Write a Carillon extension whose hooks guard tool calls, log answers or change model requests.
 disable-model-invocation: true
 ---
 
 # Carillon hooks
 
-A user extension is one module in the agent's resource root: `extensions/<file>.ts`, `.js` or `.mjs`, with no comma in the name. For the assistant that setup creates, the root is `$CARILLON_HOME/agents/default/`, by default `~/.carillon/agents/default/`. For another agent, it is the `resources` directory of its `[[agents]]` entry in `$CARILLON_HOME/carillon.toml`.
+A user extension is one module in the agent's resource root: `extensions/<file>.ts`, `.js` or `.mjs`, with no comma in the name. For the agent that setup creates, `assistant`, the root is `$CARILLON_HOME/agents/default/`, by default `~/.carillon/agents/default/`. For another agent, it is the `resources` directory of its `[[agents]]` entry in `$CARILLON_HOME/carillon.toml`.
 
 - The default export is a pi-durable extension object without a name: `hooks`, and optionally `tools`, `sections`, `wraps` and `tasks`. Its settings name, such as `extensions/guard.ts`, is its name.
 - It runs only once selected. Add it to the root's `settings.json`, keeping the default extensions: `{ "extensions": { "add": ["extensions/guard.ts"] } }`. `carillon settings --agent <agent> extensions=…` sets the whole list instead.
@@ -36,7 +36,7 @@ A hook registration names a task and its handlers: `{ task: "pi.tool", handlers:
 
 ## Examples
 
-Refuse force pushes:
+Refuse force pushes. The guard reads each part of a bash command between `;`, `&`, `|` and line breaks as words. It refuses a part that starts with `git` and, after the word `push`, has `--force`, a group of short options with `f` such as `-f` or `-fu`, or a refspec starting with `+`. So `--force-with-lease` passes, and so does a push run through `sudo`, a script or an alias:
 
 ```ts
 export default {
@@ -45,9 +45,16 @@ export default {
       task: "pi.tool",
       handlers: {
         beforeTool(call) {
-          const command = call.name === "bash" ? String(call.arguments.command ?? "") : "";
-          if (/\bgit\s+push\b.*\s(?:--force|-f)(?=\s|$)/u.test(command))
-            return { block: "Force pushes are off for this agent." };
+          if (call.name !== "bash") return undefined;
+          for (const part of String(call.arguments.command ?? "").split(/[;&|\n]/u)) {
+            const words = part.trim().split(/\s+/u);
+            const push = words.indexOf("push");
+            const forced = words
+              .slice(push + 1)
+              .some((word) => word === "--force" || /^-\w*f/u.test(word) || word.startsWith("+"));
+            if (words[0] === "git" && push > 0 && forced)
+              return { block: "Force pushes are off for this agent." };
+          }
           return undefined;
         },
       },

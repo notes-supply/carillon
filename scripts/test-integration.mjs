@@ -24,6 +24,7 @@ import { testFiles } from "./integration/files.mjs";
 import { availableBasePort } from "./integration/ports.mjs";
 import { embedText, seen } from "./integration/replies.mjs";
 import { testSettings } from "./integration/settings.mjs";
+import { testSkills } from "./integration/skills.mjs";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
@@ -383,7 +384,12 @@ try {
     configPath: configPath(),
     corePort: basePort,
   });
-  await testRuntimeCommands();
+  await testSkills({
+    interact,
+    requestSimulation,
+    event,
+    recent: () => run("--home", installation, "recent", "--limit", "100"),
+  });
   await testModuleOperations();
   await testProviderFailure();
   await testActivityVisibility();
@@ -519,34 +525,6 @@ function runtimeSetup(options, ...flags) {
 
 function configureModel(model, options = {}) {
   return runtimeSetup(options, "--configure", "--agent", "assistant", "--model", model);
-}
-
-/**
- * `/command` reaches the conversation's runtime through core: Pi lists the
- * agent's skills, and without a Discord connection a submission has nowhere
- * to be anchored, so nothing is sent.
- */
-async function testRuntimeCommands() {
-  const listed = await interact("305", null, "command", "command");
-  const labels = listed.components[0].components[0].options.map(({ label }) => label);
-  assert.ok(labels.includes("/skill:carillon-hooks"), labels.join(", "));
-  const before = run("--home", installation, "recent", "--limit", "100");
-  const refused = await interact(
-    "305",
-    null,
-    "command",
-    "command",
-    [],
-    [{ name: "invocation", type: 3, value: "skill:carillon-hooks" }],
-  );
-  assert.match(refused.content, /^`\/skill:carillon-hooks`: .*Discord connection/u);
-  assert.equal(
-    run("--home", installation, "recent", "--limit", "100"),
-    before,
-    "an unanchored submission is not accepted",
-  );
-  const outside = await interact("301", null, "command", "command");
-  assert.equal(outside.content, "Use /command inside a conversation with the agent.");
 }
 
 /**

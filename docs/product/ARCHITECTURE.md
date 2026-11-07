@@ -63,8 +63,8 @@ or no answer leaves it queued, to be handed over again in order; the runtime
 takes a turn it already holds as the same one. So does an answer that shows
 an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 2xx), which core logs as an error. The dispatcher backs off from 1 to 60
-seconds meanwhile. Any other answer interrupts the turn with the runtime's
-explanation. The runtime later settles the turn with
+seconds meanwhile. Any other answer interrupts the turn; nothing ran, so its
+notice is the runtime's explanation alone. The runtime later settles the turn with
 its own credential: answered, failed with an explanation it judged safe to
 show, steered into the turn running before it, or stopped. Steered and
 stopped deliver a silence the interface shows on the message instead of a
@@ -137,8 +137,9 @@ offered there. The provider downloads attachments after admission; uploads
 an answer's files with it, from core's copies; creates and adopts threads;
 and owns typing, reactions, mention-free delivery and slash command
 registration. A message that replies to or forwards another reaches core
-with a short quote of that message, from what Discord sent with it, before
-its own text; a forward's files are downloaded with it. The provider
+with a short quote of that message, from what Discord sent with it, as the
+event's context, apart from its own text; a forward's files are downloaded
+with it. The provider
 records, with its thread participation, which agent had the bot send each
 of its latest messages, answers with their files and tool sends alike, and
 what agents sent each person directly since that person's last direct
@@ -187,9 +188,12 @@ reported, not retried.
 
 ## Runtime providers
 
-A runtime receives a turn (agent, interface, audience, channel, input, captured
-resources, files by relative path and opaque interface metadata) and owns
-the conversation's native session. It keeps each turn core hands it at
+A runtime receives a turn (agent, interface, audience, channel, the person's
+input, captured resources, files by relative path and interface metadata)
+and owns the conversation's native session. The metadata is opaque apart
+from `intent: "command"`, for a command the person invoked, and `context`,
+text the interface adds for the model to read before the input, such as a
+quote. It keeps each turn core hands it at
 `POST /v1/inbox`, answering 202 once kept, and settles it later
 through core's `POST /v1/runtime/turns/{id}/outcome`. An answer may name
 files by absolute path. Before it records the answer, core copies each into
