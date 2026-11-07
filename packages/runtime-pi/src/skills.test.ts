@@ -60,15 +60,20 @@ function said(messages: readonly Message[] | undefined): string[] {
 }
 
 it("places a skill the message invokes before it, as Pi's /skill:name does", async () => {
-  const runtime = await agent(3);
+  const runtime = await agent(4);
   const root = await runtime.snapshot(resources);
   await runtime.ask("turn-1", "/skill:triage start with the oldest", { resource_root: root });
   await runtime.ask("turn-2", "/skill:triage", { resource_root: root, audience_id: "two" });
   await runtime.ask("turn-3", "Please use $triage.", { resource_root: root, audience_id: "three" });
-  const [slash, bare, mention] = runtime.requests.map(said);
+  await runtime.ask("turn-4", "/skill:triage\nstart with\nthe oldest", {
+    resource_root: root,
+    audience_id: "four",
+  });
+  const [slash, bare, mention, lines] = runtime.requests.map(said);
   expect(slash).toEqual([`${triage(root)}\n\nstart with the oldest`]);
   expect(bare).toEqual([triage(root)]);
   expect(mention).toEqual([`${triage(root)}\n\nPlease use $triage.`]);
+  expect(lines).toEqual([`${triage(root)}\n\nstart with\nthe oldest`]);
 });
 
 it("invokes each named skill once, in the order first named, and nothing in code or quotes", async () => {

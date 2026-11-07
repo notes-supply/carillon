@@ -212,7 +212,8 @@ Runtimes also answer:
   Tool output is never included.
 - `POST /v1/settings` with their settings for an agent or a channel, after
   applying a change when the request carries one.
-- `GET /v1/commands` with the engine's own commands. Invoking one sends its
+- `GET /v1/commands` with the engine's own commands: T3's composer
+  commands, or a Pi agent's skills as `skill:<name>`. Invoking one sends its
   text verbatim.
 - `GET /v1/restart`: whether restarting now loses anything.
 

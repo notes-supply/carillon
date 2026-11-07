@@ -416,6 +416,39 @@ the agent's `resources` replaces it.
 Pi has no web search of its own. [Add web search](WEB_SEARCH.md) gives it
 one as a skill that calls a search provider's API.
 
+### Skills you call by name
+
+A skill can also be one that only you invoke, such as a checklist you want
+followed exactly, kept out of the agent's prompt until you ask for it. Write
+it to `skills/<name>/SKILL.md` in the agent's `resources` directory,
+`CARILLON_HOME/agents/default/skills/weekly-review/SKILL.md` for the
+assistant setup creates:
+
+```markdown
+---
+name: weekly-review
+description: Review the week's conversations and list what is still open.
+disable-model-invocation: true
+---
+
+Read this week's conversations and list each question still open, newest first.
+```
+
+The next message brings it; nothing needs a restart. Call it in any message
+with `$weekly-review`, as in `$weekly-review only the garden threads`, or
+open the message with `/skill:weekly-review only the garden threads`. The
+agent receives the skill's text before your message, along with any files
+and images you attach. A `$` name in code or in a quote doesn't count, and
+`/skill:` with a name the agent has no skill for is refused, listing its
+skills. Without `disable-model-invocation: true`, the prompt also offers the
+skill, and the agent may use it unasked. Any skill can be called these
+ways, including the built-in `conversation-history`.
+
+Pi also ships `carillon-hooks`, which only you invoke: `$carillon-hooks`
+gives the agent the rules for an extension of its own in
+`extensions/<file>.ts`, and what each pi-durable hook can do, with examples
+that refuse a command, log each response and change a model request.
+
 The agent's Extensions setting selects more of Pi's built-in extensions.
 None of these is selected by default:
 
@@ -496,7 +529,10 @@ channel's page, which has neither line.
 `/command` runs one of the runtime's own commands or skills in the
 conversation, exactly as written:
 `/command invocation:compact keep the decisions` sends `/compact keep the
-decisions`. Plain `/command` lists them.
+decisions`. Plain `/command` lists them. On Pi they are the agent's skills,
+each listed as `skill:<name>`: `/command invocation:skill:weekly-review only
+the garden threads` sends `/skill:weekly-review only the garden threads`,
+which [calls the skill](#skills-you-call-by-name).
 
 Both commands are admitted like messages: only in the guild, from allowlisted
 users, in a routed channel or a thread under a thread route. `/settings`

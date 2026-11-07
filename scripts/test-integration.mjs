@@ -522,14 +522,14 @@ function configureModel(model, options = {}) {
 }
 
 /**
- * `/command` reaches the conversation's runtime through core: Pi lists no
- * commands, and without a Discord connection a submission has nowhere to be
- * anchored, so nothing is sent.
+ * `/command` reaches the conversation's runtime through core: Pi lists the
+ * agent's skills, and without a Discord connection a submission has nowhere
+ * to be anchored, so nothing is sent.
  */
 async function testRuntimeCommands() {
   const listed = await interact("305", null, "command", "command");
-  assert.match(listed.content, /^The agent's runtime lists no commands here\./u);
-  assert.deepEqual(listed.components, []);
+  const labels = listed.components[0].components[0].options.map(({ label }) => label);
+  assert.ok(labels.includes("/skill:carillon-hooks"), labels.join(", "));
   const before = run("--home", installation, "recent", "--limit", "100");
   const refused = await interact(
     "305",
@@ -537,9 +537,9 @@ async function testRuntimeCommands() {
     "command",
     "command",
     [],
-    [{ name: "invocation", type: 3, value: "compact" }],
+    [{ name: "invocation", type: 3, value: "skill:carillon-hooks" }],
   );
-  assert.match(refused.content, /^`\/compact`: .*Discord connection/u);
+  assert.match(refused.content, /^`\/skill:carillon-hooks`: .*Discord connection/u);
   assert.equal(
     run("--home", installation, "recent", "--limit", "100"),
     before,
