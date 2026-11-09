@@ -476,10 +476,8 @@ carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
 grep -Fx "It serves the custom Discord module $EXAMPLE: /settings, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
 # The update expects the providers the release bundles and keeps the rest of
-# the registry as written, a separately installed provider's version included.
+# the registry as written.
 sed -i 's/^version = "\(.*\)"$/version = "\1" # expected release/' "$INSTALLATION/carillon.toml"
-printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = "runtime"\nversion = "9.8.7" # its own release\nurl = "http://127.0.0.1:1"\ntoken_hash = "%s"\nenabled = false\n' \
-  "$(printf '%064d' 0)" >>"$INSTALLATION/carillon.toml"
 snapshot
 sed -i 's/^version = "[^"]*" # expected release$/version = "0.0.1-previous" # expected release/' \
   "$INSTALLATION/carillon.toml"
@@ -511,12 +509,19 @@ carillon stop >/dev/null
 rm -f "$TRACE"
 FINAL=$(release_archive final)
 pack "$FINAL" "$TEST_ROOT/final.tar.gz"
+# A separately installed provider keeps the version it expects.
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = "runtime"\nversion = "9.8.7" # its own release\nurl = "http://127.0.0.1:1"\ntoken_hash = "%s"\nenabled = false\n' \
+  "$(printf '%064d' 0)" >>"$INSTALLATION/carillon.toml"
+snapshot
 carillon update "$TEST_ROOT/final.tar.gz" | grep -F 'services remain stopped as before' >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user daemon-reload' '--user enable carillon.target'
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = final ]
 stopped
 assert_preserved
+cp -p "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
+snapshot
 printf 'update passed: running and stopped states restored, configuration and state preserved\n'
 
 # Registration failure after application exchange: say what changed, keep the
