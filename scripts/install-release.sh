@@ -11,9 +11,9 @@ usage() {
 
 # Setup without the Discord options asks for everything at the terminal
 # (`carillon setup`); with them it writes the registry and Discord settings
-# from these arguments and asks nothing. An update only publishes the
-# application and service definitions; it never rewrites configuration,
-# credentials or state.
+# from these arguments and asks nothing. An update publishes the application
+# and service definitions and expects the providers it bundles in
+# carillon.toml; it rewrites no other configuration, credentials or state.
 MODE=setup
 CHECK=0
 case "$#:$*" in
@@ -264,6 +264,9 @@ else
   APP_NEW=
 fi
 sync -f -- "$CARILLON_HOME"
+# After the exchange, so a failed one leaves the registry as the previous
+# application expects it.
+[ "$MODE" = setup ] || "$APP/bin/carillon" --home "$CARILLON_HOME" init >/dev/null
 if [ "$MODE" = setup ]; then
   # Guided setup names its own token file; otherwise the token goes here by hand.
   [ "$GUIDED" -eq 1 ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
@@ -316,7 +319,7 @@ if install_entry_point; then
 fi
 
 if [ "$MODE" = update ]; then
-  printf '%s\n' "Published this release at $APP and registered its user units; configuration and state were not changed."
+  printf '%s\n' "Published this release at $APP and registered its user units; carillon.toml expects the providers it bundles, and other configuration and state were not changed."
   exit 0
 fi
 if [ "$GUIDED" -eq 1 ]; then

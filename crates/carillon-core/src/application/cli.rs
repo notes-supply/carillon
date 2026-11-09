@@ -93,12 +93,13 @@ struct Drained {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new installation, with Carillon's assistant on Pi. Over a
-    /// `carillon.toml` carried from another installation, create the database
-    /// it lacks and expect the providers this release bundles.
+    /// Create a new installation, with Carillon's assistant on Pi. Over an
+    /// existing `carillon.toml`, expect the providers this release bundles
+    /// and create the database it lacks.
     Init {
+        /// The assistant's folder, required to create an installation.
         #[arg(long)]
-        workspace: PathBuf,
+        workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
     },
@@ -149,7 +150,8 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Replace the application from a local release archive, keeping
+    /// Replace the application from a local release archive, expect the
+    /// providers it bundles in `carillon.toml`, keep the rest of the
     /// configuration and state, and restore the previous running state.
     /// Running services stop once the release is checked and core has
     /// drained, as for `restart`.
@@ -263,7 +265,10 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
-        } => println!("{}", init(&home()?, &workspace, base_port)?.display()),
+        } => println!(
+            "{}",
+            init(&home()?, workspace.as_deref(), base_port)?.display()
+        ),
         Command::Setup {
             workspace,
             base_port,

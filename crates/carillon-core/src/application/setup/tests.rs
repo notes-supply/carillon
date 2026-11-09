@@ -6,8 +6,8 @@ use std::{
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
-    Options, Runtime, SavedT3, initialize, registered_runtimes, run, saved_t3, set_up_t3, setup,
-    start_fresh,
+    Options, Runtime, SavedT3, adopt_release, initialize, registered_runtimes, run, saved_t3,
+    set_up_t3, setup,
 };
 use crate::application::admin::{ASSISTANT, assistant, backup, register_runtime, set_provider};
 
