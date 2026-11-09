@@ -573,7 +573,7 @@ mkdir -m 0700 "$INSTALLATION"
 cp -a "$TEST_ROOT/previous/carillon.toml" "$TEST_ROOT/previous/providers" \
   "$TEST_ROOT/previous/credentials" "$TEST_ROOT/previous/agents" \
   "$TEST_ROOT/previous/modules" "$INSTALLATION/"
-sed -i 's/^version = .*/version = "0.0.1-previous"/' "$INSTALLATION/carillon.toml"
+sed -i 's/^version = "[^"]*"/version = "0.0.1-previous"/' "$INSTALLATION/carillon.toml"
 install_release "$BASE_PORT" >"$TEST_ROOT/fresh.log"
 cmp "$TEST_ROOT/previous/carillon.toml" "$INSTALLATION/carillon.toml"
 carillon start >"$TEST_ROOT/fresh-start.log"
