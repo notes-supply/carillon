@@ -53,6 +53,8 @@ export interface PiRuntimeOptions {
   /** An agent's storage; its SQLite file by default. */
   readonly storage?: (agentId: string) => Promise<Storage>;
   readonly clock?: Clock;
+  /** How long a user extension may take to import. */
+  readonly importDeadlineMs?: number;
 }
 
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
@@ -82,6 +84,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           defaults: options.defaults,
           mcp: options.mcp ?? [],
           ...(options.clock === undefined ? {} : { clock: options.clock }),
+          ...(options.importDeadlineMs === undefined
+            ? {}
+            : { importDeadlineMs: options.importDeadlineMs }),
         }),
       );
   } catch (failure) {

@@ -5,15 +5,15 @@ import {
   type Message,
   type SystemMessage,
 } from "@earendil-works/pi-ai";
-import { displayableExplanation } from "@carillon/runtime/failure";
 import { defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
+import { spawnSync } from "node:child_process";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ATTACH } from "./answers.ts";
-import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
+import { heldAnswer, pauseTool, startFixture, textsOf, type Fixture } from "./fixture.ts";
 import { BUILT_IN_SKILLS } from "./resources.ts";
 
 const fixtures: Fixture[] = [];
@@ -171,8 +171,45 @@ it("loads a user extension its snapshot lists, also for an answer resumed after 
   });
 });
 
+/** A user extension whose tool says it ran, as the last resources that loaded select it. */
+const previous = {
+  "extensions/previous.js": `export default { tools: [{ name: "previous", description: "Says it ran.", parameters: { type: "object", properties: {} }, execute: async () => ({ output: [{ type: "text", text: "previous ran" }] }) }] };`,
+  "settings.json": JSON.stringify({ extensions: ["extensions/previous.js"] }),
+};
+
+/**
+ * Scripts an answer per message that first calls `previous`, keeping the
+ * person's text the model read and the tool's results.
+ */
+function callingPrevious(count: number) {
+  const read: string[] = [];
+  const results: string[] = [];
+  const answers = Array.from({ length: count }, (): FauxResponseStep[] => [
+    (context) => {
+      read.push(textsOf(context.messages.findLast(({ role }) => role === "user")).join("\n\n"));
+      return fauxAssistantMessage(fauxToolCall("previous", {}), { stopReason: "toolUse" });
+    },
+    (context) => {
+      results.push(...textsOf(context.messages.at(-1)));
+      return fauxAssistantMessage(`Answer ${String(results.length)}.`);
+    },
+  ]).flat();
+  return { read, results, answers };
+}
+
+const NOTE = "[Carillon] Your resources did not load";
+
 it.each([
-  ["settings that are not JSON", { "settings.json": "{" }, "is not valid JSON"],
+  [
+    "settings that are not JSON",
+    { "settings.json": "{" },
+    "The agent's settings.json is not valid JSON: ",
+  ],
+  [
+    "a setting of the wrong type",
+    { "settings.json": JSON.stringify({ busy: "sometimes" }) },
+    "invalid at /busy",
+  ],
   [
     "a setting it does not know",
     { "settings.json": JSON.stringify({ defaultTools: ["bash"] }) },
@@ -269,15 +306,150 @@ it.each([
     userExtension('{ tasks: [{ definition: { name: "carillon.delivery" } }] }'),
     "cannot be installed: Task carillon.delivery of extension extensions/user.js is already installed",
   ],
-])("refuses a turn whose snapshot has %s", async (_name, files, message) => {
-  const agent = await fixture({ answers: [fauxAssistantMessage("unused")] });
-  const root = await agent.snapshot(files);
-  const turn = agent.turn("turn-1", "hello", { resource_root: root });
-  await expect(agent.runtime.turns.submit(turn)).rejects.toSatisfy(
-    (failure: Error) => displayableExplanation(failure.message)?.includes(message) === true,
+  [
+    "a user extension that does not parse",
+    {
+      "extensions/broken.ts": "export default {\n  hooks: [\n};\n",
+      "settings.json": JSON.stringify({ extensions: ["extensions/broken.ts"] }),
+    },
+    "extensions/broken.ts:3:1",
+  ],
+  [
+    "a user extension that throws as it is imported",
+    {
+      "extensions/throws.ts":
+        'const ready = false;\nif (!ready) throw new Error("not ready");\nexport default {};\n',
+      "settings.json": JSON.stringify({ extensions: ["extensions/throws.ts"] }),
+    },
+    "could not be loaded: not ready\nat extensions/throws.ts:2:",
+  ],
+  [
+    "a user extension whose import never settles",
+    {
+      "extensions/waits.ts": "await new Promise(() => undefined);\nexport default {};\n",
+      "settings.json": JSON.stringify({ extensions: ["extensions/waits.ts"] }),
+    },
+    "extensions/waits.ts could not be loaded: its module did not finish importing within 0.2 seconds",
+  ],
+  ["a SYSTEM.md it cannot read", { "SYSTEM.md": "Be careful." }, "EACCES"],
+])(
+  "answers a message whose resources have %s on the last that loaded, telling the agent why",
+  async (_name, files, problem) => {
+    const { read, results, answers } = callingPrevious(2);
+    const agent = await fixture({ answers, importDeadlineMs: 200 });
+    await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(previous) });
+    const root = await agent.snapshot(files);
+    await chmod(join(root, "SYSTEM.md"), 0).catch(() => undefined);
+    expect(await agent.ask("turn-2", "fix it", { resource_root: root })).toBe("Answer 2.");
+    expect(results).toEqual(["previous ran", "previous ran"]);
+    expect(read[0]).toBe("hello");
+    expect(read[1]).toContain(problem);
+    expect(read[1]).toMatch(
+      /^\[Carillon\] Your resources did not load, so you run on your previous resources until you fix them\.\n\n/u,
+    );
+    expect(read[1]).toMatch(/\n\nfix it$/u);
+    expect(read[1]).not.toContain(root);
+  },
+);
+
+it("names each build error at its place under Bun, which runs the packaged runtime", async () => {
+  const agent = await fixture();
+  const root = await agent.snapshot({
+    "extensions/broken.ts": 'export default {\n  hooks: [\n    { task: "x" \n  ]\n;\n',
+    "settings.json": JSON.stringify({ extensions: ["extensions/broken.ts"] }),
+  });
+  const script = `
+    import { defineExtension } from "@earendil-works/pi-durable";
+    import { loadSnapshot } from ${JSON.stringify(join(import.meta.dirname, "resources.ts"))};
+    const loaded = await loadSnapshot(process.argv[1], process.argv[1], { carillon: defineExtension({ name: "carillon" }), builtIn: [], defaults: [], importDeadlineMs: 5000 }, process.argv[1]);
+    console.log(loaded.problem);
+  `;
+  const bun = spawnSync("bun", ["-e", script, root], {
+    cwd: import.meta.dirname,
+    encoding: "utf8",
+  });
+  expect(bun.stderr).toBe("");
+  expect(bun.stdout).toBe(
+    [
+      'The agent\'s extension extensions/broken.ts could not be loaded: 3 errors building "extensions/broken.ts"',
+      'extensions/broken.ts:4:3: Expected "}" but found "]"',
+      'extensions/broken.ts:5:1: Expected "]" but found ";"',
+      'extensions/broken.ts:5:2: Expected "}" but found end of file',
+      "",
+    ].join("\n"),
   );
-  await expect(agent.runtime.turns.submit(turn)).rejects.toMatchObject({ status: 422 });
-  expect(agent.model.state.callCount).toBe(0);
+});
+
+it("keeps answering on the last resources that loaded across a restart, until a message brings ones that load", async () => {
+  const { read, results, answers } = callingPrevious(3);
+  let agent = await fixture({
+    durable: true,
+    answers: [...answers, fauxAssistantMessage("Fixed.")],
+  });
+  await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(previous) });
+  const broken = await agent.snapshot({ ...previous, "settings.json": "{" });
+  await agent.ask("turn-2", "fix it", { resource_root: broken });
+  agent = await agent.restart();
+  fixtures.splice(0, 1, agent);
+  await agent.ask("turn-3", "still?", { resource_root: broken });
+  expect(results).toEqual(["previous ran", "previous ran", "previous ran"]);
+  expect(read.map((text) => text.startsWith(NOTE))).toEqual([false, true, true]);
+  const fixed = await agent.snapshot({
+    "extensions/fixed.js":
+      'export default { sections: [{ key: "fixed", render: () => "Fixed for good." }] };',
+    "settings.json": JSON.stringify({ extensions: ["extensions/fixed.js"] }),
+  });
+  const { requests, answers: last } = recording(1);
+  agent.model.setResponses(last);
+  await agent.ask("turn-4", "better?", { resource_root: fixed });
+  const [request = []] = requests;
+  expect(textsOf(request.findLast(({ role }) => role === "user"))).toEqual(["better?"]);
+  expect(sections(request)).toMatchObject({ fixed: "<fixed>\nFixed for good.\n</fixed>" });
+});
+
+it("answers a message whose resources do not load on the default extensions when none loaded before", async () => {
+  const { requests, answers } = recording(1);
+  const agent = await fixture({ builtIns: [echo], defaults: ["echo"], answers });
+  const root = await agent.snapshot({ "settings.json": JSON.stringify({ busy: 1 }) });
+  expect(await agent.ask("turn-1", "hello", { resource_root: root })).toBe("Answer 1.");
+  const [request = []] = requests;
+  expect(textsOf(request.findLast(({ role }) => role === "user"))).toEqual([
+    "[Carillon] Your resources did not load, so you run on the default extensions until you fix them.\n\nThe agent's settings.json is invalid at /busy: must be equal to one of the allowed values.\n\nhello",
+  ]);
+  expect(
+    systems(request).flatMap(({ toolsAdded = [] }) => toolsAdded.map(({ name }) => name)),
+  ).toEqual([ATTACH.name, "echo"]);
+});
+
+it("answers other agents while one waits for an import that never settles, and logs its problem once", async () => {
+  const errors = vi.spyOn(console, "error");
+  const agent = await fixture({
+    agents: ["default", "other"],
+    importDeadlineMs: 1_000,
+    answers: [
+      fauxAssistantMessage("Other."),
+      fauxAssistantMessage("Waited."),
+      fauxAssistantMessage("Again."),
+    ],
+  });
+  const root = await agent.snapshot({
+    "extensions/waits.ts": "await new Promise(() => undefined);\nexport default {};\n",
+    "settings.json": JSON.stringify({ extensions: ["extensions/waits.ts"] }),
+  });
+  const waiting = agent.runtime.turns.submit(
+    agent.turn("turn-1", "hello", { resource_root: root }),
+  );
+  expect(await agent.ask("turn-2", "hi", { agent_id: "other", audience_id: "other" })).toBe(
+    "Other.",
+  );
+  await waiting;
+  expect(await agent.outcome("turn-1")).toMatchObject({ output: "Waited." });
+  expect(await agent.ask("turn-3", "again", { resource_root: root })).toBe("Again.");
+  expect(
+    errors.mock.calls.filter(([line]) =>
+      String(line).includes("extensions/waits.ts could not be loaded"),
+    ),
+  ).toHaveLength(1);
 });
 
 it("serves with its built-in extensions when the recorded snapshot no longer loads", async () => {

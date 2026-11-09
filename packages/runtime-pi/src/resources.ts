@@ -26,7 +26,7 @@ import { settingRevision } from "@carillon/runtime/settings";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ATTACH } from "./answers.ts";
@@ -36,7 +36,7 @@ import { ConversationInfo } from "./documents.ts";
 /** What a message does when it arrives while the agent answers in its conversation. */
 const BUSY = ["queue", "steer", "interrupt"] as const;
 type Busy = (typeof BUSY)[number];
-const DEFAULT_BUSY: Busy = "steer";
+export const DEFAULT_BUSY: Busy = "steer";
 
 export const BUILT_IN_SKILLS = new URL("../skills/", import.meta.url);
 
@@ -115,22 +115,55 @@ export interface Snapshot {
   };
 }
 
-/** The extensions the runtime brings, and those settings select by default. */
+/** A snapshot that cannot be used, and why, with its paths relative to its root. */
+export interface Unloadable {
+  readonly root: string;
+  readonly problem: string;
+}
+
+/** The extensions the runtime brings, those settings select by default, and how long a user extension may take to import. */
 export interface Extensions {
   /** The runtime's own extension, always selected. */
   readonly carillon: Extension;
   /** The built-in extensions, named as settings select them. */
   readonly builtIn: readonly Extension[];
   readonly defaults: readonly string[];
+  readonly importDeadlineMs: number;
 }
+
+/**
+ * Core gives a runtime 10 seconds to take a turn before handing it over
+ * again, and the oldest turn it cannot hand over holds back the runtime's
+ * others. Half of that leaves admission room for its other work.
+ */
+export const IMPORT_DEADLINE_MS = 5_000;
 
 /**
  * Reads a snapshot core captured: settings, prompt files and the listed
  * user extensions. Its skills join the runtime's `builtInSkills`, replacing
  * any of the same name. Settings or a module that cannot be used, also
- * beside the runtime's own extensions, refuse the turn that brought them.
+ * beside the runtime's own extensions, make it unloadable.
  */
 export async function loadSnapshot(
+  root: string,
+  workspace: string,
+  extensions: Extensions,
+  builtInSkills: string,
+): Promise<Snapshot | Unloadable> {
+  try {
+    return await readSnapshot(root, workspace, extensions, builtInSkills);
+  } catch (failure) {
+    const text = failure instanceof Error ? failure.message : String(failure);
+    return {
+      root,
+      problem: stripVTControlCharacters(text)
+        .replaceAll(`${pathToFileURL(root).href}/`, "")
+        .replaceAll(`${root}/`, ""),
+    };
+  }
+}
+
+async function readSnapshot(
   root: string,
   workspace: string,
   extensions: Extensions,
@@ -143,7 +176,9 @@ export async function loadSnapshot(
     extensions.builtIn.map((extension) => extension.name),
   );
   const modules = await Promise.all(
-    selected.filter(isUserExtension).map((name) => importExtension(root, name)),
+    selected
+      .filter(isUserExtension)
+      .map((name) => importExtension(root, name, extensions.importDeadlineMs)),
   );
   const trial = createRegistry();
   for (const extension of [extensions.carillon, ...extensions.builtIn]) trial.install(extension);
@@ -151,9 +186,9 @@ export async function loadSnapshot(
     try {
       trial.install(module);
     } catch (failure) {
-      throw new ExplainedFailure(
-        422,
+      throw new Error(
         `The agent's extension ${module.name} cannot be installed: ${failure instanceof Error ? failure.message : String(failure)}`,
+        { cause: failure },
       );
     }
   const system = await readFile(join(root, "SYSTEM.md"), "utf8").catch((failure: unknown) => {
@@ -437,8 +472,11 @@ async function readSettings(path: string): Promise<Settings> {
   let settings: unknown;
   try {
     settings = JSON.parse(text);
-  } catch {
-    throw new ExplainedFailure(422, "The agent's settings.json is not valid JSON.");
+  } catch (failure) {
+    throw new ExplainedFailure(
+      422,
+      `The agent's settings.json is not valid JSON: ${failure instanceof Error ? failure.message : String(failure)}`,
+    );
   }
   if (!Check(SettingsSchema, settings)) {
     const first = mismatch(SettingsSchema, settings);
@@ -468,27 +506,41 @@ function refuseUnknown(names: readonly string[], builtIn: readonly string[]): vo
   for (const name of names) {
     if (builtIn.includes(name) || isUserExtension(name)) continue;
     if (name.startsWith("mcp:"))
-      throw new ExplainedFailure(
-        422,
+      throw new Error(
         `The agent's settings.json selects ${name}, but the Pi runtime's mcp.json configures no server ${name.slice(4)}.`,
       );
-    throw new ExplainedFailure(
-      422,
+    throw new Error(
       `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor a .js, .mjs or .ts file in extensions/ whose name has no comma.`,
     );
   }
 }
 
-/** A user extension: its module's default export, a pi-durable extension object. */
-async function importExtension(root: string, name: string): Promise<Extension> {
+/**
+ * A user extension: its module's default export, a pi-durable extension
+ * object. Its top-level code runs in the runtime's process, and a module
+ * still importing after `deadlineMs` cannot be used.
+ */
+async function importExtension(root: string, name: string, deadlineMs: number): Promise<Extension> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `its module did not finish importing within ${String(deadlineMs / 1000)} seconds`,
+        ),
+      );
+    }, deadlineMs);
+  });
   let module: unknown;
   try {
-    module = await import(pathToFileURL(join(root, name)).href);
+    module = await Promise.race([import(pathToFileURL(join(root, name)).href), late]);
   } catch (failure) {
-    throw new ExplainedFailure(
-      422,
-      `The agent's extension ${name} could not be loaded: ${failure instanceof Error ? failure.message : String(failure)}`,
+    throw new Error(
+      `The agent's extension ${name} could not be loaded: ${importFailure(failure, root)}`,
+      { cause: failure },
     );
+  } finally {
+    clearTimeout(timer);
   }
   const extension =
     typeof module === "object" && module !== null && "default" in module
@@ -496,12 +548,38 @@ async function importExtension(root: string, name: string): Promise<Extension> {
       : undefined;
   if (!isExtensionBody(extension)) {
     const first = mismatch(ExtensionBodySchema, extension);
-    throw new ExplainedFailure(
-      422,
+    throw new Error(
       `The agent's extension ${name} must export a pi-durable extension object as its default export${first === undefined || first.instancePath.length === 0 ? "" : `: ${first.instancePath} ${first.message}`}.`,
     );
   }
   return { ...extension, name };
+}
+
+/** Where Bun's build errors point, which only their `position` holds. */
+const PositionSchema = Type.Object({
+  file: Type.String(),
+  line: Type.Number(),
+  column: Type.Number(),
+});
+
+/**
+ * Why a module did not import: each of Bun's build errors at its place, or
+ * the error with the stack frames in the snapshot's files.
+ */
+function importFailure(failure: unknown, root: string): string {
+  if (failure instanceof AggregateError)
+    return [failure.message, ...failure.errors.map((error) => importFailure(error, root))].join(
+      "\n",
+    );
+  if (!(failure instanceof Error)) return String(failure);
+  const position = "position" in failure ? failure.position : undefined;
+  if (Check(PositionSchema, position))
+    return `${position.file}:${String(position.line)}:${String(position.column)}: ${failure.message}`;
+  const frames = (failure.stack ?? "")
+    .split("\n")
+    .filter((line) => /^\s+at /u.test(line) && line.includes(root))
+    .map((line) => line.trim());
+  return [failure.message, ...frames].join("\n");
 }
 
 /** Whether settings name a user extension, a module of the snapshot, rather than a built-in. */
