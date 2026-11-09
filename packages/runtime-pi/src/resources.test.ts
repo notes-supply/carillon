@@ -339,7 +339,7 @@ it.each([
     const agent = await fixture({ answers, importDeadlineMs: 200 });
     await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(previous) });
     const root = await agent.snapshot(files);
-    await chmod(join(root, "SYSTEM.md"), 0).catch(() => undefined);
+    if (Object.hasOwn(files, "SYSTEM.md")) await chmod(join(root, "SYSTEM.md"), 0);
     expect(await agent.ask("turn-2", "fix it", { resource_root: root })).toBe("Answer 2.");
     expect(results).toEqual(["previous ran", "previous ran"]);
     expect(read[0]).toBe("hello");
@@ -414,7 +414,7 @@ it("answers a message whose resources do not load on the default extensions when
   expect(await agent.ask("turn-1", "hello", { resource_root: root })).toBe("Answer 1.");
   const [request = []] = requests;
   expect(textsOf(request.findLast(({ role }) => role === "user"))).toEqual([
-    "[Carillon] Your resources did not load, so you run on the default extensions until you fix them.\n\nThe agent's settings.json is invalid at /busy: must be equal to one of the allowed values.\n\nhello",
+    "[Carillon] Your resources did not load, so you run on Carillon's defaults until you fix them.\n\nThe agent's settings.json is invalid at /busy: must be equal to one of the allowed values.\n\nhello",
   ]);
   expect(
     systems(request).flatMap(({ toolsAdded = [] }) => toolsAdded.map(({ name }) => name)),

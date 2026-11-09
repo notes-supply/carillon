@@ -376,7 +376,8 @@ against the owner. The root must exist; its files are optional, and symlinks
 or special files are refused. An agent without resources captures none.
 
 A runtime decides which captured copy a turn uses. The Pi runtime uses the
-latest one it admitted for the agent: an edit applies to the agent's next
+latest one it admitted for the agent that loads, and tells the agent why a
+newer one did not: an edit applies to the agent's next
 model request, including those for messages already waiting, and its
 `settings.json` selects the agent's extensions and busy mode, which
 `carillon settings --agent` also changes. T3 takes no

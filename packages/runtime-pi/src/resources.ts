@@ -115,19 +115,19 @@ export interface Snapshot {
   };
 }
 
-/** A snapshot that cannot be used, and why, with its paths relative to its root. */
+/** Why a snapshot cannot be used, with its paths relative to its root. */
 export interface Unloadable {
-  readonly root: string;
   readonly problem: string;
 }
 
-/** The extensions the runtime brings, those settings select by default, and how long a user extension may take to import. */
+/** The extensions the runtime brings, and those settings select by default. */
 export interface Extensions {
   /** The runtime's own extension, always selected. */
   readonly carillon: Extension;
   /** The built-in extensions, named as settings select them. */
   readonly builtIn: readonly Extension[];
   readonly defaults: readonly string[];
+  /** How long a user extension may take to import. */
   readonly importDeadlineMs: number;
 }
 
@@ -155,7 +155,6 @@ export async function loadSnapshot(
   } catch (failure) {
     const text = failure instanceof Error ? failure.message : String(failure);
     return {
-      root,
       problem: stripVTControlCharacters(text)
         .replaceAll(`${pathToFileURL(root).href}/`, "")
         .replaceAll(`${root}/`, ""),

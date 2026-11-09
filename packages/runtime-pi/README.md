@@ -104,9 +104,9 @@ with `pi` as its first argument, the same executable is Pi's own command line
 
 ## Resources
 
-The latest resource snapshot admitted for an agent wins: its prompt and
-extensions apply to the agent's next requests, also for messages admitted
-earlier. Each snapshot is read once:
+The latest resource snapshot admitted for an agent that loads wins: its
+prompt and extensions apply to the agent's next requests, also for messages
+admitted earlier. Each snapshot is read once:
 
 - `SYSTEM.md` as the prompt's base, `AGENTS.md` and `CLAUDE.md` from the
   snapshot and the workspace's parents, and the snapshot's `skills/` beside
@@ -130,18 +130,27 @@ earlier. Each snapshot is read once:
 
 - user extensions it lists as `extensions/<file>.js`, `.mjs` or `.ts`: a
   module whose default export is a pi-durable extension object, with its
-  `tools`, `sections`, `hooks`, `wraps` and `tasks`. It is loaded from the
-  snapshot and cannot import packages.
+  `tools`, `sections`, `hooks`, `wraps` and `tasks`. It is imported from the
+  snapshot, inside the runtime's process, and can import Node's built-ins
+  and packages vendored in the snapshot's `extensions/node_modules/`, not
+  the runtime's own.
 
-Settings or a listed module that cannot be used refuse the turn that brought
-them with 422, as does a module pi-durable cannot install beside the built-in
-extensions, such as one reusing a task name. A newer snapshot replaces the
+A snapshot does not load when its settings or a listed module cannot be used,
+including a module pi-durable cannot install beside the built-in extensions,
+such as one reusing a task name, or one still importing after 5 seconds. The
+turn that brought it still runs, on the last snapshot that loaded, or on the
+defaults when none did, and never records the one that failed. The model
+reads a note before the message saying so, with the whole error: Bun's build
+errors each at their file, line and column, and a throw with its frames in
+the snapshot, paths relative to the snapshot. The runtime logs it once. The
+deadline cannot stop a module whose top-level code exits the process or never
+yields. A newer snapshot replaces the
 installed user extensions. An old one stays while a live task needs one of
 its task names that no installed module of the snapshot defines, and each
 later admission adopts the snapshot again, so a module the kept one blocked
 installs, and takes its tasks over, once the old one can go.
 A recorded snapshot that no longer loads at startup is logged, and the agent
-uses the default extensions until the next one is admitted; what it selects
+uses the default extensions until one that loads is admitted; what it selects
 is unknown meanwhile, so schedules wait for it.
 
 ## Skills

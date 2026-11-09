@@ -57,7 +57,6 @@ import { openingTask, type Opening } from "./opening.ts";
 import {
   carillonExtension,
   DEFAULT_BUSY,
-  IMPORT_DEADLINE_MS,
   isUserExtension,
   loadSkills,
   loadSnapshot,
@@ -99,8 +98,8 @@ export interface AgentOptions {
   /** The MCP servers, each a built-in extension whose tools change as it connects. */
   readonly mcp: readonly McpServer[];
   readonly clock?: Clock;
-  /** How long a user extension may take to import; {@link IMPORT_DEADLINE_MS} by default. */
-  readonly importDeadlineMs?: number;
+  /** How long a user extension may take to import. */
+  readonly importDeadlineMs: number;
 }
 
 export interface DurableAgent {
@@ -130,7 +129,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const watched = new Map<ConversationId, ConversationActivity>();
   /** The last snapshot that loaded, which the agent runs on; the default extensions while none did. */
   let latest: Snapshot | undefined;
-  /** The snapshot last loaded, so one that does not load is neither imported nor logged again. */
+  /** The snapshot last asked for, so one that does not load is neither imported nor logged again. */
   let loading:
     | { readonly root: string; readonly loaded: Promise<Snapshot | Unloadable> }
     | undefined;
@@ -187,7 +186,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       ...options.mcp.map((server) => server.extension()),
     ],
     defaults: options.defaults,
-    importDeadlineMs: options.importDeadlineMs ?? IMPORT_DEADLINE_MS,
+    importDeadlineMs: options.importDeadlineMs,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
   const unsubscribes = options.mcp.map((server) =>
@@ -223,8 +222,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   // Nothing runs before resume, so every live delivery is held before it can
   // finish, and the latest snapshot's extensions are installed first. One
-  // that no longer loads leaves the defaults until the next is admitted, and
-  // what is selected unknown.
+  // that no longer loads leaves the defaults until one that loads is
+  // admitted, and what is selected unknown.
   const recorded = (await harness.snapshot(Resources, context))?.root;
   if (recorded !== undefined) {
     const loaded = await load(recorded);
@@ -318,7 +317,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     const snapshot = "problem" in loaded ? latest : loaded;
     const input = [
       "problem" in loaded
-        ? `[Carillon] Your resources did not load, so you run on ${snapshot === undefined ? "the default extensions" : "your previous resources"} until you fix them.\n\n${loaded.problem}`
+        ? `[Carillon] Your resources did not load, so you run on ${snapshot === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them.\n\n${loaded.problem}`
         : "",
       turnContext(request.native) ?? "",
       await expandSkills(

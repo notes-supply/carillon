@@ -10,9 +10,9 @@ A user extension is one module in the agent's resource root: `extensions/<file>.
 
 - The default export is a pi-durable extension object without a name: `hooks`, and optionally `tools`, `sections`, `wraps` and `tasks`. Its settings name, such as `extensions/guard.ts`, is its name.
 - It runs only once selected. Add it to the root's `settings.json`, keeping the default extensions: `{ "extensions": { "add": ["extensions/guard.ts"] } }`. `carillon settings --agent <agent> extensions=…` sets the whole list instead.
-- It cannot import packages. Import only Node's built-ins, such as `node:fs`. Type annotations are fine, and so is `import type`, which is erased.
+- It can import Node's built-ins, such as `node:fs`, and packages whose files are in `extensions/node_modules/`, without symlinks. Carillon's own packages, pi-durable included, cannot be imported. Type annotations are fine, and so is `import type`, which is erased.
 - Core copies the root with every message, and the next message loads the module. Nothing restarts. The module then applies to every request the agent makes, also for an answer already running.
-- A module that does not load or install refuses every message, naming why, until it is fixed or deselected. Write it in full before you select it. `carillon settings --agent <agent> reset extensions` returns to the defaults.
+- When the resources a message brings do not load, because `settings.json` is invalid or a selected module fails to build, throws, has the wrong shape, cannot install or is still importing after 5 seconds, you answer on the last resources that loaded. That message then starts with a `[Carillon]` note giving the whole error, with file, line and column. Fix the file; the next message that brings resources that load uses them. A module's top-level code runs inside the runtime, so a `process.exit()` or an endless loop there stops every agent.
 
 ## Hooks
 
