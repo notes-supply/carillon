@@ -342,7 +342,7 @@ async function startFakeCodex() {
   await once(server, "listening");
   cleanups.push(() => new Promise((done) => server.close(done)));
   const address = server.address();
-  if (typeof address === "string") throw new Error("no TCP address");
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
   const codex = { requests: 0, holding: false, url: `http://127.0.0.1:${String(address.port)}` };
   server.on("connection", (socket) =>
     socket.on("message", () => {
