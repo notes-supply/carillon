@@ -11,6 +11,7 @@ import { DEFAULT_RESTART_LIMIT } from "@earendil-works/pi-durable";
 import { TurnActivitySchema, TurnOutcomeSchema } from "@carillon/protocol";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { Parse } from "typebox/value";
+import { WebSocketServer } from "ws";
 
 const token = "pi-cli-test-token";
 const hash = createHash("sha256").update(token).digest("hex");
@@ -331,3 +332,110 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
     /^Local provider response 1: hold /u,
   );
 }, 30_000);
+
+/**
+ * ChatGPT's Codex Responses socket, which Pi keeps open between a
+ * conversation's requests. It answers each request unless told to hold it.
+ */
+async function startFakeCodex() {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  cleanups.push(() => new Promise((done) => server.close(done)));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  const codex = { requests: 0, holding: false, url: `http://127.0.0.1:${String(address.port)}` };
+  server.on("connection", (socket) =>
+    socket.on("message", () => {
+      codex.requests += 1;
+      if (codex.holding) return;
+      const id = `resp_${String(codex.requests)}`;
+      const text = "Codex answer.";
+      const item = {
+        type: "message",
+        id: "msg_1",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text, annotations: [] }],
+      };
+      for (const event of [
+        { type: "response.created", response: { id, status: "in_progress" } },
+        { type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+        { type: "response.output_text.delta", output_index: 0, item_id: "msg_1", delta: text },
+        { type: "response.output_item.done", output_index: 0, item },
+        {
+          type: "response.completed",
+          response: {
+            id,
+            status: "completed",
+            output: [item],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        },
+      ])
+        socket.send(JSON.stringify(event));
+    }),
+  );
+  return codex;
+}
+
+async function stopped(child: ReturnType<typeof start>["child"]) {
+  child.kill("SIGTERM");
+  const late = new Promise<"running">((resolve) => setTimeout(() => resolve("running"), 5_000));
+  return Promise.race([once(child, "close").then(() => child.exitCode), late]);
+}
+
+it("exits on SIGTERM once a Codex model answered, and answers a message the stop cut off", async () => {
+  const core: FakeCore = await startFakeCore();
+  cleanups.push(() => core.close());
+  const codex = await startFakeCodex();
+  const { home, args, url } = await installation(
+    { default: "resources" },
+    core.url.replace("http://", ""),
+  );
+  await mkdir(join(home, "resources"));
+  await mkdir(join(home, "pi"));
+  const claims = { "https://api.openai.com/auth": { chatgpt_account_id: "account" } };
+  const apiKey = `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+  await writeFile(
+    join(home, "pi", "models.json"),
+    JSON.stringify({
+      providers: {
+        codex: {
+          baseUrl: codex.url,
+          api: "openai-codex-responses",
+          apiKey,
+          models: [{ id: "codex" }],
+        },
+      },
+    }),
+  );
+  const live = args.filter((arg) => arg !== "--deterministic");
+  const configured = await run([
+    ...live,
+    "--configure",
+    "--agent",
+    "default",
+    "--model",
+    "codex/codex",
+  ]);
+  expect(configured.status, configured.stderr).toBe(0);
+
+  const answered = start(live);
+  await answered.ready;
+  await inbox(url, home, "hello");
+  expect((await outcomes(core)).map(({ body }) => body)).toMatchObject([{ outcome: "answered" }]);
+  expect(await stopped(answered.child)).toBe(0);
+
+  codex.holding = true;
+  const holding = start(live);
+  await holding.ready;
+  await inbox(url, home, "hello again", "turn-2");
+  expect(await answering(url, core, "turn-2")).toBe("model");
+  await expect.poll(() => codex.requests, { timeout: 10_000 }).toBe(2);
+  expect(await stopped(holding.child)).toBe(0);
+  codex.holding = false;
+  await start(live).ready;
+  const [outcome, ...more] = await outcomes(core, "turn-2");
+  expect(more).toEqual([]);
+  expect(outcome?.body).toMatchObject({ outcome: "answered", output: "Codex answer." });
+}, 60_000);
