@@ -11,6 +11,7 @@ import type { Setting } from "@carillon/protocol";
 import { once } from "node:events";
 import { writeSync } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -68,6 +69,12 @@ interface Embedded {
 export async function main(values: readonly string[], embedded?: Embedded): Promise<void> {
   const [command, ...rest] = values;
   if (command === "check-resources") {
+    if (rest.includes("--help")) {
+      console.log(
+        "Usage: carillon runtime-pi check-resources [--agent ID]\n\nLoads an agent's own folder as the runtime does and says whether it loads.\nWithout --agent, checks the agent whose shell runs it.",
+      );
+      return;
+    }
     // A compiled executable is its own script; otherwise the runtime runs this file.
     const script = embedded === undefined ? process.argv.slice(1, 2) : [];
     process.exitCode = await checkResources([...process.execArgv, ...script], rest);
@@ -287,19 +294,17 @@ async function checked(
       ok: true,
       text: `${agent.id} has no resources of its own, so it runs on Carillon's defaults.`,
     };
+  const stateDirectory = resolve(args.get("state-dir") ?? join(config.root, "pi"));
+  // The runtime's service runs in the owner's home, where a module's relative paths resolve.
+  process.chdir(homedir());
   report({ kind: "loading", folder: agent.resources });
-  const { runtime } = await openRuntime(
-    config,
-    resolve(args.get("state-dir") ?? join(config.root, "pi")),
-    embedded,
-    {
-      agents: [agent],
-      catalogue: deterministicCatalogue(),
-      core: createCoreClient({ url: config.coreUrl, providerId, token: "" }),
-      inlineImages: DEFAULT_INLINE_IMAGES,
-      storage: () => Promise.resolve(new MemoryStorage()),
-    },
-  );
+  const { runtime } = await openRuntime(config, stateDirectory, embedded, {
+    agents: [agent],
+    catalogue: deterministicCatalogue(),
+    core: createCoreClient({ url: config.coreUrl, providerId, token: "" }),
+    inlineImages: DEFAULT_INLINE_IMAGES,
+    storage: () => Promise.resolve(new MemoryStorage()),
+  });
   const problem = await runtime.check(agent.id);
   return problem === undefined
     ? { kind: "done", ok: true, text: `${agent.resources} loads.` }

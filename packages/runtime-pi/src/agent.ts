@@ -480,12 +480,18 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   ): Promise<{ readonly snapshot: Snapshot | undefined; readonly note?: string }> {
     const loaded = latest?.root === root ? latest : await load(root);
     return "problem" in loaded
-      ? { snapshot: latest, note: unloadedNote(loaded.problem) }
+      ? { snapshot: latest, note: fallbackNote(loaded.problem) }
       : { snapshot: loaded };
   }
 
-  function unloadedNote(problem: string): string {
-    return `[Carillon] Your resources${options.resources === undefined ? "" : ` in ${options.resources}`} did not load, so you run on ${latest === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them. Tell the person.\n\n${problem}`;
+  /** Why a run keeps the last resources that loaded: its own did not load, or core could not capture them. */
+  function fallbackNote(problem: string, captured = true): string {
+    const folder = options.resources === undefined ? "" : ` in ${options.resources}`;
+    const kept = latest === undefined ? "Carillon's defaults" : "your previous resources";
+    const lead = captured
+      ? `Your resources${folder} did not load, so you run on ${kept} until you fix them.`
+      : `Carillon could not copy your resources${folder}, so you run on ${kept}. Your files may be fine.`;
+    return `[Carillon] ${lead} Tell the person.\n\n${problem}`;
   }
 
   /**
@@ -499,7 +505,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     try {
       root = resolve(await options.core.resources(options.id));
     } catch (failure) {
-      return unloadedNote(failure instanceof Error ? failure.message : String(failure));
+      return fallbackNote(failure instanceof Error ? failure.message : String(failure), false);
     }
     const { snapshot, note } = await resourcesAt(root);
     if (snapshot !== undefined && (snapshot !== latest || incomplete)) {

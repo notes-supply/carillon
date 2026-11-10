@@ -54,9 +54,15 @@ async function installation(agents: Record<string, Record<string, string>>): Pro
 }
 
 /** Runs the check as the agent's bash runs `carillon runtime-pi check-resources`, under Bun as packaged. */
-async function check(home: string, args: readonly string[] = [], agent = "assistant") {
+async function check(
+  home: string,
+  args: readonly string[] = [],
+  agent = "assistant",
+  cwd = process.cwd(),
+) {
   const command = [join(import.meta.dirname, "cli.ts"), "check-resources", ...args];
   const child = spawn("bun", command, {
+    cwd,
     env: { ...process.env, CARILLON_HOME: home, CARILLON_AGENT: agent },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -136,6 +142,28 @@ it("fails within its bound when a module's top level never ends", async () => {
   expect(result.seconds).toBeLessThan(15);
 }, 30_000);
 
+it("resolves a module's relative paths where the runtime's service does, not where it is run", async () => {
+  const file = `carillon-check-${String(process.pid)}.json`;
+  const home = await installation({
+    assistant: selecting(
+      `import { readFileSync } from "node:fs"; readFileSync("./${file}"); export default {};`,
+    ),
+  });
+  await writeFile(join(home, file), "{}");
+  expect(await check(home, [], "assistant", home)).toMatchObject({
+    status: 1,
+    stderr: expect.stringContaining("ENOENT") as unknown,
+  });
+});
+
+it("says how it is used", async () => {
+  const home = await installation({ assistant: {} });
+  expect(await check(home, ["--help"])).toMatchObject({
+    status: 0,
+    stdout: expect.stringContaining("Usage: carillon runtime-pi check-resources") as unknown,
+  });
+});
+
 it("checks the agent it runs for by default, and another it names", async () => {
   const home = await installation({
     assistant: selecting("export default {};"),
@@ -146,7 +174,10 @@ it("checks the agent it runs for by default, and another it names", async () => 
     status: 1,
     stderr: expect.stringContaining("The agent's settings.json is invalid at /busy") as unknown,
   });
-  expect(await check(home, [], "helper")).toMatchObject({ status: 1 });
+  expect(await check(home, [], "helper")).toMatchObject({
+    status: 1,
+    stderr: expect.stringContaining("The agent's settings.json is invalid at /busy") as unknown,
+  });
   expect(await check(home, ["--agent", "nobody"])).toMatchObject({
     status: 1,
     stderr: "The check could not run: agent nobody does not run on runtime-pi\n",

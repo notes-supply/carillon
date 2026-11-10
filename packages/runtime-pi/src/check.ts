@@ -70,7 +70,7 @@ export async function checkResources(
 /** Lines that are not reports, such as a module's writes to the same descriptor, are skipped. */
 async function reportsOf(stream: Readable): Promise<Report[]> {
   let text = "";
-  for await (const chunk of stream) text += String(chunk);
+  for await (const chunk of stream.setEncoding("utf8")) text += String(chunk);
   return text.split("\n").flatMap((line) => {
     if (line.length === 0) return [];
     let value: unknown;

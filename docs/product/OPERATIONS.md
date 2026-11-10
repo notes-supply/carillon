@@ -501,8 +501,8 @@ agent's `resources` directory, which is `CARILLON_HOME/agents/default/` for
 the assistant setup creates. A change rewrites that file keeping everything
 else it holds, its mode included; you can also edit that
 file by hand, such as `{ "extensions": { "add": ["schedules"] } }`. Either
-way the next message Pi receives, scheduled run or subagent the agent
-starts brings the change, and from then on the agent's extensions apply to
+way the change arrives with the next message Pi receives, the next
+scheduled run, or the next subagent the agent starts, and from then on the agent's extensions apply to
 every request it makes, also for an answer already in progress. An agent without resources shows both lines and cannot
 change them, and one whose `settings.json` cannot be used shows them empty
 and names the problem when you change one. `/settings` in Discord shows the

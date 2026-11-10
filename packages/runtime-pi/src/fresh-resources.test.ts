@@ -142,6 +142,22 @@ it("runs a subagent on the last resources that loaded when the agent's files do 
   });
 });
 
+it("runs a subagent on the last resources that loaded when core cannot capture the agent's files, without blaming them", async () => {
+  const { requests, answers } = scripted();
+  const agent = await fixture({ resources, answers });
+  const root = await agent.capture();
+  await writeFile(join(agent.resources ?? "", "extensions/marker.js"), marker("v2"));
+  agent.core.answer(503);
+  expect(await agent.ask("turn-1", "Delegate and wait.", { resource_root: root })).toBe("Done.");
+  expect(requests[1]?.marker).toBe("v1");
+  expect(requests[1]?.said).toMatch(
+    new RegExp(
+      `^\\[Carillon\\] Carillon could not copy your resources in ${agent.resources ?? ""}, so you run on your previous resources\\. Your files may be fine\\. Tell the person\\.\\n\\ncore did not capture [^]+answered 503\\n\\nMake a response\\.$`,
+      "u",
+    ),
+  );
+});
+
 function jsonError(text: string): string {
   try {
     JSON.parse(text);
