@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { Check, Parse } from "typebox/value";
 import {
   PROVIDER_HEADER,
+  CapturedResourcesSchema,
   OpenedTurnSchema,
   RunningTurnSchema,
   type OpenedTurn,
@@ -47,6 +48,11 @@ export interface CoreClient {
    * the one its key opened. `signal` ends the wait for core's answer.
    */
   readonly open: (opening: TurnOpening, signal?: AbortSignal) => Promise<OpenedTurn>;
+  /**
+   * Captures the agent's resources as they are now, for a run this runtime
+   * starts itself, and returns where core keeps them.
+   */
+  readonly resources: (agentId: string) => Promise<string>;
   /**
    * The turns core records running on this runtime, for a process that
    * forgot them to take up again. An entry it cannot read is set apart, so
@@ -119,6 +125,15 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
       if (!response.ok)
         throw new CoreRefusal(response.status, `core opened no turn: ${await refusal(response)}`);
       return Parse(OpenedTurnSchema, await response.json());
+    },
+    resources: async (agentId) => {
+      const response = await call("/v1/runtime/resources", { agent_id: agentId });
+      if (!response.ok)
+        throw new CoreRefusal(
+          response.status,
+          `core did not capture ${agentId}'s resources: ${await refusal(response)}`,
+        );
+      return Parse(CapturedResourcesSchema, await response.json()).resource_root;
     },
     running: async () => {
       const response = await call("/v1/runtime/turns");

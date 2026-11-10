@@ -145,6 +145,22 @@ pub struct TurnOpening {
     pub label: Option<String>,
 }
 
+/// The agent whose resources a runtime asks core to capture as they are
+/// now, for a run it starts itself.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceCapture {
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
+    pub agent_id: String,
+}
+
+/// Where core captured them, as a turn's `resource_root`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedResources {
+    pub resource_root: String,
+}
+
 /// A turn core records running on the runtime that asks: the request core
 /// handed it, and the key of a turn the runtime opened. A runtime whose
 /// process forgot the turns it holds reads them back.

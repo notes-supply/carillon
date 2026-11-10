@@ -297,6 +297,12 @@ export const TurnOpeningSchema = Type.Object(
 );
 export type TurnOpening = Static<typeof TurnOpeningSchema>;
 
+/** Where core captured an agent's resources for a run its runtime starts itself. */
+export const CapturedResourcesSchema = Type.Object(
+  { resource_root: Type.String({ minLength: 1 }) },
+  { additionalProperties: false },
+);
+
 /** What core recorded of a turn a runtime opened, with the channel core recorded for its conversation. */
 export const OpenedTurnSchema = Type.Object({
   event_id: Type.String(),

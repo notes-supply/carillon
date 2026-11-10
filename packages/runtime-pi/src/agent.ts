@@ -60,6 +60,7 @@ import {
   isUserExtension,
   loadSkills,
   loadSnapshot,
+  noted,
   selectedExtensions,
   type Extensions,
   type Snapshot,
@@ -114,6 +115,11 @@ export interface DurableAgent {
   readonly calling: boolean;
   /** The built-in extensions its settings may select, by name. */
   readonly builtIn: readonly string[];
+  /**
+   * Loads the agent's own folder as it is now, as a message would bring it:
+   * why it does not load, or undefined. Its modules run in this process.
+   */
+  check(): Promise<string | undefined>;
   close(): Promise<void>;
 }
 
@@ -184,7 +190,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
           await harness.abortTask(task, context);
         },
       }),
-      createSubagentsExtension({ opening }),
+      createSubagentsExtension({ opening, refresh }),
       ...options.mcp.map((server) => server.extension()),
     ],
     defaults: options.defaults,
@@ -200,7 +206,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     {
       models: options.catalogue.models,
       registry,
-      env: () => new NodeExecutionEnv({ cwd: workspace }),
+      env: () => new NodeExecutionEnv({ cwd: workspace, shellEnv: { CARILLON_AGENT: options.id } }),
       settings: () => ({
         steeringMode: "all",
         followUpMode: "one-at-a-time",
@@ -300,6 +306,17 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
     builtIn: extensions.builtIn.map((extension) => extension.name),
 
+    async check() {
+      if (options.resources === undefined) return undefined;
+      const loaded = await loadSnapshot(
+        resolve(options.resources),
+        workspace,
+        extensions,
+        options.skillsDirectory,
+      );
+      return "problem" in loaded ? loaded.problem : undefined;
+    },
+
     async close() {
       closing = true;
       for (const unsubscribe of unsubscribes) unsubscribe();
@@ -314,13 +331,9 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   async function admit(request: TurnRequest): Promise<void> {
     if ((await harness.snapshot(Turns, request.correlation_id, context))?.task !== undefined)
       return;
-    const root = resolve(request.resource_root);
-    const loaded = latest?.root === root ? latest : await load(root);
-    const snapshot = "problem" in loaded ? latest : loaded;
+    const { snapshot, note } = await resourcesAt(resolve(request.resource_root));
     const input = [
-      "problem" in loaded
-        ? `[Carillon] Your resources${options.resources === undefined ? "" : ` in ${options.resources}`} did not load, so you run on ${snapshot === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them. Tell the person.\n\n${loaded.problem}`
-        : "",
+      note ?? "",
       turnContext(request.native) ?? "",
       await expandSkills(
         request.input,
@@ -408,14 +421,16 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   /**
    * Places the input of a turn the runtime opened in its conversation, as a
-   * follow-up on the model of the channel core recorded for it. The
-   * opening's key is its request ID, so it is placed once.
+   * follow-up on the model of the channel core recorded for it and on the
+   * agent's resources as they are now. The opening's key is its request ID,
+   * so it is placed once.
    */
   async function place(
     conversation: ConversationId,
     turn: OpenedTurn,
     opened: Opening,
   ): Promise<SubmissionId> {
+    const note = await refresh();
     const info = await harness.snapshot(ConversationInfo, conversation, context);
     if (info === undefined)
       throw new Error(`conversation ${String(conversation)} serves no Carillon conversation`);
@@ -434,7 +449,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     ).submit(
       {
         type: "input",
-        content: opened.content,
+        content: noted(opened.content, note),
         requestId: opened.key,
         whenBusy: "followUp",
         entry: { kind: MESSAGE, data: { turn: turn.turn_id } },
@@ -458,6 +473,48 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     );
     loading = { root, loaded };
     return loaded;
+  }
+
+  async function resourcesAt(
+    root: string,
+  ): Promise<{ readonly snapshot: Snapshot | undefined; readonly note?: string }> {
+    const loaded = latest?.root === root ? latest : await load(root);
+    return "problem" in loaded
+      ? { snapshot: latest, note: fallbackNote(loaded.problem) }
+      : { snapshot: loaded };
+  }
+
+  /** Why a run keeps the last resources that loaded: its own did not load, or core could not capture them. */
+  function fallbackNote(problem: string, captured = true): string {
+    const folder = options.resources === undefined ? "" : ` in ${options.resources}`;
+    const kept = latest === undefined ? "Carillon's defaults" : "your previous resources";
+    const lead = captured
+      ? `Your resources${folder} did not load, so you run on ${kept} until you fix them.`
+      : `Carillon could not copy your resources${folder}, so you run on ${kept}. Your files may be fine.`;
+    return `[Carillon] ${lead} Tell the person.\n\n${problem}`;
+  }
+
+  /**
+   * Runs the agent on its resources as core captures them now, for a run
+   * the runtime starts itself, or returns the note saying why it keeps the
+   * last that loaded. An agent without resources has nothing to capture.
+   */
+  async function refresh(): Promise<string | undefined> {
+    if (options.resources === undefined) return undefined;
+    let root: string;
+    try {
+      root = resolve(await options.core.resources(options.id));
+    } catch (failure) {
+      return fallbackNote(failure instanceof Error ? failure.message : String(failure), false);
+    }
+    const { snapshot, note } = await resourcesAt(root);
+    if (snapshot !== undefined && (snapshot !== latest || incomplete)) {
+      await harness.commit(async (tx) => {
+        (await tx.doc(Resources)).root = snapshot.root;
+      }, context);
+      await adopt(snapshot);
+    }
+    return note;
   }
 
   /** Whether the agent selects the extension; undefined while no snapshot that loads says. */

@@ -17,6 +17,7 @@ import {
   section,
   type AnyTask,
   type Extension,
+  type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Change, Setting, SettingValue, Subject } from "@carillon/protocol";
 import { ExplainedFailure } from "@carillon/runtime/failure";
@@ -583,6 +584,13 @@ function importFailure(failure: unknown, root: string): string {
     .filter((line) => /^\s+at /u.test(line) && line.includes(root))
     .map((line) => line.trim());
   return [failure.message, ...frames].join("\n");
+}
+
+/** The input with a `[Carillon]` note about the agent's resources before it. */
+export function noted(content: UserInput, note: string | undefined): UserInput {
+  if (note === undefined) return content;
+  if (typeof content === "string") return `${note}\n\n${content}`;
+  return [{ type: "text", text: note }, ...content];
 }
 
 /** Whether settings name a user extension, a module of the snapshot, rather than a built-in. */

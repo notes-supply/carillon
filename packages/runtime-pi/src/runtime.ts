@@ -58,7 +58,12 @@ export interface PiRuntimeOptions {
   readonly importDeadlineMs?: number;
 }
 
-export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
+export interface PiRuntime extends RuntimeOperations {
+  /** Why the agent's own folder, as it is now, does not load; undefined when it does. */
+  check(agentId: string): Promise<string | undefined>;
+}
+
+export async function createPiRuntime(options: PiRuntimeOptions): Promise<PiRuntime> {
   await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
   const ledger = await SettingsLedger.open(join(options.componentDirectory, "settings.json"));
   const models = modelSettings(options.catalogue, ledger);
@@ -139,6 +144,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       const root = options.agents.find(({ id }) => id === agent_id)?.resources;
       return { commands: skillCommands(loadSkills(root, options.skillsDirectory)) };
     },
+    check: (agentId) => agentOf(agentId).check(),
     restartReadiness() {
       return [...agents.values()].some((agent) => agent.calling)
         ? { state: "unready", reason: "a tool call is running" }

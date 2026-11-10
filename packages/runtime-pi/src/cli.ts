@@ -1,5 +1,6 @@
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { CodemodeSandbox, loadQuickJSWasm } from "@earendil-works/pi-codemode";
+import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { createPhotonImages } from "@earendil-works/pi-durable/images";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
@@ -8,7 +9,9 @@ import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createDiscordExtension, DISCORD_SKILL } from "@carillon/discord-pi";
 import type { Setting } from "@carillon/protocol";
 import { once } from "node:events";
+import { writeSync } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -19,12 +22,13 @@ import {
   InlineImagePolicySchema,
   type InlineImagePolicy,
 } from "./attachments.ts";
+import { checkResources, LOAD_RESOURCES, REPORT_FD, type Report } from "./check.ts";
 import { deterministicCatalogue } from "./deterministic.ts";
 import { ConversationInfo } from "./documents.ts";
 import { createMcpServer, loadMcpConfig, mcpTransport } from "./mcp.ts";
 import { modelSettings, openPiCatalogue, type PiCatalogue } from "./models.ts";
 import { BUILT_IN_SKILLS } from "./resources.ts";
-import { createPiRuntime } from "./runtime.ts";
+import { createPiRuntime, type PiRuntime, type PiRuntimeOptions } from "./runtime.ts";
 import { createCoreClient } from "@carillon/runtime/core";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import { mismatch } from "@carillon/runtime/mismatch";
@@ -63,6 +67,23 @@ interface Embedded {
 }
 
 export async function main(values: readonly string[], embedded?: Embedded): Promise<void> {
+  const [command, ...rest] = values;
+  if (command === "check-resources") {
+    if (rest.includes("--help")) {
+      console.log(
+        "Usage: carillon runtime-pi check-resources [--agent ID]\n\nLoads an agent's own folder as the runtime does and says whether it loads.\nWithout --agent, checks the agent whose shell runs it.",
+      );
+      return;
+    }
+    // A compiled executable is its own script; otherwise the runtime runs this file.
+    const script = embedded === undefined ? process.argv.slice(1, 2) : [];
+    process.exitCode = await checkResources([...process.execArgv, ...script], rest);
+    return;
+  }
+  if (command === LOAD_RESOURCES) {
+    await loadResources(rest, embedded);
+    return;
+  }
   const args = parseArguments(values, ["deterministic", "check", "models", "configure"]);
   const providerId = requiredArgument(args, "provider");
   const config = await loadInstallation(requiredArgument(args, "config"), providerId);
@@ -116,10 +137,54 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   }
   const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
+  const { runtime, close } = await openRuntime(config, stateDirectory, embedded, {
+    agents: config.agents,
+    catalogue: await openCatalogue(),
+    core: createCoreClient({ url: config.coreUrl, providerId: config.runtime.id, token }),
+    inlineImages,
+  });
+  const server = createRuntimeServer({
+    runtime,
+    token,
+    providerId: config.runtime.id,
+    provider: deterministic ? "deterministic-local-substitute" : "pi",
+    version: packageInfo.version,
+    features: ["native-extensions", "skills"],
+    agents: config.agents,
+  });
+  try {
+    server.listen(listenAddress);
+    await once(server, "listening");
+    process.stdout.write(
+      `runtime-pi ready at ${config.runtime.url}${deterministic ? " (deterministic provider substitute)" : ""}\n`,
+    );
+    await new Promise<void>((done) => {
+      const stop = () => {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+        done();
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+  } finally {
+    const stopped = new Promise<void>((done) => server.close(() => done()));
+    await close();
+    server.closeAllConnections();
+    await stopped;
+  }
+}
+
+/** The runtime as it serves `parts.agents`, and what closes it with its MCP servers and sandbox. */
+async function openRuntime(
+  config: Installation,
+  stateDirectory: string,
+  embedded: Embedded | undefined,
+  parts: Pick<PiRuntimeOptions, "agents" | "catalogue" | "core" | "inlineImages" | "storage">,
+): Promise<{ readonly runtime: PiRuntime; readonly close: () => Promise<void> }> {
   const mcp = [...(await loadMcpConfig(join(stateDirectory, "mcp.json")))].map(([name, server]) =>
     createMcpServer(name, () => mcpTransport(server)),
   );
-  const catalogue = await openCatalogue();
   const images =
     embedded === undefined
       ? await createNodePhotonImages()
@@ -152,14 +217,12 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     },
   });
   const runtime = await createPiRuntime({
-    agents: config.agents,
+    ...parts,
     componentDirectory: config.componentDirectory,
     skillsDirectory:
       embedded === undefined
         ? fileURLToPath(BUILT_IN_SKILLS)
         : join(dirname(process.execPath), "..", "lib", "pi-skills"),
-    catalogue,
-    core: createCoreClient({ url: config.coreUrl, providerId: config.runtime.id, token }),
     images,
     builtIns: [
       { ...createCodingTools({ images }), name: "coding" },
@@ -170,40 +233,82 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     // Carillon's interface providers are its Discord providers.
     defaults: ["coding", "tool-search", ...(config.interfaces.length > 0 ? ["discord"] : [])],
     mcp,
-    inlineImages,
   });
-  const server = createRuntimeServer({
+  return {
     runtime,
-    token,
-    providerId: config.runtime.id,
-    provider: deterministic ? "deterministic-local-substitute" : "pi",
-    version: packageInfo.version,
-    features: ["native-extensions", "skills"],
-    agents: config.agents,
-  });
-  try {
-    server.listen(listenAddress);
-    await once(server, "listening");
-    process.stdout.write(
-      `runtime-pi ready at ${config.runtime.url}${deterministic ? " (deterministic provider substitute)" : ""}\n`,
+    close: async () => {
+      await runtime.close();
+      await Promise.allSettled(mcp.map((server) => server.close()));
+      await sandbox.close();
+    },
+  };
+}
+
+/**
+ * The child `check-resources` starts: opens the agent as the runtime does,
+ * on storage of its own and a model that answers nothing, and reports on
+ * file descriptor 3. It ends the process, so nothing a module started keeps
+ * it running.
+ */
+async function loadResources(values: readonly string[], embedded?: Embedded): Promise<never> {
+  const report = (line: Report) => {
+    writeSync(REPORT_FD, `${JSON.stringify(line)}\n`);
+  };
+  report(
+    await checked(values, embedded, report).catch((failure: unknown): Report => ({
+      kind: "done",
+      ok: false,
+      text: `The check could not run: ${failure instanceof Error ? failure.message : String(failure)}`,
+    })),
+  );
+  process.exit(0);
+}
+
+async function checked(
+  values: readonly string[],
+  embedded: Embedded | undefined,
+  report: (line: Report) => void,
+): Promise<Report> {
+  const args = parseArguments(values);
+  const providerId = args.get("provider") ?? "runtime-pi";
+  const home = process.env["CARILLON_HOME"];
+  const path = args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
+  if (path === undefined) throw new Error("--config is required outside `carillon runtime-pi`");
+  const config = await loadInstallation(path, providerId);
+  if (typeof config === "string")
+    throw new Error(`runtime provider ${providerId} is ${notServing(config)}`);
+  const agentId =
+    args.get("agent") ??
+    process.env["CARILLON_AGENT"] ??
+    (config.agents.length === 1 ? config.agents[0]?.id : undefined);
+  const agent = config.agents.find(({ id }) => id === agentId);
+  if (agent === undefined)
+    throw new Error(
+      agentId === undefined
+        ? `name the agent with --agent: ${providerId} serves ${config.agents.map(({ id }) => id).join(", ")}`
+        : `agent ${agentId} does not run on ${providerId}`,
     );
-    await new Promise<void>((done) => {
-      const stop = () => {
-        process.off("SIGINT", stop);
-        process.off("SIGTERM", stop);
-        done();
-      };
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-    });
-  } finally {
-    const stopped = new Promise<void>((done) => server.close(() => done()));
-    await runtime.close();
-    await Promise.allSettled(mcp.map((server) => server.close()));
-    await sandbox.close();
-    server.closeAllConnections();
-    await stopped;
-  }
+  if (agent.resources === undefined)
+    return {
+      kind: "done",
+      ok: true,
+      text: `${agent.id} has no resources of its own, so it runs on Carillon's defaults.`,
+    };
+  const stateDirectory = resolve(args.get("state-dir") ?? join(config.root, "pi"));
+  // The runtime's service runs in the owner's home, where a module's relative paths resolve.
+  process.chdir(homedir());
+  report({ kind: "loading", folder: agent.resources });
+  const { runtime } = await openRuntime(config, stateDirectory, embedded, {
+    agents: [agent],
+    catalogue: deterministicCatalogue(),
+    core: createCoreClient({ url: config.coreUrl, providerId, token: "" }),
+    inlineImages: DEFAULT_INLINE_IMAGES,
+    storage: () => Promise.resolve(new MemoryStorage()),
+  });
+  const problem = await runtime.check(agent.id);
+  return problem === undefined
+    ? { kind: "done", ok: true, text: `${agent.resources} loads.` }
+    : { kind: "done", ok: false, text: `${agent.resources} does not load:\n\n${problem}` };
 }
 
 /**

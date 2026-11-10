@@ -480,20 +480,30 @@ carillon settings --agent assistant reset extensions    # the default again
 ```
 
 `extensions=` takes the whole list, comma separated, and refuses a name the
-agent does not have, listing the ones it has. A selected extension the agent
+agent does not have, listing the ones it has. It writes that list in place
+of any `add` and `remove`. `reset extensions` removes the whole
+`extensions` setting, so every extension it added, such as `schedules`,
+`subagents` or the agent's own `extensions/<file>.ts`, is gone with it. To
+turn off one extension and keep the rest, give `extensions=` the list
+`carillon settings --agent assistant` shows without that one, or take it
+out of `add` in `settings.json`; the settings command has no change for one
+entry of `add` or `remove`. A selected extension the agent
 no longer has, such as a deleted file or an `mcp:` server `mcp.json` no
 longer configures, shows as unavailable. While the resources a message
 brings cannot be used, Pi answers it on the last resources that loaded, or
 its defaults, and the agent reads why at the start of the message, so it can
-repair them itself; `carillon logs runtime-pi` has the same error. Pi offers only the files in `extensions/` whose names
+repair them itself; `carillon logs runtime-pi` has the same error.
+`carillon runtime-pi check-resources --agent assistant` loads the agent's
+folder as Pi would and prints that it loads or that error, so you, or the
+agent from its shell, can check a change before a message brings it. Pi offers only the files in `extensions/` whose names
 hold no comma. Busy and Extensions are kept in `settings.json` in the
 agent's `resources` directory, which is `CARILLON_HOME/agents/default/` for
 the assistant setup creates. A change rewrites that file keeping everything
 else it holds, its mode included; you can also edit that
 file by hand, such as `{ "extensions": { "add": ["schedules"] } }`. Either
-way the next message Pi receives brings the change, and from then on the
-agent's extensions apply to every request it makes, also for an answer
-already in progress. An agent without resources shows both lines and cannot
+way the change arrives with the next message Pi receives, the next
+scheduled run, or the next subagent the agent starts, and from then on the agent's extensions apply to
+every request it makes, also for an answer already in progress. An agent without resources shows both lines and cannot
 change them, and one whose `settings.json` cannot be used shows them empty
 and names the problem when you change one. `/settings` in Discord shows the
 channel's page, which has neither line.
