@@ -271,8 +271,8 @@ provider with its role, address, credential hash and expected version.
 Unknown fields make the file invalid. Each provider keeps its own settings in
 `providers/ID.toml`.
 
-Setup, `carillon init` and `carillon provider` change `carillon.toml` as
-Discord changes its settings file, described
+Setup, `carillon init`, `carillon update` and `carillon provider` change
+`carillon.toml` as Discord changes its settings file, described
 [below](#changes-that-apply-while-running): they write only the values a
 change alters, each in its place, and match providers and agents by ID. The
 file keeps its comments, its order, its quoting and its line endings, except
@@ -899,8 +899,26 @@ provider credentials: check `carillon status` afterwards.
 carillon update carillon-VERSION-linux-x86_64.tar.gz
 ```
 
-This release is installed fresh. `carillon update` from an earlier release
-refuses its database format and changes nothing. To move to it:
+Before stopping anything, update unpacks the archive inside the installation,
+checks it against its `MANIFEST` and has the new release check your registry,
+database, Discord settings and the custom module they enable. It then drains,
+stops, swaps the application directory atomically, and starts what was
+running. In `carillon.toml`, it sets the `version` of each provider the
+release bundles (`discord-private`, `runtime-pi` and `runtime-t3`) and leaves
+the rest of the file as it was. A provider you installed separately keeps its
+version. Update keeps credentials, provider settings, state, sessions and
+logs. A refusal changes nothing. If a later step fails, the message says what
+changed; rerun the same update until it succeeds before starting services.
+There's no downgrade: restore a backup made before the update instead.
+
+Maintenance commands take a lock per installation (`.maintenance.lock`) and
+one on the owner's user units, and refuse while another holds them.
+
+### When update refuses the database format
+
+A release with another database format is installed fresh: `carillon update`
+says the database schema is not the current Carillon format and changes
+nothing. To move to it:
 
 1. Run `carillon stop`, then move `~/.carillon` aside.
 2. Create a new `~/.carillon` with mode 700. Copy these from the old one,
@@ -924,37 +942,18 @@ refuses its database format and changes nothing. To move to it:
      start`, then give each agent its model with `carillon settings
      --agent AGENT model=PROVIDER/MODEL`.
 
-   Either way, the installer creates a new database. In `carillon.toml`, it
-   sets the `version` of each provider this release bundles
-   (`discord-private`, `runtime-pi` and `runtime-t3`) and leaves the rest
-   of the file as it was. A provider you installed separately keeps its
-   version.
+   Either way, the installer creates a new database and sets the versions
+   in `carillon.toml` as an update does.
 
 `state/` starts empty, so turn history, conversations, Pi's conversations
 and scheduled runs do not carry over. T3 per-thread model choices do not
 carry over either. Each channel runs its agent's model until someone picks
 one with `/settings`.
 
-Before stopping anything, update unpacks the archive inside the installation,
-checks it against its `MANIFEST` and has the new release check your registry,
-database, Discord settings and the custom module they enable. It then drains, stops,
-swaps the application directory atomically, and starts what was running. It
-keeps configuration, credentials, state, sessions and logs. A refusal changes
-nothing. If a later step fails, the message says what changed; rerun the
-same update until it succeeds before starting services. There's no
-downgrade: restore a backup made before the update instead.
-
-After `carillon update`, provider versions in `carillon.toml` are
-expectations you change yourself when you mean to run another provider
-release; `status` shows any mismatch.
-
 Earlier releases ran Carillon's assistant on T3 through T3 instances of its
 own, `carillon_claude` and `carillon_codex`. Nothing uses them now, and T3
 offers them to plain T3 Code agents like any other instance, so remove them
 in T3's settings.
-
-Maintenance commands take a lock per installation (`.maintenance.lock`) and
-one on the owner's user units, and refuse while another holds them.
 
 ## Uninstall
 

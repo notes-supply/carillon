@@ -113,7 +113,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
-        start_fresh(home)?;
+        adopt_release(home)?;
     }
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents = &config.value.agents;
@@ -283,9 +283,10 @@ fn choose_pi_models(
     Ok(())
 }
 
-pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
+pub(super) fn init(home: &Path, workspace: Option<&Path>, base_port: u16) -> Result<PathBuf> {
     let path = home.join("carillon.toml");
     if !path.exists() {
+        let workspace = workspace.context("--workspace is required to create an installation")?;
         return initialize(
             home,
             base_port,
@@ -294,19 +295,14 @@ pub(super) fn init(home: &Path, workspace: &Path, base_port: u16) -> Result<Path
         );
     }
     let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
-    start_fresh(home)?;
+    adopt_release(home)?;
     Ok(path)
 }
 
-fn start_fresh(home: &Path) -> Result<()> {
+/// Expect the providers this release bundles, and create the database an
+/// installation carried without state lacks.
+fn adopt_release(home: &Path) -> Result<()> {
     let config_path = home.join("carillon.toml");
-    let database = LoadedConfig::load(&config_path)?
-        .value
-        .data_dir
-        .join("carillon.sqlite3");
-    if database.exists() {
-        return Ok(());
-    }
     let bundled = [
         ("discord-private", RELEASE_VERSION.to_owned()),
         (Runtime::Pi.id(), Runtime::Pi.version()?),
@@ -319,7 +315,13 @@ fn start_fresh(home: &Path) -> Result<()> {
         }
     }
     config.write(&config_path)?;
-    Database::create(&database)?;
+    let database = LoadedConfig::load(&config_path)?
+        .value
+        .data_dir
+        .join("carillon.sqlite3");
+    if !database.exists() {
+        Database::create(&database)?;
+    }
     Ok(())
 }
 

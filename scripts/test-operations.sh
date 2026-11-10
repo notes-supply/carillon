@@ -475,8 +475,15 @@ rm -f "$TRACE"
 carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
 grep -Fx "It serves the custom Discord module $EXAMPLE: /settings, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
+# The update expects the providers the release bundles and keeps the rest of
+# the registry as written.
+sed -i 's/^version = "\(.*\)"$/version = "\1" # expected release/' "$INSTALLATION/carillon.toml"
 snapshot
+sed -i 's/^version = "[^"]*" # expected release$/version = "0.0.1-previous" # expected release/' \
+  "$INSTALLATION/carillon.toml"
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
+! grep -F version_mismatch "$TEST_ROOT/update.log" >/dev/null || fail 'the update left a version mismatch'
+! carillon status | grep -F version_mismatch >/dev/null || fail 'status shows a version mismatch'
 # A Pi installation has no T3 runtime to check.
 grep -Fx 'runtime-t3 is not in carillon.toml; nothing to check' "$TEST_ROOT/update.log" >/dev/null
 grep -F "custom Discord module $EXAMPLE, as this release ships it, is usable" "$TEST_ROOT/update.log" >/dev/null
@@ -502,12 +509,19 @@ carillon stop >/dev/null
 rm -f "$TRACE"
 FINAL=$(release_archive final)
 pack "$FINAL" "$TEST_ROOT/final.tar.gz"
+# A separately installed provider keeps the version it expects.
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = "runtime"\nversion = "9.8.7" # its own release\nurl = "http://127.0.0.1:1"\ntoken_hash = "%s"\nenabled = false\n' \
+  "$(printf '%064d' 0)" >>"$INSTALLATION/carillon.toml"
+snapshot
 carillon update "$TEST_ROOT/final.tar.gz" | grep -F 'services remain stopped as before' >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user daemon-reload' '--user enable carillon.target'
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = final ]
 stopped
 assert_preserved
+cp -p "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
+snapshot
 printf 'update passed: running and stopped states restored, configuration and state preserved\n'
 
 # Registration failure after application exchange: say what changed, keep the
@@ -559,7 +573,7 @@ mkdir -m 0700 "$INSTALLATION"
 cp -a "$TEST_ROOT/previous/carillon.toml" "$TEST_ROOT/previous/providers" \
   "$TEST_ROOT/previous/credentials" "$TEST_ROOT/previous/agents" \
   "$TEST_ROOT/previous/modules" "$INSTALLATION/"
-sed -i 's/^version = .*/version = "0.0.1-previous"/' "$INSTALLATION/carillon.toml"
+sed -i 's/^version = "[^"]*"/version = "0.0.1-previous"/' "$INSTALLATION/carillon.toml"
 install_release "$BASE_PORT" >"$TEST_ROOT/fresh.log"
 cmp "$TEST_ROOT/previous/carillon.toml" "$INSTALLATION/carillon.toml"
 carillon start >"$TEST_ROOT/fresh-start.log"

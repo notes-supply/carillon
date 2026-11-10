@@ -301,7 +301,7 @@ pub(super) fn print_health(providers: &[Health]) {
         .any(|health| health.status == "version_mismatch")
     {
         println!(
-            "A version mismatch is diagnostic: update the provider's expected version in carillon.toml once the new release is intended."
+            "A version mismatch is diagnostic: once a provider you installed separately runs the release you intend, set its expected version in carillon.toml."
         );
     }
 }

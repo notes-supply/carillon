@@ -3,7 +3,7 @@ use std::path::Path;
 use carillon_installation::config::RELEASE_VERSION;
 
 use super::{
-    Runtime, SavedT3, Unasked, fake_t3, initialized, model, options, set_up_t3, start_fresh,
+    Runtime, SavedT3, Unasked, adopt_release, fake_t3, initialized, model, options, set_up_t3,
 };
 use crate::application::setup::{Project, agents};
 
@@ -125,7 +125,7 @@ fn a_carried_registry_gets_this_releases_versions_and_keeps_the_rest_as_written(
                 .join(format!("home-{index}-{}", ending.len()));
             let written = form(directory.path(), PREVIOUS).replace('\n', ending);
             let path = carry(&home, directory.path(), &written)?;
-            start_fresh(&home)?;
+            adopt_release(&home)?;
             assert_eq!(
                 std::fs::read_to_string(&path)?,
                 form(directory.path(), bundled).replace('\n', ending)

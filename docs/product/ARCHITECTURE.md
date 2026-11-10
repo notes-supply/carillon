@@ -335,11 +335,12 @@ address, credential hash, expected version and whether it's enabled, with
 the largest file an interface uploads, and the agents: each one's ID, name,
 runtime, workspace and, for Carillon's assistant on Pi, resources. Each
 provider owns `providers/ID.toml`, where a runtime keeps its own settings for
-its agents. Both files reject unknown fields. Setup, init and the provider
-commands change `carillon.toml` in place under the maintenance lock, as the
-Discord provider changes its own file: one editor in `carillon-installation`
-writes only the values that differ, matching the tables of a list by ID, so
-the owner's comments, order, quoting and line endings stay.
+its agents. Both files reject unknown fields. Setup, init, update and the
+provider commands change `carillon.toml` in place under the maintenance lock,
+as the Discord provider changes its own file: one editor in
+`carillon-installation` writes only the values that differ, matching the
+tables of a list by ID, so the owner's comments, order, quoting and line
+endings stay.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
 both. Pi runs Carillon's assistant whenever it is chosen. Each provider's

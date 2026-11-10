@@ -7,9 +7,10 @@
 //! manifest and lets the release's programs validate the installed registry,
 //! core database and Discord settings read-only. Only then are services
 //! stopped and `install.sh --update` performs the existing application
-//! exchange and service registration. Application files, user units and
-//! systemd are not one transaction, so failures report what may have changed
-//! and how to finish, instead of rolling back.
+//! exchange, has the new release expect the providers it bundles in
+//! `carillon.toml`, and registers the services. Application files, user units
+//! and systemd are not one transaction, so failures report what may have
+//! changed and how to finish, instead of rolling back.
 
 use std::{
     fs,
@@ -106,10 +107,10 @@ pub(super) async fn update(
     })?;
     if !published.success() {
         bail!(
-            "publishing Carillon {version} failed ({published}). Registry, credentials, provider \
-             settings and state were not rewritten, but {} may hold the previous or the new \
-             application and the user units may be mixed. {stopped}. Rerun `carillon update {}` \
-             until it succeeds, then `carillon start` if the services should run",
+            "publishing Carillon {version} failed ({published}). Credentials, provider settings \
+             and state were not rewritten, nor the registry beyond its expected versions, \
+             but {} may hold the previous or the new application and the user units may be \
+             mixed. {stopped}. Rerun `carillon update {}` until it succeeds, then `carillon start` if the services should run",
             app.display(),
             archive.display(),
         );

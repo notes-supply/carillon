@@ -1,6 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, fake_t3, initialized, model, options,
-    saved_t3, set_up_t3, start_fresh,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, adopt_release, fake_t3, initialized,
+    model, options, saved_t3, set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
@@ -256,7 +256,8 @@ fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Resul
 }
 
 #[test]
-fn a_carried_registry_without_state_starts_fresh_on_this_release() -> anyhow::Result<()> {
+fn a_registry_adopts_this_release_and_gets_a_database_only_when_it_has_none() -> anyhow::Result<()>
+{
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
     let path = initialized(&home, directory.path(), Runtime::Pi)?;
@@ -276,13 +277,13 @@ fn a_carried_registry_without_state_starts_fresh_on_this_release() -> anyhow::Re
     std::fs::write(&path, &carried)?;
     let database = home.join("state/carillon.sqlite3");
     std::fs::remove_file(&database)?;
-    start_fresh(&home)?;
+    adopt_release(&home)?;
     crate::db::Database::open(&database)?;
     assert_eq!(std::fs::read_to_string(&path)?, current);
     let created = std::fs::read(&database)?;
     std::fs::write(&path, &carried)?;
-    start_fresh(&home)?;
+    adopt_release(&home)?;
     assert_eq!(std::fs::read(&database)?, created);
-    assert_eq!(std::fs::read_to_string(&path)?, carried);
+    assert_eq!(std::fs::read_to_string(&path)?, current);
     Ok(())
 }
