@@ -65,12 +65,10 @@ function scripted() {
         fauxToolCall("schedule", { prompt: "Check the log.", at: "2026-10-24T09:00:00Z" }),
         { stopReason: "toolUse" },
       );
-    if (said === "Delegate and wait.")
+    if (said === "Delegate and wait." || said === "Delegate.")
       return fauxAssistantMessage(
-        fauxToolCall("subagent", { task: "Make a response.", wait: true }),
-        {
-          stopReason: "toolUse",
-        },
+        fauxToolCall("subagent", { task: "Make a response.", wait: said !== "Delegate." }),
+        { stopReason: "toolUse" },
       );
     return fauxAssistantMessage(`Ran: ${said}`);
   };
@@ -102,6 +100,16 @@ it("runs a subagent on the agent's files as they are when it starts", async () =
     { marker: "v2", said: "Make a response." },
     { marker: "v2", said: "Delegate and wait." },
   ]);
+});
+
+it("runs a background subagent on the agent's files as they are when it starts", async () => {
+  const { requests, answers } = scripted();
+  const agent = await fixture({ resources, answers });
+  const root = await agent.capture();
+  await writeFile(join(agent.resources ?? "", "extensions/marker.js"), marker("v2"));
+  expect(await agent.ask("turn-1", "Delegate.", { resource_root: root })).toBe("Done.");
+  await agent.outcome("opened-1");
+  expect(requests.find(({ said }) => said === "Make a response.")?.marker).toBe("v2");
 });
 
 it("runs a schedule on the last resources that loaded when the agent's files do not load as it is due, saying why", async () => {
