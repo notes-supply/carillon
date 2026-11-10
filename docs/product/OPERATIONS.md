@@ -482,8 +482,10 @@ carillon settings --agent assistant reset extensions    # the default again
 `extensions=` takes the whole list, comma separated, and refuses a name the
 agent does not have, listing the ones it has. A selected extension the agent
 no longer has, such as a deleted file or an `mcp:` server `mcp.json` no
-longer configures, shows as unavailable, and Pi refuses messages until a
-change removes it. Pi offers only the files in `extensions/` whose names
+longer configures, shows as unavailable. While the resources a message
+brings cannot be used, Pi answers it on the last resources that loaded, or
+its defaults, and the agent reads why at the start of the message, so it can
+repair them itself; `carillon logs runtime-pi` has the same error. Pi offers only the files in `extensions/` whose names
 hold no comma. Busy and Extensions are kept in `settings.json` in the
 agent's `resources` directory, which is `CARILLON_HOME/agents/default/` for
 the assistant setup creates. A change rewrites that file keeping everything

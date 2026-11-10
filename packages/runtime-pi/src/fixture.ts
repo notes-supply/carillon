@@ -99,6 +99,7 @@ interface FixtureOptions {
   readonly answers?: FauxResponseStep[];
   readonly clock?: Clock;
   readonly mcp?: readonly McpServer[];
+  readonly importDeadlineMs?: number;
 }
 
 export async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -151,6 +152,9 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       defaults,
       storage,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
+      ...(options.importDeadlineMs === undefined
+        ? {}
+        : { importDeadlineMs: options.importDeadlineMs }),
       ...(mcp === undefined ? {} : { mcp }),
     });
     const fixture: Fixture = {

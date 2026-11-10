@@ -30,7 +30,12 @@ import {
   type TurnActivity,
 } from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
-import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
+import {
+  diagnostic,
+  ExplainedFailure,
+  redactCredentials,
+  RuntimeClosed,
+} from "@carillon/runtime/failure";
 import type { TurnRequest } from "@carillon/runtime/operations";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -51,11 +56,14 @@ import type { ModelChoice, ModelSettings, PiCatalogue } from "./models.ts";
 import { openingTask, type Opening } from "./opening.ts";
 import {
   carillonExtension,
+  DEFAULT_BUSY,
   isUserExtension,
+  loadSkills,
   loadSnapshot,
   selectedExtensions,
   type Extensions,
   type Snapshot,
+  type Unloadable,
 } from "./resources.ts";
 import { createSchedulesExtension } from "./schedules.ts";
 import { expandSkills } from "./skills.ts";
@@ -77,6 +85,8 @@ export interface AgentOptions {
   readonly workspace: string;
   readonly storage: Storage;
   readonly storePath: string;
+  /** The agent's own folder, which core captures for each message. */
+  readonly resources?: string;
   readonly skillsDirectory: string;
   readonly catalogue: PiCatalogue;
   readonly models: ModelSettings;
@@ -90,6 +100,8 @@ export interface AgentOptions {
   /** The MCP servers, each a built-in extension whose tools change as it connects. */
   readonly mcp: readonly McpServer[];
   readonly clock?: Clock;
+  /** How long a user extension may take to import. */
+  readonly importDeadlineMs: number;
 }
 
 export interface DurableAgent {
@@ -117,7 +129,12 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   let closing = false;
   const watches = new Map<ConversationId, Promise<ConversationActivity>>();
   const watched = new Map<ConversationId, ConversationActivity>();
+  /** The last snapshot that loaded, which the agent runs on; the default extensions while none did. */
   let latest: Snapshot | undefined;
+  /** The snapshot last asked for, so one that does not load is neither imported nor logged again. */
+  let loading:
+    | { readonly root: string; readonly loaded: Promise<Snapshot | Unloadable> }
+    | undefined;
   /** Whether the snapshot recorded before startup no longer loads, so no snapshot says what is selected. */
   let unloaded = false;
   /** Whether adopting the latest snapshot kept an old user extension or left a module out. */
@@ -171,6 +188,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       ...options.mcp.map((server) => server.extension()),
     ],
     defaults: options.defaults,
+    importDeadlineMs: options.importDeadlineMs,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
   const unsubscribes = options.mcp.map((server) =>
@@ -206,18 +224,14 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   // Nothing runs before resume, so every live delivery is held before it can
   // finish, and the latest snapshot's extensions are installed first. One
-  // that no longer loads leaves the defaults until the next is admitted, and
-  // what is selected unknown.
+  // that no longer loads leaves the defaults until one that loads is
+  // admitted, and what is selected unknown.
   const recorded = (await harness.snapshot(Resources, context))?.root;
-  if (recorded !== undefined)
-    try {
-      await adopt(await loadSnapshot(recorded, workspace, extensions, options.skillsDirectory));
-    } catch (failure) {
-      unloaded = true;
-      console.error(
-        `agent ${options.id}: resources ${recorded}: ${diagnostic(failure)}; using the default extensions`,
-      );
-    }
+  if (recorded !== undefined) {
+    const loaded = await load(recorded);
+    if ("problem" in loaded) unloaded = true;
+    else await adopt(loaded);
+  }
   const inspection = await harness.inspect(context);
   for (const { record } of inspection.tasks)
     if (record.kind === DELIVERY && isDeliveryInput(record.input)) hold(record.input);
@@ -300,18 +314,18 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   async function admit(request: TurnRequest): Promise<void> {
     if ((await harness.snapshot(Turns, request.correlation_id, context))?.task !== undefined)
       return;
-    const snapshot =
-      latest?.root === resolve(request.resource_root)
-        ? latest
-        : await loadSnapshot(
-            resolve(request.resource_root),
-            workspace,
-            extensions,
-            options.skillsDirectory,
-          );
+    const root = resolve(request.resource_root);
+    const loaded = latest?.root === root ? latest : await load(root);
+    const snapshot = "problem" in loaded ? latest : loaded;
     const input = [
+      "problem" in loaded
+        ? `[Carillon] Your resources${options.resources === undefined ? "" : ` in ${options.resources}`} did not load, so you run on ${snapshot === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them. Tell the person.\n\n${loaded.problem}`
+        : "",
       turnContext(request.native) ?? "",
-      await expandSkills(request.input, snapshot.skills),
+      await expandSkills(
+        request.input,
+        snapshot?.skills ?? loadSkills(undefined, options.skillsDirectory),
+      ),
     ]
       .filter((part) => part.length > 0)
       .join("\n\n");
@@ -347,10 +361,12 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       if (request.native !== undefined) info.native = copyJson(request.native);
       if (attachments.note !== undefined) info.attachment_root = request.attachment_root;
       if (!runs(await tx.doc(AgentDoc, id), choice)) await configure(tx, id, choice);
-      (await tx.doc(Resources)).root = snapshot.root;
+      if (snapshot !== undefined) (await tx.doc(Resources)).root = snapshot.root;
       return { conversation: id, admitted: false };
     }, context);
-    if (!admitted && (snapshot !== latest || incomplete)) await adopt(snapshot);
+    if (!admitted && snapshot !== undefined && (snapshot !== latest || incomplete))
+      await adopt(snapshot);
+    const busy = snapshot?.busy ?? DEFAULT_BUSY;
     const parts: Exclude<UserInput, string> = [
       ...(input.length === 0 ? [] : [{ type: "text" as const, text: input }]),
       ...(attachments.note === undefined
@@ -368,7 +384,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
         requestId: request.correlation_id,
         // No boundary of a run places a follow-up into it, so a message
         // interrupting it cannot land in it before the abort.
-        whenBusy: snapshot.busy === "steer" ? "steer" : "followUp",
+        whenBusy: busy === "steer" ? "steer" : "followUp",
         entry: { kind: MESSAGE, data: { turn: request.correlation_id } },
       },
       context,
@@ -381,7 +397,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     });
     // In interrupt mode, once handed over and after the conversation's
     // earlier controls, a message still waiting ends the run it waits behind.
-    if (!admitted && snapshot.busy === "interrupt")
+    if (!admitted && busy === "interrupt")
       inOrder(conversation, async () => {
         if ((await waitingMessages(conversation)).includes(submission.id))
           await interrupt(conversation, submission.id, INTERRUPTED);
@@ -426,6 +442,22 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       context,
     );
     return submission.id;
+  }
+
+  /** The snapshot at `root`, loaded once while it is the last asked for; one that does not load is logged. */
+  function load(root: string): Promise<Snapshot | Unloadable> {
+    if (loading?.root === root) return loading.loaded;
+    const loaded = loadSnapshot(root, workspace, extensions, options.skillsDirectory).then(
+      (result) => {
+        if ("problem" in result)
+          console.error(
+            `agent ${options.id}: resources ${root} did not load: ${redactCredentials(result.problem)}`,
+          );
+        return result;
+      },
+    );
+    loading = { root, loaded };
+    return loaded;
   }
 
   /** Whether the agent selects the extension; undefined while no snapshot that loads says. */

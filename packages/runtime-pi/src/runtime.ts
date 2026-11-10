@@ -18,6 +18,7 @@ import type { McpServer } from "./mcp.ts";
 import { modelSettings, type PiCatalogue } from "./models.ts";
 import {
   changeResourceSetting,
+  IMPORT_DEADLINE_MS,
   loadSkills,
   RESOURCE_SETTINGS,
   resourceSettings,
@@ -53,6 +54,8 @@ export interface PiRuntimeOptions {
   /** An agent's storage; its SQLite file by default. */
   readonly storage?: (agentId: string) => Promise<Storage>;
   readonly clock?: Clock;
+  /** How long a user extension may take to import; {@link IMPORT_DEADLINE_MS} by default. */
+  readonly importDeadlineMs?: number;
 }
 
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
@@ -72,6 +75,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           workspace: agent.workspace,
           storage: await storage(agent.id),
           storePath: store(agent.id),
+          ...(agent.resources === undefined ? {} : { resources: agent.resources }),
           skillsDirectory: options.skillsDirectory,
           catalogue: options.catalogue,
           models,
@@ -82,6 +86,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           defaults: options.defaults,
           mcp: options.mcp ?? [],
           ...(options.clock === undefined ? {} : { clock: options.clock }),
+          importDeadlineMs: options.importDeadlineMs ?? IMPORT_DEADLINE_MS,
         }),
       );
   } catch (failure) {
