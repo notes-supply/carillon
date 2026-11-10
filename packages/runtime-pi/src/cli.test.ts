@@ -431,6 +431,7 @@ it("exits on SIGTERM once a Codex model answered, and answers a message the stop
   await holding.ready;
   await inbox(url, home, "hello again", "turn-2");
   expect(await answering(url, core, "turn-2")).toBe("model");
+  await expect.poll(() => codex.requests, { timeout: 10_000 }).toBe(2);
   expect(await stopped(holding.child)).toBe(0);
   codex.holding = false;
   await start(live).ready;
