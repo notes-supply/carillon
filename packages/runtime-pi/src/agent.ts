@@ -85,6 +85,8 @@ export interface AgentOptions {
   readonly workspace: string;
   readonly storage: Storage;
   readonly storePath: string;
+  /** The agent's own folder, which core captures for each message. */
+  readonly resources?: string;
   readonly skillsDirectory: string;
   readonly catalogue: PiCatalogue;
   readonly models: ModelSettings;
@@ -317,7 +319,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     const snapshot = "problem" in loaded ? latest : loaded;
     const input = [
       "problem" in loaded
-        ? `[Carillon] Your resources did not load, so you run on ${snapshot === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them.\n\n${loaded.problem}`
+        ? `[Carillon] Your resources${options.resources === undefined ? "" : ` in ${options.resources}`} did not load, so you run on ${snapshot === undefined ? "Carillon's defaults" : "your previous resources"} until you fix them. Tell the person.\n\n${loaded.problem}`
         : "",
       turnContext(request.native) ?? "",
       await expandSkills(

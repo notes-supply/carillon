@@ -353,7 +353,7 @@ it.each([
     expect(read[0]).toBe("hello");
     expect(read[1]).toContain(problem);
     expect(read[1]).toMatch(
-      /^\[Carillon\] Your resources did not load, so you run on your previous resources until you fix them\.\n\n/u,
+      /^\[Carillon\] Your resources did not load, so you run on your previous resources until you fix them\. Tell the person\.\n\n/u,
     );
     expect(read[1]).toMatch(/\n\nfix it$/u);
     expect(read[1]).not.toContain(root);
@@ -416,6 +416,17 @@ it("keeps answering on the last resources that loaded across a restart, until a 
   expect(sections(request)).toMatchObject({ fixed: "<fixed>\nFixed for good.\n</fixed>" });
 });
 
+it("names the agent's own folder in the note, where the files to fix are", async () => {
+  const { requests, answers } = recording(1);
+  const agent = await fixture({ resources: {}, answers });
+  const root = await agent.snapshot({ "settings.json": "{" });
+  await agent.ask("turn-1", "hello", { resource_root: root });
+  const [request = []] = requests;
+  expect(textsOf(request.findLast(({ role }) => role === "user")).join("")).toContain(
+    `[Carillon] Your resources in ${agent.resources ?? ""} did not load`,
+  );
+});
+
 it("answers a message whose resources do not load on the default extensions when none loaded before", async () => {
   const { requests, answers } = recording(1);
   const agent = await fixture({ builtIns: [echo], defaults: ["echo"], answers });
@@ -423,7 +434,7 @@ it("answers a message whose resources do not load on the default extensions when
   expect(await agent.ask("turn-1", "hello", { resource_root: root })).toBe("Answer 1.");
   const [request = []] = requests;
   expect(textsOf(request.findLast(({ role }) => role === "user"))).toEqual([
-    "[Carillon] Your resources did not load, so you run on Carillon's defaults until you fix them.\n\nThe agent's settings.json is invalid at /busy: must be equal to one of the allowed values.\n\nhello",
+    "[Carillon] Your resources did not load, so you run on Carillon's defaults until you fix them. Tell the person.\n\nThe agent's settings.json is invalid at /busy: must be equal to one of the allowed values.\n\nhello",
   ]);
   expect(
     systems(request).flatMap(({ toolsAdded = [] }) => toolsAdded.map(({ name }) => name)),

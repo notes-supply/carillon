@@ -75,6 +75,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           workspace: agent.workspace,
           storage: await storage(agent.id),
           storePath: store(agent.id),
+          ...(agent.resources === undefined ? {} : { resources: agent.resources }),
           skillsDirectory: options.skillsDirectory,
           catalogue: options.catalogue,
           models,
