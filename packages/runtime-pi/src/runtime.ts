@@ -59,7 +59,7 @@ export interface PiRuntimeOptions {
 }
 
 export interface PiRuntime extends RuntimeOperations {
-  /** {@link DurableAgent.check} for the agent. */
+  /** Why the agent's own folder, as it is now, does not load; undefined when it does. */
   check(agentId: string): Promise<string | undefined>;
 }
 

@@ -475,10 +475,6 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     return loaded;
   }
 
-  /**
-   * The snapshot at `root` once it loads; else the last that loaded, or
-   * none, with the note that tells the agent why.
-   */
   async function resourcesAt(
     root: string,
   ): Promise<{ readonly snapshot: Snapshot | undefined; readonly note?: string }> {
@@ -494,8 +490,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   /**
    * Runs the agent on its resources as core captures them now, for a run
-   * the runtime starts itself; the note says why it runs on the last that
-   * loaded instead. Without resources, nothing can change.
+   * the runtime starts itself, or returns the note saying why it keeps the
+   * last that loaded. An agent without resources has nothing to capture.
    */
   async function refresh(): Promise<string | undefined> {
     if (options.resources === undefined) return undefined;

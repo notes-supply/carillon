@@ -30,15 +30,15 @@ const ReportSchema = Type.Union([
 export type Report = Static<typeof ReportSchema>;
 
 /**
- * Runs `command` in the child's mode with `args`, prints what it found and
- * returns the exit code: 0 when the folder loads.
+ * Runs this executable, with `self` before its arguments, in the child's
+ * mode with `args`, prints what it found and returns the exit code: 0 when
+ * the folder loads.
  */
 export async function checkResources(
-  command: readonly string[],
+  self: readonly string[],
   args: readonly string[],
 ): Promise<number> {
-  const [executable = process.execPath, ...prefix] = command;
-  const child = spawn(executable, [...prefix, LOAD_RESOURCES, ...args], {
+  const child = spawn(process.execPath, [...self, LOAD_RESOURCES, ...args], {
     stdio: ["ignore", "inherit", "inherit", "pipe"],
   });
   const channel = child.stdio[REPORT_FD];
@@ -67,7 +67,7 @@ export async function checkResources(
   return 1;
 }
 
-/** The reports read from `stream` until it ends, each a line of JSON; others are skipped. */
+/** Lines that are not reports, such as a module's writes to the same descriptor, are skipped. */
 async function reportsOf(stream: Readable): Promise<Report[]> {
   let text = "";
   for await (const chunk of stream) text += String(chunk);

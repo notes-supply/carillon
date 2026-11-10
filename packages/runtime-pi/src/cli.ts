@@ -68,8 +68,9 @@ interface Embedded {
 export async function main(values: readonly string[], embedded?: Embedded): Promise<void> {
   const [command, ...rest] = values;
   if (command === "check-resources") {
-    const self = embedded === undefined ? [process.argv[1] ?? ""] : [];
-    process.exitCode = await checkResources([process.execPath, ...process.execArgv, ...self], rest);
+    // A compiled executable is its own script; otherwise the runtime runs this file.
+    const script = embedded === undefined ? process.argv.slice(1, 2) : [];
+    process.exitCode = await checkResources([...process.execArgv, ...script], rest);
     return;
   }
   if (command === LOAD_RESOURCES) {
@@ -167,11 +168,7 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   }
 }
 
-/**
- * The runtime serving `parts.agents` with the built-in extensions, MCP
- * servers and skills it serves the installation's agents with, and what
- * closes it and them.
- */
+/** The runtime as it serves `parts.agents`, and what closes it with its MCP servers and sandbox. */
 async function openRuntime(
   config: Installation,
   stateDirectory: string,
@@ -242,71 +239,71 @@ async function openRuntime(
 
 /**
  * The child `check-resources` starts: opens the agent as the runtime does,
- * on storage of its own and a model that answers nothing, loads its folder
- * and reports to the parent on file descriptor 3. Configuration it cannot
- * use is reported too. It ends the process, so nothing a module started
- * keeps it running.
+ * on storage of its own and a model that answers nothing, and reports on
+ * file descriptor 3. It ends the process, so nothing a module started keeps
+ * it running.
  */
 async function loadResources(values: readonly string[], embedded?: Embedded): Promise<never> {
   const report = (line: Report) => {
     writeSync(REPORT_FD, `${JSON.stringify(line)}\n`);
   };
-  try {
-    const args = parseArguments(values);
-    const providerId = args.get("provider") ?? "runtime-pi";
-    const home = process.env["CARILLON_HOME"];
-    const path =
-      args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
-    if (path === undefined) throw new Error("--config is required outside `carillon runtime-pi`");
-    const config = await loadInstallation(path, providerId);
-    if (typeof config === "string")
-      throw new Error(`runtime provider ${providerId} is ${notServing(config)}`);
-    const agentId =
-      args.get("agent") ??
-      process.env["CARILLON_AGENT"] ??
-      (config.agents.length === 1 ? config.agents[0]?.id : undefined);
-    const agent = config.agents.find(({ id }) => id === agentId);
-    if (agent === undefined)
-      throw new Error(
-        agentId === undefined
-          ? `name the agent with --agent: ${providerId} serves ${config.agents.map(({ id }) => id).join(", ")}`
-          : `agent ${agentId} does not run on ${providerId}`,
-      );
-    if (agent.resources === undefined) {
-      report({
-        kind: "done",
-        ok: true,
-        text: `${agent.id} has no resources of its own, so it runs on Carillon's defaults.`,
-      });
-      process.exit(0);
-    }
-    report({ kind: "loading", folder: agent.resources });
-    const { runtime } = await openRuntime(
-      config,
-      resolve(args.get("state-dir") ?? join(config.root, "pi")),
-      embedded,
-      {
-        agents: [agent],
-        catalogue: deterministicCatalogue(),
-        core: createCoreClient({ url: config.coreUrl, providerId, token: "" }),
-        inlineImages: DEFAULT_INLINE_IMAGES,
-        storage: () => Promise.resolve(new MemoryStorage()),
-      },
-    );
-    const problem = await runtime.check(agent.id);
-    report(
-      problem === undefined
-        ? { kind: "done", ok: true, text: `${agent.resources} loads.` }
-        : { kind: "done", ok: false, text: `${agent.resources} does not load:\n\n${problem}` },
-    );
-  } catch (failure) {
-    report({
+  report(
+    await checked(values, embedded, report).catch((failure: unknown): Report => ({
       kind: "done",
       ok: false,
       text: `The check could not run: ${failure instanceof Error ? failure.message : String(failure)}`,
-    });
-  }
+    })),
+  );
   process.exit(0);
+}
+
+async function checked(
+  values: readonly string[],
+  embedded: Embedded | undefined,
+  report: (line: Report) => void,
+): Promise<Report> {
+  const args = parseArguments(values);
+  const providerId = args.get("provider") ?? "runtime-pi";
+  const home = process.env["CARILLON_HOME"];
+  const path = args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
+  if (path === undefined) throw new Error("--config is required outside `carillon runtime-pi`");
+  const config = await loadInstallation(path, providerId);
+  if (typeof config === "string")
+    throw new Error(`runtime provider ${providerId} is ${notServing(config)}`);
+  const agentId =
+    args.get("agent") ??
+    process.env["CARILLON_AGENT"] ??
+    (config.agents.length === 1 ? config.agents[0]?.id : undefined);
+  const agent = config.agents.find(({ id }) => id === agentId);
+  if (agent === undefined)
+    throw new Error(
+      agentId === undefined
+        ? `name the agent with --agent: ${providerId} serves ${config.agents.map(({ id }) => id).join(", ")}`
+        : `agent ${agentId} does not run on ${providerId}`,
+    );
+  if (agent.resources === undefined)
+    return {
+      kind: "done",
+      ok: true,
+      text: `${agent.id} has no resources of its own, so it runs on Carillon's defaults.`,
+    };
+  report({ kind: "loading", folder: agent.resources });
+  const { runtime } = await openRuntime(
+    config,
+    resolve(args.get("state-dir") ?? join(config.root, "pi")),
+    embedded,
+    {
+      agents: [agent],
+      catalogue: deterministicCatalogue(),
+      core: createCoreClient({ url: config.coreUrl, providerId, token: "" }),
+      inlineImages: DEFAULT_INLINE_IMAGES,
+      storage: () => Promise.resolve(new MemoryStorage()),
+    },
+  );
+  const problem = await runtime.check(agent.id);
+  return problem === undefined
+    ? { kind: "done", ok: true, text: `${agent.resources} loads.` }
+    : { kind: "done", ok: false, text: `${agent.resources} does not load:\n\n${problem}` };
 }
 
 /**
