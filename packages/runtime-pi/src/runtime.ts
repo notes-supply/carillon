@@ -3,6 +3,7 @@
  * one harness over `<component>/agents/<agent>.sqlite`; the runtime holds
  * every turn core hands over and settles it through core's client.
  */
+import { cleanupSessionResources } from "@earendil-works/pi-ai";
 import type { Extension, Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
@@ -152,6 +153,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<PiRunt
     },
     async close() {
       await Promise.allSettled([...agents.values()].map((agent) => agent.close()));
+      // pi-durable leaves open what pi-ai keeps between a conversation's
+      // requests, such as a Codex WebSocket, which would keep the process alive.
+      cleanupSessionResources();
     },
   };
 }
