@@ -73,7 +73,8 @@ again is recorded, another is refused. A turn still queued is settled too,
 since the runtime may hold a turn whose 202 core never recorded. A runtime
 may also open a running turn in a conversation whose agent runs on
 it, for a schedule or a subagent's report, idempotent by its key, which no
-other conversation may reuse; such a turn has no person or message behind it. `GET /v1/runtime/turns`
+other conversation may reuse; such a turn has no person or message behind it.
+It records the resources of the conversation's latest turn. `GET /v1/runtime/turns`
 lists the turns core records running on the runtime, each opened turn with
 its key, so a runtime that restarts can take up every turn it holds.
 Interfaces may not use event IDs that begin `runtime:`.
@@ -202,7 +203,8 @@ largest file the conversation's interface uploads, and adds a line to the
 delivered text for each file it cannot keep. The same outcome again copies
 nothing; while the files are being copied, it is refused as unavailable, to
 be asked again. It opens turns of its
-own through `POST /v1/runtime/turns`, reads back the turns core records
+own through `POST /v1/runtime/turns`, has core capture an agent's resources
+for a run it starts itself through `POST /v1/runtime/resources`, reads back the turns core records
 running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. A turn's activity snapshot lists the
 controls it offers now, and says `queued` while it waits behind another. A failure
@@ -378,7 +380,9 @@ or special files are refused. An agent without resources captures none.
 
 A runtime decides which captured copy a turn uses. The Pi runtime uses the
 latest one it admitted for the agent that loads, and tells the agent why a
-newer one did not: an edit applies to the agent's next
+newer one did not. Before a run it starts itself, a schedule's or a
+subagent's, it asks core for a fresh copy, so the agent can verify its own
+edit without a person's message. An edit applies to the agent's next
 model request, including those for messages already waiting, and its
 `settings.json` selects the agent's extensions and busy mode, which
 `carillon settings --agent` also changes. T3 takes no

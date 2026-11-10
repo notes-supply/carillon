@@ -153,6 +153,24 @@ A recorded snapshot that no longer loads at startup is logged, and the agent
 uses the default extensions until one that loads is admitted; what it selects
 is unknown meanwhile, so schedules wait for it.
 
+A run the runtime starts itself, a scheduled run, a subagent or a
+subagent's report, first asks core to capture the agent's resource root as
+it is then (`POST /v1/runtime/resources`) and loads that snapshot as it
+loads a message's, note included when it does not load or core cannot
+capture it. So an agent that edits its own files can verify the change from
+a subagent or a schedule, without a message from a person.
+
+`check-resources [--agent <id>]`, run as `carillon runtime-pi
+check-resources`, loads an agent's resource root as it is now, the way a
+message's snapshot is loaded, and prints that it loads or the problem the
+note would carry, exiting 1 then. It opens the agent beside the built-in
+extensions and `mcp.json`'s servers, on storage of its own, in a child of
+the same executable, so a module's top-level code runs apart from the
+running runtime. A module that ends that process, or a load still running
+after 10 seconds, fails the check. The agent defaults to `CARILLON_AGENT`,
+which the runtime sets in its agents' shells, then to the runtime's only
+agent; `--config` defaults to `CARILLON_HOME`'s.
+
 ## Skills
 
 A person invokes a skill of the snapshot by naming `$<name>` anywhere
