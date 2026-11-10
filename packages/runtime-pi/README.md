@@ -113,7 +113,7 @@ admitted earlier. Each snapshot is read once:
   the runtime's own in [`skills/`](skills), which one of the same name
   replaces. The prompt also names the agent's store, which the built-in
   `conversation-history` skill reads;
-- `settings.json`, whose unknown settings are refused:
+- `settings.json`, whose unknown settings make the snapshot unloadable:
 
   ```json
   { "extensions": { "add": ["codemode"], "remove": ["tool-search"] }, "busy": "steer" }
@@ -140,9 +140,9 @@ including a module pi-durable cannot install beside the built-in extensions,
 such as one reusing a task name, or one still importing after 5 seconds. The
 turn that brought it still runs, on the last snapshot that loaded, or on the
 defaults when none did, and never records the one that failed. The model
-reads a note before the message saying so, with the whole error: Bun's build
-errors each at their file, line and column, and a throw with its frames in
-the snapshot, paths relative to the snapshot. The runtime logs it once. The
+reads a note before the message saying so, with the error, cut at 4,000
+characters: Bun's build errors each at their file, line and column, and a
+throw with its frames in the snapshot, paths relative to the snapshot. The runtime logs it once. The
 deadline cannot stop a module whose top-level code exits the process or never
 yields. A newer snapshot replaces the
 installed user extensions. An old one stays while a live task needs one of

@@ -332,6 +332,14 @@ it.each([
     "extensions/waits.ts could not be loaded: its module did not finish importing within 0.2 seconds",
   ],
   ["a SYSTEM.md it cannot read", { "SYSTEM.md": "Be careful." }, "EACCES"],
+  [
+    "a user extension that throws a very long error",
+    {
+      "extensions/long.ts": 'throw new Error("x".repeat(512 * 1024));\n',
+      "settings.json": JSON.stringify({ extensions: ["extensions/long.ts"] }),
+    },
+    "extensions/long.ts could not be loaded: xxxx",
+  ],
 ])(
   "answers a message whose resources have %s on the last that loaded, telling the agent why",
   async (_name, files, problem) => {
@@ -349,6 +357,7 @@ it.each([
     );
     expect(read[1]).toMatch(/\n\nfix it$/u);
     expect(read[1]).not.toContain(root);
+    expect(read[1]?.length).toBeLessThan(5000);
   },
 );
 

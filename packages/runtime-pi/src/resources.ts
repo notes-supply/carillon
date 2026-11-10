@@ -115,7 +115,10 @@ export interface Snapshot {
   };
 }
 
-/** Why a snapshot cannot be used, with its paths relative to its root. */
+/** The most of a problem the agent reads and the log keeps: room for a dozen build errors. */
+const PROBLEM_LIMIT = 4000;
+
+/** Why a snapshot cannot be used, with its paths relative to its root, cut at `PROBLEM_LIMIT`. */
 export interface Unloadable {
   readonly problem: string;
 }
@@ -154,10 +157,11 @@ export async function loadSnapshot(
     return await readSnapshot(root, workspace, extensions, builtInSkills);
   } catch (failure) {
     const text = failure instanceof Error ? failure.message : String(failure);
+    const problem = stripVTControlCharacters(text)
+      .replaceAll(`${pathToFileURL(root).href}/`, "")
+      .replaceAll(`${root}/`, "");
     return {
-      problem: stripVTControlCharacters(text)
-        .replaceAll(`${pathToFileURL(root).href}/`, "")
-        .replaceAll(`${root}/`, ""),
+      problem: problem.length > PROBLEM_LIMIT ? `${problem.slice(0, PROBLEM_LIMIT)}…` : problem,
     };
   }
 }
