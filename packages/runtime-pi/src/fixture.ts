@@ -107,7 +107,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
   const workspace = join(directory, "workspace");
   const componentDirectory = join(directory, "component");
   await mkdir(workspace);
-  const core = await startFakeCore();
+  const core = await startFakeCore(0, capture);
   const model = fauxProvider({
     models: [
       { id: "scripted", name: "Scripted" },
@@ -134,6 +134,14 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       await mkdir(dirname(join(resources, path)), { recursive: true });
       await writeFile(join(resources, path), content);
     }
+  }
+
+  async function capture(): Promise<string> {
+    if (resources === undefined) throw new Error("the agents have no resources");
+    snapshots += 1;
+    const root = join(directory, "snapshots", String(snapshots));
+    await cp(resources, root, { recursive: true });
+    return root;
   }
 
   async function open(mcp = options.mcp, defaults = options.defaults ?? []): Promise<Fixture> {
@@ -200,13 +208,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         }
         return root;
       },
-      async capture() {
-        if (resources === undefined) throw new Error("the agents have no resources");
-        snapshots += 1;
-        const root = join(directory, "snapshots", String(snapshots));
-        await cp(resources, root, { recursive: true });
-        return root;
-      },
+      capture,
       async outcome(turnId) {
         const path = `/v1/runtime/turns/${encodeURIComponent(turnId)}/outcome`;
         for (let attempt = 0; attempt < 400; attempt += 1) {

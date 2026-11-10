@@ -45,9 +45,14 @@ export interface FakeCore {
 /**
  * Settles each turn once, answering the same outcome again as recorded and
  * another as superseded, opens one turn per runtime and key, and lists the
- * turns held or opened that are not settled yet, oldest first.
+ * turns held or opened that are not settled yet, oldest first. `capture`
+ * captures an agent's resources, returning where; without it, capturing is
+ * refused.
  */
-export async function startFakeCore(port = 0): Promise<FakeCore> {
+export async function startFakeCore(
+  port = 0,
+  capture?: (agentId: string) => Promise<string>,
+): Promise<FakeCore> {
   const received: Received[] = [];
   const scripted: number[] = [];
   const settled = new Map<string, unknown>();
@@ -104,6 +109,12 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
       if (earlier === undefined && Check(TurnOutcomeSchema, body))
         outcomeOf(turnId).resolve(Parse(TurnOutcomeSchema, body));
       return [earlier === undefined || earlier === kind ? 204 : 409];
+    }
+    if (path === "/v1/runtime/resources") {
+      const agent = agentOf(body);
+      if (capture === undefined || typeof agent !== "string")
+        return [409, { error: "no resources to capture" }];
+      return [200, { resource_root: await capture(agent) }];
     }
     if (path === "/v1/runtime/turns" && request.method === "GET")
       return [200, [...running.values()]];
@@ -192,6 +203,12 @@ function kindOf(body: unknown): unknown {
 
 function keyOf(body: unknown): unknown {
   return typeof body === "object" && body !== null && "key" in body ? body.key : undefined;
+}
+
+function agentOf(body: unknown): unknown {
+  return typeof body === "object" && body !== null && "agent_id" in body
+    ? body.agent_id
+    : undefined;
 }
 
 function reply(response: ServerResponse, status: number, body?: unknown): void {

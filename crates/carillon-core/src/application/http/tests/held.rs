@@ -7,6 +7,8 @@ use carillon_protocol::{
     model::OpenedTurn,
     turns::{RunningTurn, Silence},
 };
+use std::fs;
+
 use tempfile::tempdir;
 
 use super::{
@@ -535,6 +537,88 @@ async fn controls_reach_the_runtime_holding_a_running_turn_and_its_answer_comes_
         StatusCode::CONFLICT
     );
     assert_eq!(runtime.controlled().len(), 2);
+    Ok(())
+}
+
+async fn capture(
+    state: &AppState,
+    (runtime, token): (&str, &str),
+    agent: &str,
+) -> Result<Result<PathBuf, StatusCode>> {
+    let mut headers = HeaderMap::new();
+    headers.insert(PROVIDER_HEADER, runtime.parse()?);
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse()?,
+    );
+    let body = Bytes::from(serde_json::to_vec(&json!({ "agent_id": agent }))?);
+    Ok(runtime::resources(State(state.clone()), headers, body)
+        .await
+        .map(|Json(captured)| PathBuf::from(captured.resource_root))
+        .map_err(|refusal| refusal.status))
+}
+
+#[tokio::test]
+async fn a_runtime_captures_its_agents_resources_as_they_are_now() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (mut fixture, state) = durable(directory.path(), &runtime)?;
+    add_runtime(&mut fixture, "other-runtime", "other-only")?;
+    let state_with_other = configured(&fixture);
+    let first = capture(&state, RUNTIME, "test-agent")
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
+    assert_eq!(
+        fs::read_to_string(first.join("SYSTEM.md"))?,
+        "test instructions"
+    );
+    fs::write(
+        directory.path().join("resources/SYSTEM.md"),
+        "edited instructions",
+    )?;
+    let second = capture(&state, RUNTIME, "test-agent")
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
+    assert_ne!(first, second);
+    assert_eq!(
+        fs::read_to_string(second.join("SYSTEM.md"))?,
+        "edited instructions"
+    );
+    assert_eq!(
+        fs::read_to_string(first.join("SYSTEM.md"))?,
+        "test instructions"
+    );
+    for (caller, agent, wanted) in [
+        (
+            ("test-runtime", "wrong"),
+            "test-agent",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            ("test-interface", "test-only"),
+            "test-agent",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            ("other-runtime", "other-only"),
+            "test-agent",
+            StatusCode::CONFLICT,
+        ),
+        (RUNTIME, "no-such-agent", StatusCode::CONFLICT),
+    ] {
+        assert_eq!(
+            capture(&state_with_other, caller, agent).await?.err(),
+            Some(wanted),
+            "{caller:?} {agent}"
+        );
+    }
+    fixture.config.value.providers[1].enabled = false;
+    assert_eq!(
+        capture(&configured(&fixture), RUNTIME, "test-agent")
+            .await?
+            .err(),
+        Some(StatusCode::FORBIDDEN)
+    );
     Ok(())
 }
 

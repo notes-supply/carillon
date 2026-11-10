@@ -11,7 +11,7 @@ use axum::{
 use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
 use carillon_protocol::{
     model::OpenedTurn,
-    turns::{RunningTurn, TurnOpening, TurnOutcome},
+    turns::{CapturedResources, ResourceCapture, RunningTurn, TurnOpening, TurnOutcome},
 };
 use std::{
     mem::{self, Discriminant},
@@ -84,6 +84,30 @@ pub(super) async fn open(
             .blocking(move |core| core.open_turn(&runtime, &opening))
             .await?,
     ))
+}
+
+/// Captures the resources of one of the calling runtime's agents as they
+/// are now, for a run it starts itself, as core captures them with a
+/// message. A disabled runtime starts none.
+pub(super) async fn resources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Json<CapturedResources>, ApiError> {
+    let config = state.config();
+    let runtime = runtime_provider(&headers, &config)?;
+    if !runtime.enabled {
+        return Err(ApiError::forbidden("runtime provider is disabled"));
+    }
+    let runtime = runtime.id.clone();
+    let capture: ResourceCapture = body(&bytes, "resource capture")?;
+    let root = state
+        .core
+        .blocking(move |core| core.capture_resources(&runtime, &capture.agent_id))
+        .await?;
+    Ok(Json(CapturedResources {
+        resource_root: root.display().to_string(),
+    }))
 }
 
 /// The turns core records running on the calling runtime, enabled or not,

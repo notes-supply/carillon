@@ -41,6 +41,7 @@ import { recordCutOffs } from "./delivery.ts";
 import { ConversationInfo } from "./documents.ts";
 import { THINKING_LEVELS } from "./models.ts";
 import type { OpeningTask } from "./opening.ts";
+import { noted } from "./resources.ts";
 import { SCHEDULES } from "./schedules.ts";
 
 const SUBAGENTS = "subagents";
@@ -104,8 +105,15 @@ type ReporterState =
 
 const COMPLETED = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 
-/** `opening` opens the turns that bring background subagents' answers. */
-export function createSubagentsExtension(host: { readonly opening: OpeningTask }): Extension {
+/**
+ * `opening` opens the turns that bring background subagents' answers, and
+ * `refresh` runs the agent on its resources as they are when a subagent
+ * starts, returning the note that says why it cannot.
+ */
+export function createSubagentsExtension(host: {
+  readonly opening: OpeningTask;
+  readonly refresh: () => Promise<string | undefined>;
+}): Extension {
   const reporter = defineTask<{ readonly task: string }, ReporterState, null>({
     name: REPORTER,
     version: 1,
@@ -127,7 +135,11 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
         const child = await runtime.conversation(id, context);
         if (child === undefined) throw new Error(`subagent ${String(task.id)} has no conversation`);
         const submission = await child.submit(
-          { type: "input", content: task.input.task, requestId: `subagent:${String(task.id)}` },
+          {
+            type: "input",
+            content: noted(task.input.task, await host.refresh()),
+            requestId: `subagent:${String(task.id)}`,
+          },
           context,
         );
         const settled = await submission.wait(context);
@@ -237,7 +249,11 @@ export function createSubagentsExtension(host: { readonly opening: OpeningTask }
       const child = await api.conversation(id, context);
       if (child === undefined) throw new Error("The subagent's conversation is gone.");
       const submission = await child.submit(
-        { type: "input", content: task, requestId: `subagent:${String(api.taskId)}` },
+        {
+          type: "input",
+          content: noted(task, await host.refresh()),
+          requestId: `subagent:${String(api.taskId)}`,
+        },
         context,
       );
       const settled = await submission.wait(context);

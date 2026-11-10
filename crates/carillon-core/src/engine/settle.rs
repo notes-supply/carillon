@@ -1,6 +1,8 @@
 //! What runtimes tell core of the turns they hold, and the turns an
 //! interface may control there.
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use carillon_protocol::{
     model::{OpenedTurn, TurnState},
@@ -8,7 +10,10 @@ use carillon_protocol::{
 };
 
 use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report};
-use crate::db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement};
+use crate::{
+    db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement},
+    resources,
+};
 
 impl Core {
     /// Settles a turn `runtime_id` holds as it says the turn ended, with the
@@ -105,6 +110,28 @@ impl Core {
                 "the conversation runs on {owner}, not {runtime_id}"
             ))),
         }
+    }
+
+    /// Captures the resources of an agent that runs on `runtime_id` as they
+    /// are now, for a run the runtime starts itself, and returns where.
+    /// # Errors
+    /// Returns an agent that does not run there as a conflict, or capture
+    /// errors.
+    pub(crate) fn capture_resources(
+        &self,
+        runtime_id: &str,
+        agent_id: &str,
+    ) -> Result<PathBuf, CoreError> {
+        let agent = self
+            .agent(agent_id)
+            .ok()
+            .filter(|agent| agent.runtime == runtime_id)
+            .ok_or_else(|| {
+                CoreError::Conflict(format!("{agent_id} does not run on {runtime_id}"))
+            })?;
+        let store = self.snapshot_store();
+        let id = resources::materialize(agent.resources.as_deref(), &store)?;
+        Ok(resources::root(&store, &id))
     }
 
     /// The turns core records running on `runtime_id`, oldest first: each

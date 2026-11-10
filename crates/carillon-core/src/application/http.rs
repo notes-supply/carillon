@@ -228,6 +228,7 @@ fn router(state: AppState) -> Router {
             get(runtime::running).post(runtime::open),
         )
         .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
+        .route("/v1/runtime/resources", post(runtime::resources))
         .route("/v1/jobs", get(jobs))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
