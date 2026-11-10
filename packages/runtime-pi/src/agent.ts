@@ -115,6 +115,11 @@ export interface DurableAgent {
   readonly calling: boolean;
   /** The built-in extensions its settings may select, by name. */
   readonly builtIn: readonly string[];
+  /**
+   * Loads the agent's own folder as it is now, as a message would bring it:
+   * why it does not load, or undefined. Its modules run in this process.
+   */
+  check(): Promise<string | undefined>;
   close(): Promise<void>;
 }
 
@@ -300,6 +305,17 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     },
 
     builtIn: extensions.builtIn.map((extension) => extension.name),
+
+    async check() {
+      if (options.resources === undefined) return undefined;
+      const loaded = await loadSnapshot(
+        resolve(options.resources),
+        workspace,
+        extensions,
+        options.skillsDirectory,
+      );
+      return "problem" in loaded ? loaded.problem : undefined;
+    },
 
     async close() {
       closing = true;

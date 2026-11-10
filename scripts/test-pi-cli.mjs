@@ -66,8 +66,53 @@ try {
   const bearer = run(["pi", "auth", "print-bearer-token", "--provider", "anthropic"], home);
   assert.equal(bearer.status, 0, bearer.stderr);
   assert.equal(bearer.stdout.trim(), "fixture-access-token");
+  // The resource check runs the packaged executable again as its child.
+  const hash = "0".repeat(64);
+  await mkdir(join(home, "agents", "assistant", "extensions"), { recursive: true });
+  await writeFile(
+    join(home, "carillon.toml"),
+    [
+      'data_dir = "state"',
+      "[core]",
+      'listen = "127.0.0.1:1"',
+      `operator_token_hash = "${hash}"`,
+      "[[providers]]",
+      'id = "runtime-pi"',
+      'role = "runtime"',
+      'version = "0.0.0"',
+      'url = "http://127.0.0.1:2"',
+      `token_hash = "${hash}"`,
+      "enabled = true",
+      "[[agents]]",
+      'id = "assistant"',
+      'name = "assistant"',
+      'runtime = "runtime-pi"',
+      'workspace = "."',
+      'resources = "agents/assistant"',
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    join(home, "agents", "assistant", "settings.json"),
+    JSON.stringify({ extensions: { add: ["extensions/mine.ts"] } }),
+  );
+  const module = join(home, "agents", "assistant", "extensions", "mine.ts");
+  const check = () =>
+    run(["check-resources", "--config", join(home, "carillon.toml"), "--agent", "assistant"], home);
+  await writeFile(module, "const hooks: unknown[] = []; export default { hooks };");
+  const loads = check();
+  assert.equal(loads.status, 0, loads.stderr);
+  assert.match(loads.stdout, /agents\/assistant loads\.\n$/u);
+  await writeFile(module, "export default { hooks: [ };");
+  const broken = check();
+  assert.equal(broken.status, 1);
+  assert.match(broken.stderr, /extensions\/mine\.ts:1:27: Unexpected \}/u);
+  await writeFile(module, "process.exit(0);");
+  const exits = check();
+  assert.equal(exits.status, 1);
+  assert.match(exits.stderr, /something ended the process \(exit code 0\)/u);
   console.log(
-    "cli: packaged Pi mode, version, help, runtime default and bundled login flows passed",
+    "cli: packaged Pi mode, version, help, runtime default, bundled login flows and resource check passed",
   );
 } finally {
   await rm(root, { recursive: true, force: true });
