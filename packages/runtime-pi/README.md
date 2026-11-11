@@ -153,18 +153,27 @@ A recorded snapshot that no longer loads at startup is logged, and the agent
 uses the default extensions until one that loads is admitted; what it selects
 is unknown meanwhile, so schedules wait for it.
 
-Each hook handler of a user extension has 30 seconds. One that takes longer
-is switched off: it returns nothing, which pi-durable takes from any hook as
-no change, so a late `beforeTool` lets its tool call through. The run goes
-on, and the runtime logs it once. The handler stays off while that snapshot
-is loaded, so until the agent's resources change. A restart imports the
-module again, with the hook on until it is late once more. While a handler
-is off, the agent's prompt has a section that names the file and the hook
-and asks the agent to tell the person. Every request made from then on
-carries it: the rest of the run the handler held, messages that waited
-behind it, scheduled runs and subagents. A Stop and the runtime's close
-wait for a running handler, so at most for its deadline. The deadline cannot stop a handler that never yields, and it does
-not cover an extension's tools, section `render` functions or `wraps`.
+Each hook handler of a user extension has 30 seconds. The first handler of
+an extension to take longer switches off every hook of that extension: each
+returns nothing at once, which pi-durable takes from any hook as no change,
+so a late `beforeTool` lets its tool call through. The run goes on, and the
+runtime logs it once. The hooks stay off while that snapshot is loaded, so
+until the agent's resources change. A restart imports the module again, with
+its hooks on until one is late once more. While an extension's hooks are
+off, the agent's prompt has a section that names the file and the late
+handler and asks the agent to tell the person. Every request made from then
+on carries it: the rest of the run the handler held, messages that waited
+behind it, scheduled runs and subagents. The request a late `beforeRequest`
+held was built before the section, so a run of one request does not carry
+it.
+
+A Stop and the runtime's close wait for a running handler. An extension's
+hooks cost them one deadline, once, and each further extension whose hooks
+are late costs one more. Once it has closed after SIGINT or SIGTERM, the
+runtime ends its process, so nothing a module left open, such as a request
+that never answers, keeps it running. The deadline cannot stop a handler
+that never yields, and it does not cover an extension's tools, section
+`render` functions or `wraps`.
 
 A run the runtime starts itself, a scheduled run, a subagent or a
 subagent's report, first asks core to capture the agent's resource root as
