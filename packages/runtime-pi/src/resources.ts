@@ -17,6 +17,7 @@ import {
   section,
   type AnyTask,
   type Extension,
+  type HookRegistration,
   type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Change, Setting, SettingValue, Subject } from "@carillon/protocol";
@@ -106,6 +107,8 @@ export interface Snapshot {
   readonly selected: readonly string[];
   /** The user extensions the snapshot lists, each named as its settings select it. */
   readonly modules: readonly Extension[];
+  /** The modules' hook handlers that missed their deadline, off while this snapshot is loaded. */
+  readonly slow: readonly SlowHook[];
   /** The skills a message may invoke; the prompt offers those not invocation-only. */
   readonly skills: readonly Skill[];
   /** Prompt sections, read once per snapshot so requests on it render the same prompt. */
@@ -114,6 +117,13 @@ export interface Snapshot {
     readonly context?: string;
     readonly skills?: string;
   };
+}
+
+/** A hook handler of a user extension: the extension's settings name, the task it hooks and its name. */
+interface SlowHook {
+  readonly extension: string;
+  readonly task: string;
+  readonly handler: string;
 }
 
 /** The most of a problem the agent reads and the log keeps: room for a dozen build errors. */
@@ -133,6 +143,8 @@ export interface Extensions {
   readonly defaults: readonly string[];
   /** How long a user extension may take to import. */
   readonly importDeadlineMs: number;
+  /** How long a hook handler of a user extension may take. */
+  readonly hookDeadlineMs: number;
 }
 
 /**
@@ -141,6 +153,12 @@ export interface Extensions {
  * others. Half of that leaves admission room for its other work.
  */
 export const IMPORT_DEADLINE_MS = 5_000;
+
+/**
+ * A handler holds its run, a Stop of that run and the runtime's close until
+ * it returns, and systemd kills a service still stopping after 90 seconds.
+ */
+export const HOOK_DEADLINE_MS = 30_000;
 
 /**
  * Reads a snapshot core captured: settings, prompt files and the listed
@@ -179,10 +197,9 @@ async function readSnapshot(
     selected,
     extensions.builtIn.map((extension) => extension.name),
   );
+  const slow: SlowHook[] = [];
   const modules = await Promise.all(
-    selected
-      .filter(isUserExtension)
-      .map((name) => importExtension(root, name, extensions.importDeadlineMs)),
+    selected.filter(isUserExtension).map((name) => importExtension(root, name, extensions, slow)),
   );
   const trial = createRegistry();
   for (const extension of [extensions.carillon, ...extensions.builtIn]) trial.install(extension);
@@ -214,6 +231,7 @@ async function readSnapshot(
     busy: settings.busy ?? DEFAULT_BUSY,
     selected,
     modules,
+    slow,
     skills,
     prompt: {
       ...(system === undefined || system.trim().length === 0 ? {} : { system }),
@@ -519,32 +537,44 @@ function refuseUnknown(names: readonly string[], builtIn: readonly string[]): vo
   }
 }
 
+const LATE = Symbol("late");
+
+/** What `work` settles as, or `LATE` once `deadlineMs` passed. */
+async function within(work: unknown, deadlineMs: number): Promise<unknown> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(resolve, deadlineMs, LATE);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * A user extension: its module's default export, a pi-durable extension
  * object. Its top-level code runs in the runtime's process, and a module
- * still importing after `deadlineMs` cannot be used.
+ * still importing after its deadline cannot be used.
  */
-async function importExtension(root: string, name: string, deadlineMs: number): Promise<Extension> {
-  let timer: NodeJS.Timeout | undefined;
-  const late = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `its module did not finish importing within ${String(deadlineMs / 1000)} seconds`,
-        ),
-      );
-    }, deadlineMs);
-  });
+async function importExtension(
+  root: string,
+  name: string,
+  { importDeadlineMs, hookDeadlineMs }: Extensions,
+  slow: SlowHook[],
+): Promise<Extension> {
   let module: unknown;
   try {
-    module = await Promise.race([import(pathToFileURL(join(root, name)).href), late]);
+    module = await within(import(pathToFileURL(join(root, name)).href), importDeadlineMs);
+    if (module === LATE)
+      throw new Error(
+        `its module did not finish importing within ${String(importDeadlineMs / 1000)} seconds`,
+      );
   } catch (failure) {
     throw new Error(
       `The agent's extension ${name} could not be loaded: ${importFailure(failure, root)}`,
       { cause: failure },
     );
-  } finally {
-    clearTimeout(timer);
   }
   const extension =
     typeof module === "object" && module !== null && "default" in module
@@ -556,7 +586,46 @@ async function importExtension(root: string, name: string, deadlineMs: number): 
       `The agent's extension ${name} must export a pi-durable extension object as its default export${first === undefined || first.instancePath.length === 0 ? "" : `: ${first.instancePath} ${first.message}`}.`,
     );
   }
-  return { ...extension, name };
+  if (extension.hooks === undefined) return { ...extension, name };
+  return { ...extension, name, hooks: bounded(extension.hooks, root, name, hookDeadlineMs, slow) };
+}
+
+/**
+ * The hooks with each handler under `deadlineMs`. One that misses it joins
+ * `slow` and from then on returns nothing at once, which pi-durable takes
+ * from any hook as no change. It never throws for being late: a throw from
+ * `beforeTool` blocks the tool call, and the agent repairs its files with tools.
+ */
+function bounded(
+  hooks: readonly HookRegistration[],
+  root: string,
+  extension: string,
+  deadlineMs: number,
+  slow: SlowHook[],
+): HookRegistration[] {
+  return hooks.map(({ task, handlers }) => ({
+    task,
+    handlers: Object.fromEntries(
+      Object.entries(handlers).map(([handler, run]: [string, unknown]) => {
+        if (typeof run !== "function") return [handler, run];
+        const hook: SlowHook = { extension, task, handler };
+        const bound = async (...args: unknown[]): Promise<unknown> => {
+          const result = slow.includes(hook)
+            ? LATE
+            : await within(Reflect.apply(run, handlers, args), deadlineMs);
+          if (result !== LATE) return result;
+          if (!slow.includes(hook)) {
+            slow.push(hook);
+            console.error(
+              `${join(root, extension)}: its ${task} hook ${handler} did not finish within ${String(deadlineMs / 1000)} seconds and is off`,
+            );
+          }
+          return undefined;
+        };
+        return [handler, bound];
+      }),
+    ),
+  }));
 }
 
 /** Where Bun's build errors point, which only their `position` holds. */

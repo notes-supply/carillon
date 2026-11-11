@@ -370,7 +370,7 @@ it("names each build error at its place under Bun, which runs the packaged runti
   const script = `
     import { defineExtension } from "@earendil-works/pi-durable";
     import { loadSnapshot } from ${JSON.stringify(join(import.meta.dirname, "resources.ts"))};
-    const loaded = await loadSnapshot(process.argv[1], process.argv[1], { carillon: defineExtension({ name: "carillon" }), builtIn: [], defaults: [], importDeadlineMs: 5000 }, process.argv[1]);
+    const loaded = await loadSnapshot(process.argv[1], process.argv[1], { carillon: defineExtension({ name: "carillon" }), builtIn: [], defaults: [], importDeadlineMs: 5000, hookDeadlineMs: 30000 }, process.argv[1]);
     console.log(loaded.problem);
   `;
   const bun = spawnSync("bun", ["-e", script, root], {

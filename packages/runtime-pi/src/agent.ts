@@ -103,6 +103,8 @@ export interface AgentOptions {
   readonly clock?: Clock;
   /** How long a user extension may take to import. */
   readonly importDeadlineMs: number;
+  /** How long a hook handler of a user extension may take. */
+  readonly hookDeadlineMs: number;
 }
 
 export interface DurableAgent {
@@ -195,6 +197,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     ],
     defaults: options.defaults,
     importDeadlineMs: options.importDeadlineMs,
+    hookDeadlineMs: options.hookDeadlineMs,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
   const unsubscribes = options.mcp.map((server) =>
@@ -475,13 +478,14 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     return loaded;
   }
 
+  /** The snapshot a run starting now uses, and the note its input begins with. */
   async function resourcesAt(
     root: string,
-  ): Promise<{ readonly snapshot: Snapshot | undefined; readonly note?: string }> {
+  ): Promise<{ readonly snapshot: Snapshot | undefined; readonly note: string | undefined }> {
     const loaded = latest?.root === root ? latest : await load(root);
     return "problem" in loaded
-      ? { snapshot: latest, note: fallbackNote(loaded.problem) }
-      : { snapshot: loaded };
+      ? { snapshot: latest, note: withSlow(latest, fallbackNote(loaded.problem)) }
+      : { snapshot: loaded, note: withSlow(loaded) };
   }
 
   /** Why a run keeps the last resources that loaded: its own did not load, or core could not capture them. */
@@ -492,6 +496,19 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       ? `Your resources${folder} did not load, so you run on ${kept} until you fix them.`
       : `Carillon could not copy your resources${folder}, so you run on ${kept}. Your files may be fine.`;
     return `[Carillon] ${lead} Tell the person.\n\n${problem}`;
+  }
+
+  /** `note`, then one for each hook handler of the snapshot that is off. */
+  function withSlow(snapshot: Snapshot | undefined, note?: string): string | undefined {
+    const folder = options.resources === undefined ? "" : ` in ${options.resources}`;
+    const notes = [
+      ...(note === undefined ? [] : [note]),
+      ...(snapshot?.slow ?? []).map(
+        ({ extension, task, handler }) =>
+          `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so it is off until your resources change. Tell the person.`,
+      ),
+    ];
+    return notes.length === 0 ? undefined : notes.join("\n\n");
   }
 
   /**
@@ -505,7 +522,10 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     try {
       root = resolve(await options.core.resources(options.id));
     } catch (failure) {
-      return fallbackNote(failure instanceof Error ? failure.message : String(failure), false);
+      return withSlow(
+        latest,
+        fallbackNote(failure instanceof Error ? failure.message : String(failure), false),
+      );
     }
     const { snapshot, note } = await resourcesAt(root);
     if (snapshot !== undefined && (snapshot !== latest || incomplete)) {

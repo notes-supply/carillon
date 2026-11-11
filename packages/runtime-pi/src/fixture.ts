@@ -27,7 +27,9 @@ import {
 import { createCoreClient } from "@carillon/runtime/core";
 import type { RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +102,7 @@ interface FixtureOptions {
   readonly clock?: Clock;
   readonly mcp?: readonly McpServer[];
   readonly importDeadlineMs?: number;
+  readonly hookDeadlineMs?: number;
 }
 
 export async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -136,11 +139,18 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     }
   }
 
+  /** As core captures: resources that did not change keep their snapshot. */
   async function capture(): Promise<string> {
     if (resources === undefined) throw new Error("the agents have no resources");
-    snapshots += 1;
-    const root = join(directory, "snapshots", String(snapshots));
-    await cp(resources, root, { recursive: true });
+    const hash = createHash("sha256");
+    const entries = await readdir(resources, { recursive: true, withFileTypes: true });
+    for (const entry of entries.toSorted((a, b) => a.parentPath.localeCompare(b.parentPath)))
+      if (entry.isFile())
+        hash
+          .update(join(entry.parentPath, entry.name))
+          .update(await readFile(join(entry.parentPath, entry.name)));
+    const root = join(directory, "snapshots", hash.digest("hex"));
+    if (!existsSync(root)) await cp(resources, root, { recursive: true });
     return root;
   }
 
@@ -163,6 +173,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       ...(options.importDeadlineMs === undefined
         ? {}
         : { importDeadlineMs: options.importDeadlineMs }),
+      ...(options.hookDeadlineMs === undefined ? {} : { hookDeadlineMs: options.hookDeadlineMs }),
       ...(mcp === undefined ? {} : { mcp }),
     });
     const fixture: Fixture = {
