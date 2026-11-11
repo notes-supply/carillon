@@ -591,12 +591,10 @@ async function importExtension(
   }
   if (extension.hooks === undefined) return { ...extension, name };
   const off = () => slow.some((hook) => hook.extension === name);
-  // Each handler is read from the module's own object, as pi-durable reads
-  // it, and runs under the deadline. The first to miss it joins `slow`, and
-  // from then on every handler of the extension returns nothing at once,
-  // which pi-durable takes from any hook as no change. None throws for being
-  // late: a throw from `beforeTool` blocks the call, and the agent repairs
-  // its files with tools.
+  // pi-durable reads a hook as `handlers[name]`, so inherited methods count,
+  // and takes `undefined` from any hook as no change. A late handler must not
+  // throw: a throw from `beforeTool` blocks the tools the agent repairs its
+  // files with.
   const hooks = extension.hooks.map(({ task, handlers }) => {
     const get = (_target: object, handler: string | symbol): unknown => {
       const run: unknown = Reflect.get(handlers, handler);

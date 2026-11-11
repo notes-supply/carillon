@@ -149,7 +149,6 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     const hash = createHash("sha256");
     for (const file of files) hash.update(file).update(await readFile(file));
     const root = join(directory, "snapshots", hash.digest("hex"));
-    // No await between the lookup and the set, so captures at once share one copy.
     const copied = captured.get(root) ?? cp(resources, root, { recursive: true });
     captured.set(root, copied);
     await copied;

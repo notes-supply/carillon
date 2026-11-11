@@ -127,13 +127,11 @@ it.each(HOOKS)(
     expect(await ask("turn-2", "again")).toBe("Tool: echo");
     expect(await calls()).toBe(`${handler} `);
     const [first, second] = seen();
-    // While no hook is off, the prompt is the one an agent without this deadline has.
     expect(first?.said).toBe("hello");
     expect(Object.keys(first?.sections ?? {})).toEqual(["cwd", "conversation_store"]);
-    // The request after the tool round is in the run the hook held.
-    expect(second?.sections["hooks_off"]).toBe(handler === "afterRun" ? undefined : note);
+    const askedAfterTheAnswer = handler === "afterRun";
+    expect(second?.sections["hooks_off"]).toBe(askedAfterTheAnswer ? undefined : note);
     expect(seen().at(-1)).toMatchObject({ said: "again", sections: { hooks_off: note } });
-    // The log names the file as settings do, not its copy in the snapshot.
     expect(off().map(([line]) => String(line))).toEqual([
       `extension extensions/slow.js: its ${task} hook ${handler} did not finish within 0.2 seconds, so its hooks are off`,
     ]);
