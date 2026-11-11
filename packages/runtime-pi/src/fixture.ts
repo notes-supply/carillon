@@ -28,7 +28,6 @@ import { createCoreClient } from "@carillon/runtime/core";
 import type { RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -139,18 +138,21 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     }
   }
 
+  const captured = new Map<string, Promise<void>>();
   /** As core captures: resources that did not change keep their snapshot. */
   async function capture(): Promise<string> {
     if (resources === undefined) throw new Error("the agents have no resources");
+    const files = (await readdir(resources, { recursive: true, withFileTypes: true }))
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .toSorted();
     const hash = createHash("sha256");
-    const entries = await readdir(resources, { recursive: true, withFileTypes: true });
-    for (const entry of entries.toSorted((a, b) => a.parentPath.localeCompare(b.parentPath)))
-      if (entry.isFile())
-        hash
-          .update(join(entry.parentPath, entry.name))
-          .update(await readFile(join(entry.parentPath, entry.name)));
+    for (const file of files) hash.update(file).update(await readFile(file));
     const root = join(directory, "snapshots", hash.digest("hex"));
-    if (!existsSync(root)) await cp(resources, root, { recursive: true });
+    // No await between the lookup and the set, so captures at once share one copy.
+    const copied = captured.get(root) ?? cp(resources, root, { recursive: true });
+    captured.set(root, copied);
+    await copied;
     return root;
   }
 

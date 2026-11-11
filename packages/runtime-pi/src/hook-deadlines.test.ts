@@ -180,6 +180,7 @@ it("tells a run the runtime starts that a hook is off, also when core cannot cap
   expect(said()).toContain(`${note}\n\nMake a response.`);
   agent.core.answer(503);
   await ask("turn-3", "Delegate.");
-  expect(said().at(-3)).toMatch(/^\[Carillon\] Carillon could not copy your resources/u);
-  expect(said().at(-3)).toContain(`answered 503\n\n${note}\n\nMake a response.`);
+  const started = said().findLast((text) => text.endsWith("Make a response."));
+  expect(started).toMatch(/^\[Carillon\] Carillon could not copy your resources/u);
+  expect(started).toContain(`answered 503\n\n${note}\n\nMake a response.`);
 });
