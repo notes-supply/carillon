@@ -45,12 +45,15 @@ const HOOKS = [
 ] as const;
 
 /**
- * An agent whose user extension has one hook that never returns, marking
- * each of its calls in the file `calls`. Each of its turns calls `echo`,
- * twice at once when told to, then answers with what the tool said. Told to
- * delegate, it starts a background subagent instead.
+ * An agent whose user extension has hooks that never return, each marking
+ * its calls with its name in the file `calls`. Each of its turns calls
+ * `echo`, twice at once when told to, then answers with what the tool said.
+ * Told to delegate, it starts a background subagent instead.
  */
-async function hanging(task: string, handler: string, extensions: readonly string[] = []) {
+async function hanging(
+  hooks: readonly (readonly [task: string, handler: string])[],
+  extensions: readonly string[] = [],
+) {
   const requests: (readonly Message[])[] = [];
   const model: FauxResponseFactory = (context) => {
     requests.push(context.messages);
@@ -76,18 +79,22 @@ async function hanging(task: string, handler: string, extensions: readonly strin
   fixtures.push(agent);
   const folder = agent.resources ?? "";
   const calls = join(agent.workspace, "calls");
+  const registrations = hooks.map(
+    ([task, handler]) => `{ task: "${task}", handlers: { ${handler}() {
+  appendFileSync(${JSON.stringify(calls)}, "${handler} ");
+  return new Promise(() => undefined);
+} } }`,
+  );
   await writeFile(
     join(folder, "extensions/slow.js"),
-    `import { appendFileSync } from "node:fs";
-export default { hooks: [{ task: "${task}", handlers: { ${handler}() {
-  appendFileSync(${JSON.stringify(calls)}, ".");
-  return new Promise(() => undefined);
-} } }] };`,
+    `import { appendFileSync } from "node:fs";\nexport default { hooks: [${registrations.join()}] };`,
   );
   const root = await agent.capture();
+  const [[task, handler] = []] = hooks;
   return {
     agent,
-    note: `[Carillon] The ${task} hook ${handler} of your extension extensions/slow.js in ${folder} did not finish within 0.2 seconds, so it is off until your resources change. Tell the person.`,
+    /** What the prompt says once the first of the hooks was late. */
+    note: `[Carillon] The ${task} hook ${handler} of your extension extensions/slow.js in ${folder} did not finish within 0.2 seconds, so that extension's hooks are off until your resources change. Tell the person.`,
     turn: (id: string, input: string) => agent.turn(id, input, { resource_root: root }),
     ask: (id: string, input: string) => agent.ask(id, input, { resource_root: root }),
     called: () => (existsSync(calls) ? true : undefined),
@@ -111,14 +118,14 @@ it.each(HOOKS)(
   "answers past a %s %s hook that never returns, turns it off and tells the agent",
   async (task, handler) => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const off = () => logged.mock.calls.filter(([line]) => String(line).includes("is off"));
-    const { ask, calls, seen, note } = await hanging(task, handler);
+    const off = () => logged.mock.calls.filter(([line]) => String(line).includes("are off"));
+    const { ask, calls, seen, note } = await hanging([[task, handler]]);
     // A blocked call would answer with pi-durable's refusal, not the tool's output.
     expect(await ask("turn-1", "hello")).toBe("Tool: echo");
     // An `afterRun` hook is asked after the answer, so it is off a little later.
     await eventually(() => (off().length > 0 ? true : undefined));
     expect(await ask("turn-2", "again")).toBe("Tool: echo");
-    expect(await calls()).toBe(".");
+    expect(await calls()).toBe(`${handler} `);
     const [first, second] = seen();
     // While no hook is off, the prompt is the one an agent without this deadline has.
     expect(first?.said).toBe("hello");
@@ -129,7 +136,7 @@ it.each(HOOKS)(
     expect(off().map(([line]) => String(line))).toEqual([
       expect.stringMatching(
         new RegExp(
-          `extensions/slow\\.js: its ${task} hook ${handler} did not finish within 0\\.2 seconds and is off`,
+          `extensions/slow\\.js: its ${task} hook ${handler} did not finish within 0\\.2 seconds, so its hooks are off`,
           "u",
         ),
       ),
@@ -140,7 +147,7 @@ it.each(HOOKS)(
 it.each(HOOKS.slice(0, 2))(
   "stops a message whose run waits in a %s %s hook that never returns",
   async (task, handler) => {
-    const { agent, turn, ask, called } = await hanging(task, handler);
+    const { agent, turn, ask, called } = await hanging([[task, handler]]);
     await agent.runtime.turns.submit(turn("turn-1", "hello"));
     await eventually(called);
     await agent.runtime.turns.control("turn-1", "discord-private", "stop");
@@ -150,7 +157,7 @@ it.each(HOOKS.slice(0, 2))(
 );
 
 it("answers and stops messages sent while an afterRun hook that never returns holds the run, telling the one answered", async () => {
-  const { agent, turn, ask, called, seen, note } = await hanging("pi.generation", "afterRun");
+  const { agent, turn, ask, called, seen, note } = await hanging([["pi.generation", "afterRun"]]);
   expect(await ask("turn-1", "hello")).toBe("Tool: echo");
   await eventually(called);
   await agent.runtime.turns.submit(turn("turn-2", "again"));
@@ -162,21 +169,24 @@ it("answers and stops messages sent while an afterRun hook that never returns ho
 });
 
 it.each(HOOKS)("closes while a %s %s hook never returns", async (task, handler) => {
-  const { agent, turn, called } = await hanging(task, handler);
+  const { agent, turn, called } = await hanging([[task, handler]]);
   await agent.runtime.turns.submit(turn("turn-1", "hello"));
   await eventually(called);
   await expect(agent.runtime.close()).resolves.toBeUndefined();
 });
 
 it("tells the agent once about a hook two tool calls waited in at once", async () => {
-  const { ask, calls, seen, note } = await hanging("pi.tool", "beforeTool");
+  const { ask, calls, seen, note } = await hanging([["pi.tool", "beforeTool"]]);
   expect(await ask("turn-1", "Twice.")).toBe("Tool: echo");
-  expect(await calls()).toBe("..");
+  expect(await calls()).toBe("beforeTool beforeTool ");
   expect(seen().at(-1)?.sections["hooks_off"]).toBe(note);
 });
 
 it("tells a subagent and the turn its report opens that a hook is off", async () => {
-  const { agent, ask, seen, note } = await hanging("pi.generation", "beforeRequest", ["subagents"]);
+  const { agent, ask, seen, note } = await hanging(
+    [["pi.generation", "beforeRequest"]],
+    ["subagents"],
+  );
   await ask("turn-1", "hello");
   await ask("turn-2", "Delegate.");
   await agent.outcome("opened-1");
@@ -184,4 +194,40 @@ it("tells a subagent and the turn its report opens that a hook is off", async ()
     seen().find(({ said }) => said.startsWith(start))?.sections["hooks_off"];
   expect(told("Make a response.")).toBe(note);
   expect(told("[Carillon] The subagent you started in the background finished")).toBe(note);
+});
+
+it("turns off every hook of an extension once one of its handlers is late", async () => {
+  const { ask, calls, seen, note } = await hanging([
+    ["pi.tool", "beforeTool"],
+    ["pi.tool", "afterTool"],
+    ["pi.generation", "afterTools"],
+    ["pi.generation", "afterRun"],
+  ]);
+  expect(await ask("turn-1", "hello")).toBe("Tool: echo");
+  expect(await calls()).toBe("beforeTool ");
+  expect(seen().at(-1)?.sections["hooks_off"]).toBe(note);
+});
+
+it("runs a hook its handlers object inherits, as pi-durable does", async () => {
+  const said: string[] = [];
+  const agent = await startFixture({
+    answers: [
+      (context) => {
+        said.push(textsOf(context.messages.findLast((message) => message.role === "user")).join());
+        return fauxAssistantMessage("Answer.");
+      },
+    ],
+    resources: {
+      "extensions/class.js": `class Handlers {
+  beforeRequest({ messages }) {
+    return { messages: [...messages, { role: "user", content: "inherited hook ran", timestamp: 0 }] };
+  }
+}
+export default { hooks: [{ task: "pi.generation", handlers: Object.freeze(new Handlers()) }] };`,
+      "settings.json": JSON.stringify({ extensions: ["extensions/class.js"] }),
+    },
+  });
+  fixtures.push(agent);
+  await agent.ask("turn-1", "hello", { resource_root: await agent.capture() });
+  expect(said).toEqual(["inherited hook ran"]);
 });

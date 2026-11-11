@@ -17,7 +17,6 @@ import {
   section,
   type AnyTask,
   type Extension,
-  type HookRegistration,
   type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Change, Setting, SettingValue, Subject } from "@carillon/protocol";
@@ -107,7 +106,7 @@ export interface Snapshot {
   readonly selected: readonly string[];
   /** The user extensions the snapshot lists, each named as its settings select it. */
   readonly modules: readonly Extension[];
-  /** The modules' hook handlers that missed their deadline, off while this snapshot is loaded. */
+  /** For each module whose hooks are off while this snapshot is loaded, the handler that missed its deadline. */
   readonly slow: readonly SlowHook[];
   /** The skills a message may invoke; the prompt offers those not invocation-only. */
   readonly skills: readonly Skill[];
@@ -558,7 +557,8 @@ async function within(work: unknown, deadlineMs: number): Promise<unknown> {
 /**
  * A user extension: its module's default export, a pi-durable extension
  * object. Its top-level code runs in the runtime's process, and a module
- * still importing after its deadline cannot be used.
+ * still importing after its deadline cannot be used. Its hook handlers get
+ * a deadline too.
  */
 async function importExtension(
   root: string,
@@ -590,45 +590,34 @@ async function importExtension(
     );
   }
   if (extension.hooks === undefined) return { ...extension, name };
-  return { ...extension, name, hooks: bounded(extension.hooks, root, name, hookDeadlineMs, slow) };
-}
-
-/**
- * The hooks with each handler under `deadlineMs`. One that misses it joins
- * `slow` and from then on returns nothing at once, which pi-durable takes
- * from any hook as no change. It never throws for being late: a throw from
- * `beforeTool` blocks the tool call, and the agent repairs its files with tools.
- */
-function bounded(
-  hooks: readonly HookRegistration[],
-  root: string,
-  extension: string,
-  deadlineMs: number,
-  slow: SlowHook[],
-): HookRegistration[] {
-  return hooks.map(({ task, handlers }) => ({
-    task,
-    handlers: Object.fromEntries(
-      Object.entries(handlers).map(([handler, run]: [string, unknown]) => {
-        if (typeof run !== "function") return [handler, run];
-        const hook: SlowHook = { extension, task, handler };
-        const bound = async (...args: unknown[]): Promise<unknown> => {
-          const result = slow.includes(hook)
-            ? LATE
-            : await within(Reflect.apply(run, handlers, args), deadlineMs);
-          if (result !== LATE) return result;
-          if (!slow.includes(hook)) {
-            slow.push(hook);
-            console.error(
-              `${join(root, extension)}: its ${task} hook ${handler} did not finish within ${String(deadlineMs / 1000)} seconds and is off`,
-            );
-          }
-          return undefined;
-        };
-        return [handler, bound];
-      }),
-    ),
-  }));
+  const off = () => slow.some((hook) => hook.extension === name);
+  // Each handler is read from the module's own object, as pi-durable reads
+  // it, and runs under the deadline. The first to miss it joins `slow`, and
+  // from then on every handler of the extension returns nothing at once,
+  // which pi-durable takes from any hook as no change. None throws for being
+  // late: a throw from `beforeTool` blocks the call, and the agent repairs
+  // its files with tools.
+  const hooks = extension.hooks.map(({ task, handlers }) => {
+    const get = (_target: object, handler: string | symbol): unknown => {
+      const run: unknown = Reflect.get(handlers, handler);
+      if (typeof run !== "function" || typeof handler !== "string") return run;
+      return async (...args: unknown[]): Promise<unknown> => {
+        const result = off()
+          ? LATE
+          : await within(Reflect.apply(run, handlers, args), hookDeadlineMs);
+        if (result !== LATE) return result;
+        if (!off()) {
+          slow.push({ extension: name, task, handler });
+          console.error(
+            `${join(root, name)}: its ${task} hook ${handler} did not finish within ${String(hookDeadlineMs / 1000)} seconds, so its hooks are off`,
+          );
+        }
+        return undefined;
+      };
+    };
+    return { task, handlers: new Proxy({}, { get }) };
+  });
+  return { ...extension, name, hooks };
 }
 
 /** Where Bun's build errors point, which only their `position` holds. */

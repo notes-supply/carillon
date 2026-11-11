@@ -500,11 +500,11 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     return `[Carillon] ${lead} Tell the person.\n\n${problem}`;
   }
 
-  /** What every request says while hook handlers of the latest snapshot are off for missing their deadline. */
+  /** What every request says while extensions of the latest snapshot have their hooks off. */
   function slowNote(): string | undefined {
     const notes = (latest?.slow ?? []).map(
       ({ extension, task, handler }) =>
-        `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so it is off until your resources change. Tell the person.`,
+        `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so that extension's hooks are off until your resources change. Tell the person.`,
     );
     return notes.length === 0 ? undefined : notes.join("\n\n");
   }
