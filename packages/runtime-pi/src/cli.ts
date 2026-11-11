@@ -173,6 +173,9 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     server.closeAllConnections();
     await stopped;
   }
+  // User extensions run in this process, and what one left open, such as a
+  // request that never answers, must not keep a stopped runtime running.
+  process.exit(0);
 }
 
 /** The runtime as it serves `parts.agents`, and what closes it with its MCP servers and sandbox. */
