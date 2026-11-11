@@ -271,10 +271,12 @@ export function loadSkills(root: string | undefined, builtInSkills: string): Ski
 /**
  * The runtime's own extension: the latest snapshot's prompt, the agent's
  * workspace and conversation store, where attached files are kept once a
- * conversation has any, and `attach`, which adds a file to the agent's answer.
+ * conversation has any, `slowNote`, which names the hook handlers that are
+ * off, and `attach`, which adds a file to the agent's answer.
  */
 export function carillonExtension(
   latest: () => Snapshot | undefined,
+  slowNote: () => string | undefined,
   workspace: string,
   store: string,
   tasks: readonly AnyTask[],
@@ -298,6 +300,7 @@ export function carillonExtension(
           ? undefined
           : attachmentSection(conversation.attachment_root);
       }),
+      section("hooks_off", slowNote, { tag: false }),
     ],
     tasks,
   });

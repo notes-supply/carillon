@@ -48,7 +48,7 @@ const HOOKS = [
  * An agent whose user extension has one hook that never returns, marking
  * each of its calls in the file `calls`. Each of its turns calls `echo`,
  * twice at once when told to, then answers with what the tool said. Told to
- * delegate, it starts a subagent instead.
+ * delegate, it starts a background subagent instead.
  */
 async function hanging(task: string, handler: string, extensions: readonly string[] = []) {
   const requests: (readonly Message[])[] = [];
@@ -58,7 +58,7 @@ async function hanging(task: string, handler: string, extensions: readonly strin
     if (last?.role === "toolResult") return fauxAssistantMessage(`Tool: ${textsOf(last).join()}`);
     const told = textsOf(last).at(-1) ?? "";
     const calls = told.endsWith("Delegate.")
-      ? [fauxToolCall("subagent", { task: "Make a response.", wait: true })]
+      ? [fauxToolCall("subagent", { task: "Make a response." })]
       : Array.from({ length: told.endsWith("Twice.") ? 2 : 1 }, () => fauxToolCall("echo", {}));
     return fauxAssistantMessage(calls, { stopReason: "toolUse" });
   };
@@ -92,11 +92,18 @@ export default { hooks: [{ task: "${task}", handlers: { ${handler}() {
     ask: (id: string, input: string) => agent.ask(id, input, { resource_root: root }),
     called: () => (existsSync(calls) ? true : undefined),
     calls: () => readFile(calls, "utf8"),
-    /** What the person or the runtime said last in each request. */
-    said: () =>
-      requests.map((messages) =>
-        textsOf(messages.findLast((message) => message.role === "user")).join("\n\n"),
-      ),
+    /** Each request: what the person or the runtime said last, and its prompt's sections. */
+    seen: () =>
+      requests.map((messages) => {
+        const sections: Record<string, string> = {};
+        for (const message of messages)
+          if (message.role === "system")
+            for (const [key, value] of Object.entries(message.sections ?? {}))
+              if (value === null) delete sections[key];
+              else sections[key] = value;
+        const said = textsOf(messages.findLast((message) => message.role === "user"));
+        return { said: said.join("\n\n"), sections };
+      }),
   };
 }
 
@@ -105,15 +112,20 @@ it.each(HOOKS)(
   async (task, handler) => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const off = () => logged.mock.calls.filter(([line]) => String(line).includes("is off"));
-    const { ask, calls, said, note } = await hanging(task, handler);
+    const { ask, calls, seen, note } = await hanging(task, handler);
     // A blocked call would answer with pi-durable's refusal, not the tool's output.
     expect(await ask("turn-1", "hello")).toBe("Tool: echo");
     // An `afterRun` hook is asked after the answer, so it is off a little later.
     await eventually(() => (off().length > 0 ? true : undefined));
     expect(await ask("turn-2", "again")).toBe("Tool: echo");
     expect(await calls()).toBe(".");
-    expect(said()[0]).toBe("hello");
-    expect(said().at(-1)).toBe(`${note}\n\nagain`);
+    const [first, second] = seen();
+    // While no hook is off, the prompt is the one an agent without this deadline has.
+    expect(first?.said).toBe("hello");
+    expect(Object.keys(first?.sections ?? {})).toEqual(["cwd", "conversation_store"]);
+    // The request after the tool round is in the run the hook held.
+    expect(second?.sections["hooks_off"]).toBe(handler === "afterRun" ? undefined : note);
+    expect(seen().at(-1)).toMatchObject({ said: "again", sections: { hooks_off: note } });
     expect(off().map(([line]) => String(line))).toEqual([
       expect.stringMatching(
         new RegExp(
@@ -137,8 +149,8 @@ it.each(HOOKS.slice(0, 2))(
   },
 );
 
-it("answers and stops messages sent while an afterRun hook that never returns holds the run", async () => {
-  const { agent, turn, ask, called } = await hanging("pi.generation", "afterRun");
+it("answers and stops messages sent while an afterRun hook that never returns holds the run, telling the one answered", async () => {
+  const { agent, turn, ask, called, seen, note } = await hanging("pi.generation", "afterRun");
   expect(await ask("turn-1", "hello")).toBe("Tool: echo");
   await eventually(called);
   await agent.runtime.turns.submit(turn("turn-2", "again"));
@@ -146,6 +158,7 @@ it("answers and stops messages sent while an afterRun hook that never returns ho
   await agent.runtime.turns.control("turn-3", "discord-private", "stop");
   expect(await agent.outcome("turn-3")).toEqual({ outcome: "stopped" });
   expect(await agent.outcome("turn-2")).toMatchObject({ outcome: "answered" });
+  expect(seen().find(({ said }) => said === "again")?.sections["hooks_off"]).toBe(note);
 });
 
 it.each(HOOKS)("closes while a %s %s hook never returns", async (task, handler) => {
@@ -156,31 +169,19 @@ it.each(HOOKS)("closes while a %s %s hook never returns", async (task, handler) 
 });
 
 it("tells the agent once about a hook two tool calls waited in at once", async () => {
-  const { ask, calls, said, note } = await hanging("pi.tool", "beforeTool");
+  const { ask, calls, seen, note } = await hanging("pi.tool", "beforeTool");
   expect(await ask("turn-1", "Twice.")).toBe("Tool: echo");
-  await ask("turn-2", "again");
   expect(await calls()).toBe("..");
-  expect(said().at(-1)).toBe(`${note}\n\nagain`);
+  expect(seen().at(-1)?.sections["hooks_off"]).toBe(note);
 });
 
-it("tells the agent a hook is off beside why its newer resources did not load", async () => {
-  const { agent, ask, said, note } = await hanging("pi.tool", "beforeTool");
-  await ask("turn-1", "hello");
-  await agent.ask("turn-2", "again", {
-    resource_root: await agent.snapshot({ "settings.json": "{" }),
-  });
-  expect(said().at(-1)).toMatch(/^\[Carillon\] Your resources in \S+ did not load/u);
-  expect(said().at(-1)?.endsWith(`\n\n${note}\n\nagain`)).toBe(true);
-});
-
-it("tells a run the runtime starts that a hook is off, also when core cannot capture the agent's files", async () => {
-  const { agent, ask, said, note } = await hanging("pi.generation", "beforeRequest", ["subagents"]);
+it("tells a subagent and the turn its report opens that a hook is off", async () => {
+  const { agent, ask, seen, note } = await hanging("pi.generation", "beforeRequest", ["subagents"]);
   await ask("turn-1", "hello");
   await ask("turn-2", "Delegate.");
-  expect(said()).toContain(`${note}\n\nMake a response.`);
-  agent.core.answer(503);
-  await ask("turn-3", "Delegate.");
-  const started = said().findLast((text) => text.endsWith("Make a response."));
-  expect(started).toMatch(/^\[Carillon\] Carillon could not copy your resources/u);
-  expect(started).toContain(`answered 503\n\n${note}\n\nMake a response.`);
+  await agent.outcome("opened-1");
+  const told = (start: string) =>
+    seen().find(({ said }) => said.startsWith(start))?.sections["hooks_off"];
+  expect(told("Make a response.")).toBe(note);
+  expect(told("[Carillon] The subagent you started in the background finished")).toBe(note);
 });

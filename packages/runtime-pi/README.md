@@ -158,11 +158,12 @@ is switched off: it returns nothing, which pi-durable takes from any hook as
 no change, so a late `beforeTool` lets its tool call through. The run goes
 on, and the runtime logs it once. The handler stays off while that snapshot
 is loaded, so until the agent's resources change. A restart imports the
-module again, with the hook on until it is late once more. Every run that
-starts meanwhile, a message's or one the runtime starts, reads a note first
-that names the file and the hook and asks the agent to tell the person. A
-Stop and the runtime's close wait for a running handler, so at most for its
-deadline. The deadline cannot stop a handler that never yields, and it does
+module again, with the hook on until it is late once more. While a handler
+is off, the agent's prompt has a section that names the file and the hook
+and asks the agent to tell the person. Every request made from then on
+carries it: the rest of the run the handler held, messages that waited
+behind it, scheduled runs and subagents. A Stop and the runtime's close
+wait for a running handler, so at most for its deadline. The deadline cannot stop a handler that never yields, and it does
 not cover an extension's tools, section `render` functions or `wraps`.
 
 A run the runtime starts itself, a scheduled run, a subagent or a
