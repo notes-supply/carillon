@@ -153,6 +153,18 @@ A recorded snapshot that no longer loads at startup is logged, and the agent
 uses the default extensions until one that loads is admitted; what it selects
 is unknown meanwhile, so schedules wait for it.
 
+Each hook handler of a user extension has 30 seconds. One that takes longer
+is switched off: it returns nothing, which pi-durable takes from any hook as
+no change, so a late `beforeTool` lets its tool call through. The run goes
+on, and the runtime logs it once. The handler stays off while that snapshot
+is loaded, so until the agent's resources change. A restart imports the
+module again, with the hook on until it is late once more. Every run that
+starts meanwhile, a message's or one the runtime starts, reads a note first
+that names the file and the hook and asks the agent to tell the person. A
+Stop and the runtime's close wait for a running handler, so at most for its
+deadline. The deadline cannot stop a handler that never yields, and it does
+not cover an extension's tools, section `render` functions or `wraps`.
+
 A run the runtime starts itself, a scheduled run, a subagent or a
 subagent's report, first asks core to capture the agent's resource root as
 it is then (`POST /v1/runtime/resources`) and loads that snapshot as it

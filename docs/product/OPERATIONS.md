@@ -493,6 +493,10 @@ longer configures, shows as unavailable. While the resources a message
 brings cannot be used, Pi answers it on the last resources that loaded, or
 its defaults, and the agent reads why at the start of the message, so it can
 repair them itself; `carillon logs runtime-pi` has the same error.
+A hook of the agent's own extension that takes more than 30 seconds is
+switched off until the agent's files change. The run goes on without it,
+and the agent reads which hook at the start of its next message. The log
+has it too.
 `carillon runtime-pi check-resources --agent assistant` loads the agent's
 folder as Pi would and prints that it loads or that error, so you, or the
 agent from its shell, can check a change before a message brings it. Pi offers only the files in `extensions/` whose names
