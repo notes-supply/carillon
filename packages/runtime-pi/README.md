@@ -157,11 +157,12 @@ Each hook handler of a user extension has 30 seconds. The first handler of
 an extension to take longer switches off every hook of that extension: each
 returns nothing at once, which pi-durable takes from any hook as no change,
 so a late `beforeTool` lets its tool call through. The run goes on, and the
-runtime logs it once. The hooks stay off while that snapshot is loaded, so
-until the agent's resources change. A restart imports the module again, with
-its hooks on until one is late once more. While an extension's hooks are
+runtime logs it once, naming the extension as settings do. The hooks stay
+off while that snapshot is loaded, so until the agent's files change. A
+restart imports the module again, with its hooks on until one is late once
+more. While an extension's hooks are
 off, the agent's prompt has a section that names the file and the late
-handler and asks the agent to tell the person. Every request made from then
+handler and asks the agent to tell the person once. Every request made from then
 on carries it: the rest of the run the handler held, messages that waited
 behind it, scheduled runs and subagents. The request a late `beforeRequest`
 held was built before the section, so a run of one request does not carry
@@ -169,7 +170,9 @@ it.
 
 A Stop and the runtime's close wait for a running handler. An extension's
 hooks cost them one deadline, once, and each further extension whose hooks
-are late costs one more. Once it has closed after SIGINT or SIGTERM, the
+are late costs one more. While a handler is hanging, a Stop still stops
+the turn, but core's control relay gives up after 5 seconds, so
+`discord.log` and `core.log` record the Stop as not taken (504). Once it has closed after SIGINT or SIGTERM, the
 runtime ends its process, so nothing a module left open, such as a request
 that never answers, keeps it running. The deadline cannot stop a handler
 that never yields, and it does not cover an extension's tools, section

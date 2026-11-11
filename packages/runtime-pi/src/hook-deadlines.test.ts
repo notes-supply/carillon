@@ -94,7 +94,7 @@ async function hanging(
   return {
     agent,
     /** What the prompt says once the first of the hooks was late. */
-    note: `[Carillon] The ${task} hook ${handler} of your extension extensions/slow.js in ${folder} did not finish within 0.2 seconds, so that extension's hooks are off until your resources change. Tell the person.`,
+    note: `[Carillon] The ${task} hook ${handler} of your extension extensions/slow.js in ${folder} did not finish within 0.2 seconds, so that extension's hooks are off until you change your files or Carillon restarts. Tell the person, unless you already have.`,
     turn: (id: string, input: string) => agent.turn(id, input, { resource_root: root }),
     ask: (id: string, input: string) => agent.ask(id, input, { resource_root: root }),
     called: () => (existsSync(calls) ? true : undefined),
@@ -133,13 +133,9 @@ it.each(HOOKS)(
     // The request after the tool round is in the run the hook held.
     expect(second?.sections["hooks_off"]).toBe(handler === "afterRun" ? undefined : note);
     expect(seen().at(-1)).toMatchObject({ said: "again", sections: { hooks_off: note } });
+    // The log names the file as settings do, not its copy in the snapshot.
     expect(off().map(([line]) => String(line))).toEqual([
-      expect.stringMatching(
-        new RegExp(
-          `extensions/slow\\.js: its ${task} hook ${handler} did not finish within 0\\.2 seconds, so its hooks are off`,
-          "u",
-        ),
-      ),
+      `extension extensions/slow.js: its ${task} hook ${handler} did not finish within 0.2 seconds, so its hooks are off`,
     ]);
   },
 );

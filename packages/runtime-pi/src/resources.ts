@@ -609,7 +609,7 @@ async function importExtension(
         if (!off()) {
           slow.push({ extension: name, task, handler });
           console.error(
-            `${join(root, name)}: its ${task} hook ${handler} did not finish within ${String(hookDeadlineMs / 1000)} seconds, so its hooks are off`,
+            `extension ${name}: its ${task} hook ${handler} did not finish within ${String(hookDeadlineMs / 1000)} seconds, so its hooks are off`,
           );
         }
         return undefined;

@@ -494,9 +494,10 @@ brings cannot be used, Pi answers it on the last resources that loaded, or
 its defaults, and the agent reads why at the start of the message, so it can
 repair them itself; `carillon logs runtime-pi` has the same error.
 A hook of the agent's own extension that takes more than 30 seconds
-switches off that extension's hooks until the agent's files change. The run
-goes on without them, and from its next request on the agent's prompt says
-which hook was late. The log has it too. Stop, and stopping the Pi runtime,
+switches off that extension's hooks until the agent's files change or
+Carillon restarts, which turns them on again. The run goes on without them,
+and from its next request on the agent's prompt says which hook was late.
+The log has it too. Stop, and stopping the Pi runtime,
 wait for a hook that is running, so up to those 30 seconds for each
 extension whose hooks are late.
 `carillon runtime-pi check-resources --agent assistant` loads the agent's

@@ -504,7 +504,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   function slowNote(): string | undefined {
     const notes = (latest?.slow ?? []).map(
       ({ extension, task, handler }) =>
-        `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so that extension's hooks are off until your resources change. Tell the person.`,
+        `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so that extension's hooks are off until you change your files or Carillon restarts. Tell the person, unless you already have.`,
     );
     return notes.length === 0 ? undefined : notes.join("\n\n");
   }
