@@ -3,7 +3,6 @@
  * one harness over `<component>/agents/<agent>.sqlite`; the runtime holds
  * every turn core hands over and settles it through core's client.
  */
-import { cleanupSessionResources } from "@earendil-works/pi-ai";
 import type { Extension, Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
@@ -19,6 +18,7 @@ import type { McpServer } from "./mcp.ts";
 import { modelSettings, type PiCatalogue } from "./models.ts";
 import {
   changeResourceSetting,
+  HOOK_DEADLINE_MS,
   IMPORT_DEADLINE_MS,
   loadSkills,
   RESOURCE_SETTINGS,
@@ -57,6 +57,8 @@ export interface PiRuntimeOptions {
   readonly clock?: Clock;
   /** How long a user extension may take to import; {@link IMPORT_DEADLINE_MS} by default. */
   readonly importDeadlineMs?: number;
+  /** How long a hook handler of a user extension may take; {@link HOOK_DEADLINE_MS} by default. */
+  readonly hookDeadlineMs?: number;
 }
 
 export interface PiRuntime extends RuntimeOperations {
@@ -93,6 +95,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<PiRunt
           mcp: options.mcp ?? [],
           ...(options.clock === undefined ? {} : { clock: options.clock }),
           importDeadlineMs: options.importDeadlineMs ?? IMPORT_DEADLINE_MS,
+          hookDeadlineMs: options.hookDeadlineMs ?? HOOK_DEADLINE_MS,
         }),
       );
   } catch (failure) {
@@ -153,9 +156,6 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<PiRunt
     },
     async close() {
       await Promise.allSettled([...agents.values()].map((agent) => agent.close()));
-      // pi-durable leaves open what pi-ai keeps between a conversation's
-      // requests, such as a Codex WebSocket, which would keep the process alive.
-      cleanupSessionResources();
     },
   };
 }

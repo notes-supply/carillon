@@ -19,6 +19,8 @@ A user extension is one module in the agent's resource root: `extensions/<file>.
 
 A hook registration names a task and its handlers: `{ task: "pi.tool", handlers: { beforeTool(call, api, context) { … } } }`. A handler that returns `undefined` changes nothing. `api` reads committed documents and history (`api.entries(…)`, `api.entry(id, …)`) and keeps memos (`api.memo(name, context)`).
 
+A handler has 30 seconds. The first one that takes longer switches off every hook of your extension until you change your files or Carillon restarts, and its run goes on as if it had returned `undefined`. From your next request on, your prompt then has a `[Carillon]` note naming the file and that handler. Tell the person once and fix the file. Long work belongs in a tool or a schedule.
+
 `pi.tool`, for every tool call:
 
 - `beforeTool(call, api, context)`: `call` has `name`, `arguments` and `id`. Return `{ block: "reason" }` to refuse the call, whose result then says why, or `{ arguments }` to replace its arguments. A throw also refuses it.

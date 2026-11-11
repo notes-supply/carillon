@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -439,3 +440,42 @@ it("exits on SIGTERM once a Codex model answered, and answers a message the stop
   expect(more).toEqual([]);
   expect(outcome?.body).toMatchObject({ outcome: "answered", output: "Codex answer." });
 }, 60_000);
+
+it("exits on SIGTERM though a user extension left a request that never answers", async () => {
+  let asked = 0;
+  const upstream = createHttpServer(() => {
+    asked += 1;
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  cleanups.push(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>((done) => upstream.close(() => done()));
+  });
+  const address = upstream.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  const core: FakeCore = await startFakeCore();
+  cleanups.push(() => core.close());
+  const { home, args, url } = await installation(
+    { default: "resources" },
+    core.url.replace("http://", ""),
+  );
+  await mkdir(join(home, "resources", "extensions"), { recursive: true });
+  await writeFile(
+    join(home, "resources", "settings.json"),
+    JSON.stringify({ extensions: ["extensions/waits.js"] }),
+  );
+  await writeFile(
+    join(home, "resources", "extensions", "waits.js"),
+    `export default { hooks: [{ task: "pi.generation", handlers: { beforeRequest() {
+  void fetch("http://127.0.0.1:${String(address.port)}/").catch(() => undefined);
+} } }] };`,
+  );
+  await configure(args);
+  const serving = start(args);
+  await serving.ready;
+  await inbox(url, home, "hello");
+  expect((await outcomes(core)).map(({ body }) => body)).toMatchObject([{ outcome: "answered" }]);
+  await expect.poll(() => asked).toBe(1);
+  expect(await stopped(serving.child)).toBe(0);
+}, 30_000);

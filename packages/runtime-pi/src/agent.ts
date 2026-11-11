@@ -103,6 +103,8 @@ export interface AgentOptions {
   readonly clock?: Clock;
   /** How long a user extension may take to import. */
   readonly importDeadlineMs: number;
+  /** How long a hook handler of a user extension may take. */
+  readonly hookDeadlineMs: number;
 }
 
 export interface DurableAgent {
@@ -125,6 +127,7 @@ export interface DurableAgent {
 
 export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const workspace = resolve(options.workspace);
+  const folder = options.resources === undefined ? "" : ` in ${options.resources}`;
   const registry = createRegistry();
   /** Turns the agent holds whose outcome core has not recorded, by turn ID. */
   const held = new Map<string, DeliveryInput>();
@@ -180,7 +183,10 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     },
   });
   const extensions: Extensions = {
-    carillon: carillonExtension(() => latest, workspace, options.storePath, [delivery, opening]),
+    carillon: carillonExtension(() => latest, slowNote, workspace, options.storePath, [
+      delivery,
+      opening,
+    ]),
     builtIn: [
       ...options.builtIns,
       createSchedulesExtension({
@@ -195,6 +201,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     ],
     defaults: options.defaults,
     importDeadlineMs: options.importDeadlineMs,
+    hookDeadlineMs: options.hookDeadlineMs,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
   const unsubscribes = options.mcp.map((server) =>
@@ -486,12 +493,20 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   /** Why a run keeps the last resources that loaded: its own did not load, or core could not capture them. */
   function fallbackNote(problem: string, captured = true): string {
-    const folder = options.resources === undefined ? "" : ` in ${options.resources}`;
     const kept = latest === undefined ? "Carillon's defaults" : "your previous resources";
     const lead = captured
       ? `Your resources${folder} did not load, so you run on ${kept} until you fix them.`
       : `Carillon could not copy your resources${folder}, so you run on ${kept}. Your files may be fine.`;
     return `[Carillon] ${lead} Tell the person.\n\n${problem}`;
+  }
+
+  /** What every request says while extensions of the latest snapshot have their hooks off. */
+  function slowNote(): string | undefined {
+    const notes = (latest?.slow ?? []).map(
+      ({ extension, task, handler }) =>
+        `[Carillon] The ${task} hook ${handler} of your extension ${extension}${folder} did not finish within ${String(options.hookDeadlineMs / 1000)} seconds, so that extension's hooks are off until you change your files or Carillon restarts. Tell the person, unless you already have.`,
+    );
+    return notes.length === 0 ? undefined : notes.join("\n\n");
   }
 
   /**
