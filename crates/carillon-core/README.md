@@ -32,11 +32,22 @@ mise run example:core
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
   delivery with the interface instance that claimed it, and never treat an
-  uncertain send as safe to repeat. An interface in `CoreOptions::retained`
-  has nothing to claim: each of its deliveries is written as delivered with
-  its turn's end, by the one function in [`db.rs`](src/db.rs) that writes a
-  delivery.
+  uncertain send as safe to repeat. For an interface in
+  `CoreOptions::retained`, each delivery is written as delivered with its
+  turn's end, by the one function in [`db.rs`](src/db.rs) that writes a
+  delivery, so none written while it retains waits for a claim.
 - `jobs_at_work` and `named_jobs` read an interface's jobs, one turn each.
+- `conversations` and `transcript` read an interface's own history: its
+  conversations, the latest active first, and one conversation's turns, each
+  with what began it and the answer core recorded. Both page backwards from
+  the newest with `before`. The list reads conversation rows and the
+  unfinished-turn index, no turn row and no message text. A conversation's
+  activity marker rises with every turn accepted, opened or ended. An
+  interface polls the list, compares each conversation's `activity` and
+  `at_work`, and reads a transcript again only when one of them changed. A
+  turn's state while it is unfinished, and an external answer's delivery
+  state, are not covered: an interface that shows them reads the jobs of
+  its unfinished turns.
 - `recover_interrupted` and `reconcile_attachments` are for exclusive
   startup, before events are accepted. Recovery returns the turns core
   handed a runtime to the queue, interrupts those of a runtime no longer
@@ -79,7 +90,8 @@ another runtime's turns never hold back a conversation's messages.
   [`engine/settle.rs`](src/engine/settle.rs) hand turns to runtimes and
   record what they say of them.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
-  its submodules for admission, job reads, recovery and held turns.
+  its submodules for admission, job reads, history reads, recovery and held
+  turns.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
   [`intake.rs`](src/intake.rs), [`answers.rs`](src/answers.rs): captured
   resources, messages' files and answers' files.
@@ -89,5 +101,6 @@ another runtime's turns never hold back a conversation's messages.
   `http/`, `registry.rs` serves the registry and its live apply,
   `workers.rs` supervises each runtime's dispatcher, `maintenance.rs` serves
   the maintenance pause, `runtime.rs` serves runtimes' calls and runs their
-  dispatcher, and `controls.rs` relays turn controls. `drain.rs`,
+  dispatcher, `controls.rs` relays turn controls, and `conversations.rs`
+  serves an interface its history. `drain.rs`,
   `operations.rs` and `update.rs` run restarts, services and updates.

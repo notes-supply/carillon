@@ -26,6 +26,9 @@
 //!   commit in one transaction, including a turn interrupted during admission.
 //!   `record_delivery` alone writes that row: pending, or delivered for an
 //!   interface whose people read answers from core's record.
+//! - A conversation's activity marker rises in the transaction that accepts,
+//!   opens or ends one of its turns, and no two conversations of an
+//!   interface share one.
 //! - Transitions are guarded conditional updates that succeed exactly once, so
 //!   a stale caller fails instead of overwriting newer state.
 //! - A turn's attachment references commit with the turn, and only after the
@@ -37,6 +40,7 @@ mod admission;
 mod conversations;
 mod dispatch;
 mod files;
+mod history;
 mod inspection;
 mod jobs;
 mod opening;
@@ -241,7 +245,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS turns_queued
                 ON turns(runtime_id, acceptance_sequence) WHERE state = 'queued';
             CREATE INDEX IF NOT EXISTS turns_interface_unfinished
-                ON turns(interface_id, acceptance_sequence)
+                ON turns(interface_id, acceptance_sequence, agent_id, audience_id)
                 WHERE state IN ('queued', 'running');
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,8 +291,14 @@ impl Database {
                 agent_id TEXT NOT NULL,
                 audience_id TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                activity INTEGER NOT NULL,
+                active_at INTEGER NOT NULL,
                 PRIMARY KEY(interface_id, agent_id, audience_id)
-            );",
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS conversations_activity
+                ON conversations(interface_id, activity);",
         )?;
         Ok(())
     }
@@ -321,11 +331,12 @@ impl Database {
         silence: Option<Silence>,
         now: i64,
     ) -> Result<()> {
-        let interface: String = transaction.query_row(
-            "SELECT interface_id FROM turns WHERE id = ?1",
+        let (interface, agent, audience): (String, String, String) = transaction.query_row(
+            "SELECT interface_id, agent_id, audience_id FROM turns WHERE id = ?1",
             [turn_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        conversations::active(transaction, &interface, &agent, &audience, now)?;
         let state = if self.retained.contains(&interface) {
             DeliveryState::Delivered
         } else {
@@ -756,6 +767,7 @@ mod tests {
 
     mod deliveries;
     mod format;
+    mod history;
     mod jobs;
     mod ownership;
 

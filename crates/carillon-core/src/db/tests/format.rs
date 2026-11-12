@@ -111,7 +111,16 @@ fn the_previous_releases_database_is_refused_and_left_as_it_was() -> Result<()> 
     let directory = tempdir()?;
     let path = directory.path().join("state.sqlite3");
     accept(&Database::create(&path)?, "one", "conversation")?;
-    rusqlite::Connection::open(&path)?.execute_batch("DROP TABLE conversations")?;
+    rusqlite::Connection::open(&path)?.execute_batch(
+        "DROP INDEX conversations_activity;
+         ALTER TABLE conversations DROP COLUMN title;
+         ALTER TABLE conversations DROP COLUMN started_at;
+         ALTER TABLE conversations DROP COLUMN activity;
+         ALTER TABLE conversations DROP COLUMN active_at;
+         DROP INDEX turns_interface_unfinished;
+         CREATE INDEX turns_interface_unfinished ON turns(interface_id, acceptance_sequence)
+             WHERE state IN ('queued', 'running');",
+    )?;
     let before = std::fs::read(&path)?;
     crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
     crate::assert_refused(

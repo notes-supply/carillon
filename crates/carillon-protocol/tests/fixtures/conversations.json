@@ -1,0 +1,146 @@
+{
+  "pages": [
+    {
+      "conversations": []
+    },
+    {
+      "conversations": [
+        {
+          "agent_id": "assistant",
+          "audience_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11",
+          "channel_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11",
+          "title": "Plan the trip",
+          "started_at": 1783771200,
+          "active_at": 1783771260,
+          "activity": 42,
+          "at_work": 0
+        },
+        {
+          "agent_id": "assistant",
+          "audience_id": "discord-100-300",
+          "channel_id": "300",
+          "title": "",
+          "started_at": 1783771100,
+          "active_at": 1783771100,
+          "activity": 17,
+          "at_work": 2
+        }
+      ],
+      "next": 17
+    }
+  ],
+  "transcripts": [
+    {
+      "turns": []
+    },
+    {
+      "turns": [
+        {
+          "turn_id": "01a0fc1d-4683-7ea1-96a9-e57e9a67e63f",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0199b3a2-7d10-7000-8000-000000000001",
+            "text": "What do you make of these?",
+            "command": false,
+            "files": [
+              {
+                "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/0",
+                "name": "holiday photo.png",
+                "size": 48213,
+                "content_type": "image/png",
+                "sha256": "2209f2d23d0129ba9d9e6dc4d048509230a203ae6ed8539695b1818f99162b95"
+              },
+              {
+                "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/1",
+                "name": "notes.txt",
+                "size": 0,
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              }
+            ]
+          },
+          "state": "completed",
+          "accepted_at": 1783771200,
+          "finished_at": 1783771260,
+          "report": {
+            "phase": "model",
+            "running": [],
+            "recent": [
+              {
+                "tool": "bash",
+                "detail": "make",
+                "ok": true,
+                "duration_ms": 1200
+              }
+            ],
+            "tool_calls": 1
+          },
+          "answer": {
+            "content": "Two photos and a note.",
+            "files": [
+              {
+                "path": "01a0fc1e-0000-7000-8000-000000000002/0",
+                "name": "summary.pdf",
+                "source": "/home/owner/work/summary.pdf",
+                "size": 1024,
+                "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+              }
+            ],
+            "delivery": "delivered"
+          }
+        },
+        {
+          "turn_id": "01a0fc1d-8f2f-76a1-8ea1-0cd3a764ffcc",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0199b3a2-7d10-7000-8000-000000000002",
+            "text": "/model",
+            "command": true
+          },
+          "state": "interrupted",
+          "accepted_at": 1783771300,
+          "finished_at": 1783771301,
+          "answer": {
+            "content": "",
+            "silence": "stopped",
+            "delivery": "pending"
+          }
+        },
+        {
+          "turn_id": "01a0fc1d-9000-7000-8000-000000000003",
+          "source": {
+            "kind": "message",
+            "event_id": "500",
+            "text": "Actually",
+            "command": false
+          },
+          "state": "completed",
+          "accepted_at": 1783771310,
+          "finished_at": 1783771311,
+          "answer": {
+            "content": "",
+            "silence": "steered",
+            "delivery": "uncertain"
+          }
+        },
+        {
+          "turn_id": "01a0fc1d-9000-7000-8000-000000000004",
+          "source": {
+            "kind": "opened",
+            "label": "The nightly summary."
+          },
+          "state": "running",
+          "accepted_at": 1783771400
+        },
+        {
+          "turn_id": "01a0fc1d-9000-7000-8000-000000000005",
+          "source": {
+            "kind": "opened"
+          },
+          "state": "queued",
+          "accepted_at": 1783771401
+        }
+      ],
+      "earlier": true
+    }
+  ]
+}

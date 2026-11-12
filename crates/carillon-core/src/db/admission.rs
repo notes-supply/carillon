@@ -88,8 +88,8 @@ impl Database {
                 (providers, resources, Some(explanation))
             }
         };
-        conversations::record_channel(&transaction, interface_id, event)?;
         let now = timestamp()?;
+        conversations::accepted(&transaction, interface_id, event, now)?;
         let turn_id = uuid::Uuid::now_v7().to_string();
         transaction.execute(
             "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,

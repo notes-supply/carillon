@@ -11,6 +11,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
+use carillon_protocol::conversations::{ConversationPage, Transcript};
 use carillon_protocol::model::{
     ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
     EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
@@ -539,6 +540,31 @@ impl Core {
             )));
         }
         Ok(self.database.named_jobs(interface, named)?)
+    }
+
+    /// A page of an authenticated interface's conversations, the latest
+    /// active first: those whose activity marker is below `before`.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn conversations(&self, interface: &str, before: Option<i64>) -> Result<ConversationPage> {
+        self.database.conversations(interface, before)
+    }
+
+    /// A page of the turns of one conversation of an authenticated
+    /// interface, oldest first: its newest, or those before the turn
+    /// `before`. A conversation with no turn reads as empty, and so does
+    /// a page before a turn that is not the conversation's.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn transcript(
+        &self,
+        interface: &str,
+        agent_id: &str,
+        audience_id: &str,
+        before: Option<&str>,
+    ) -> Result<Transcript> {
+        self.database
+            .transcript(interface, agent_id, audience_id, before)
     }
 
     /// Inspect a turn, without granting external operator authority.

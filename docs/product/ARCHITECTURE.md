@@ -17,12 +17,13 @@ share:
   files, and copies of the files answers carry;
 - the agents conversations belong to, each with the runtime its new
   conversations start on;
-- conversations, each with the channel its first message came from and the
-  runtime of its latest turn;
+- conversations, each with the channel and title its first message gave it,
+  the runtime of its latest turn, and a marker of its latest activity;
 - turns (queued, running, completed, interrupted);
 - the outcomes runtimes report for the turns they hold, and the turns they
   open themselves;
 - delivery intents and their outcomes;
+- each interface's read of its own conversations and their turns;
 - relaying settings to the runtime that serves the agent, and command reads
   and turn controls to the conversation's runtime; and
 - inspection, backup and restore.
@@ -32,6 +33,33 @@ its transactions. `Core` is platform-neutral: it receives agent, resource and
 runtime facts and knows nothing of Discord, Pi or the installation's files.
 The application around it authenticates HTTP, loads the registry and runs
 the dispatchers. See the [core guide](../../crates/carillon-core/README.md).
+
+An interface reads its own history from core, so it need store no
+transcript. Core keeps each conversation's title, the first non-blank line
+of its first message, and its activity marker, a number that rises in the
+transaction that accepts a message of the conversation, opens a turn in it
+or ends one of its turns. `GET /v1/conversations` lists the caller's
+conversations by that marker, the latest active first, 50 to a page. Each
+has its agent, audience, channel and title, when it started and was last
+active, its marker and how many of its turns are at work.
+`before=<activity>` reads the page below a marker, so a conversation that
+becomes active between two reads moves to the first page and is on no
+later one. The list reads no turn and no message text, so an interface may
+poll it and compare each conversation's marker and count of turns at work.
+While both are unchanged the conversation has no new turn and no new
+answer, and its transcript need not be read again. A turn's state while it
+is unfinished, and an external answer's delivery state, are not covered: an
+interface that shows them reads the jobs of its unfinished turns.
+
+`GET /v1/conversations/{agent_id}/{audience_id}` reads one conversation's
+turns, its newest 50 first and oldest first within a page, and
+`before=<turn>` reads the page before a turn. A turn is a person's
+message, with its event ID, text and files, or a turn the runtime opened,
+with its label. It has its state and times, an ended turn's final report,
+and the answer core recorded, with its silence, files and delivery state.
+Core scopes both reads to the authenticated interface before it reads a
+row. Neither returns the context an interface added for the model, an
+operator's error text or a snapshot.
 
 ### Dispatchers
 
@@ -113,7 +141,9 @@ way the turn ends: an outcome, a refused hand-over, a stranded
 conversation's notice or a startup interruption. No claim returns such a
 delivery, no reconciliation touches it, it is never uncertain, and no drain
 waits for it. The mode is the registry's when the turn ends, and changes
-only with a restart.
+only with a restart. A turn in flight across that restart ends under the
+new mode. A delivery written before it keeps the state it was written in,
+so one left pending or claimed still waits for its interface.
 
 ### Maintenance drain
 
@@ -136,9 +166,9 @@ confirmed the pause until then.
 ## Interface providers
 
 An interface owns its platform credential and protocol: it authenticates
-ingress, maps platform conversations to Carillon audiences, submits events,
-claims deliveries and sends them. Interfaces fail closed before any runtime
-work.
+ingress, maps platform conversations to Carillon audiences and submits
+events. With external delivery it also claims deliveries and sends them.
+Interfaces fail closed before any runtime work.
 
 What every interface does with core is in the
 [shared interface boundary](../../crates/carillon-interface/README.md): the
