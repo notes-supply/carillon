@@ -354,14 +354,17 @@ pub(super) async fn status(config: &LoadedConfig) -> Result<StatusReport> {
         })
 }
 
-/// What core reports, or `None` when nothing listens at its address, as
-/// when Carillon is stopped. A core that is there and does not answer, or
-/// answers anything else, is an error: it runs, and what it serves is not
-/// known.
+/// What core reports, or `None` when its address refuses the connection,
+/// as when Carillon is stopped. Any other failure is an error: core may
+/// run, and what it serves is not known.
 pub(super) async fn status_if_running(config: &LoadedConfig) -> Result<Option<StatusReport>> {
+    let refused = |cause: &(dyn std::error::Error + 'static)| {
+        let cause = cause.downcast_ref::<std::io::Error>();
+        cause.is_some_and(|cause| cause.kind() == std::io::ErrorKind::ConnectionRefused)
+    };
     match operator_get(config, operator_url(config, "/v1/status")?).await {
         Ok(report) => Ok(Some(report)),
-        Err(error) if error.downcast_ref().is_some_and(reqwest::Error::is_connect) => Ok(None),
+        Err(error) if error.chain().any(refused) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -535,7 +538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn carillon_is_stopped_only_when_nothing_listens_at_cores_address() -> Result<()> {
+    async fn carillon_is_stopped_only_when_cores_address_refuses_the_connection() -> Result<()> {
         let unavailable = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
         let (mut config, _directory, server) = applying_core(Some(unavailable)).await?;
         let answered = super::status_if_running(&config).await.err();
@@ -548,6 +551,16 @@ mod tests {
         config.value.core.listen = vacated.local_addr()?;
         drop(vacated);
         assert!(super::status_if_running(&config).await?.is_none());
+
+        // A connection that fails for another reason: TCP has no route to
+        // the broadcast address.
+        config.value.core.listen = "255.255.255.255:1".parse()?;
+        let unknown = super::status_if_running(&config).await.err();
+        let unknown = unknown.context("an address that cannot be reached counted as stopped")?;
+        let connecting = unknown
+            .downcast_ref()
+            .is_some_and(reqwest::Error::is_connect);
+        assert!(connecting, "{unknown:#}");
         Ok(())
     }
 
