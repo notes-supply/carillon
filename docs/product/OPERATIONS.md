@@ -690,8 +690,8 @@ discord-private disable` to start without it.
 
 ### The page's files
 
-The page is plain HTML, CSS and JavaScript files in `app/lib/web`, read from
-disk on every request. An update replaces them with the release's.
+The page is plain HTML, CSS and JavaScript files with its typeface, in
+`app/lib/web`, read from disk on every request. An update replaces them with the release's.
 
 To change the page and keep your changes across updates, make a complete
 copy in the provider's own folder and edit it there:

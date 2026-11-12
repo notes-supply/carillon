@@ -512,7 +512,8 @@ is written in (`lib/web`), the Discord module and the
 card-colours example module for `wasm32-unknown-unknown`, the runtimes
 compiled with Bun, the systemd units,
 and `licenses/` with Carillon's licence and notices for the Rust crates, npm
-packages and Bun built into the programs. Every component reports the
+packages and Bun built into the programs, and the licence of the page's
+typeface. Every component reports the
 workspace version. A `MANIFEST` lists every file and which must be
 executable; the installer refuses anything else. It is a completeness check,
 not a signature. Registration publishes every unit the archive ships, the
