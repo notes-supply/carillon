@@ -217,11 +217,14 @@ in core, and its agent is chosen with its first message and never changes.
 A message's event ID is the page's too, so a retry is the first message
 again. Uploads stream into a staging batch of the request's own. Answers
 are rendered to HTML by the provider, and files are read by signed links
-that expire. A browser signs in with a single-use code that
-`carillon web open` gets with the operator's credential, then sends a
-bearer token. Every request must name the provider in `Host` and come from
-its own origin. The provider's only durable file is the key that the token
-and the file links are made from, which `carillon web sign-out` replaces.
+that expire. The provider's only durable file is the browser key, which it
+reads again for every request that presents a credential. `carillon web
+open` reads the key itself and signs a single-use code that expires after
+two minutes. A browser trades the code for a bearer token made from the
+key. `carillon web sign-out` replaces the key file. Neither command sends
+the provider a request. Every request must name the provider in `Host` and
+come from its own origin. A failure of core reaches the page as one
+retryable status, and what core said is logged.
 See the [web guide](../../crates/carillon-web/README.md).
 
 ### Replaceable Discord module
