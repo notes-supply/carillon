@@ -208,7 +208,9 @@ missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 
 The web provider (`carillon-web`) serves a chat page to the installing
 user's own browser on the same machine. Setup registers it as `web`, with
-`delivery = "retained"` and `max_upload_mib = 1024`.
+`delivery = "retained"` and `max_upload_mib = 1024`. It refuses to serve an
+entry with any other delivery, whose answers would wait for a claim it
+never makes.
 It keeps no conversation. The page is plain files with no build step, read
 from disk on each request. It lists conversations and reads turns
 through the provider from core's history, polls the list while it is
@@ -457,7 +459,11 @@ channel; and the web provider asks nothing, checks its entry and says how
 to open the page. Told only `--interface` on an existing installation,
 setup registers that interface, runs its program and nothing else, and
 restarts a running Carillon once core has drained, because core takes a
-new provider only when it starts. Setup reruns retain a plain T3 agent's ID by its saved T3 project
+new provider only when it starts. It writes nothing but the new entry, and
+refuses a port another program of the machine listens on before it writes
+that. When the interface's program does not finish, setup takes the entry
+out again. Carillon counts as stopped only when nothing listens at core's
+address: a core that is there and does not answer fails the command. Setup reruns retain a plain T3 agent's ID by its saved T3 project
 ID. New projects receive IDs that avoid both existing agents and saved
 project bindings, so keeping a Discord route cannot silently move it to a
 different project. Adding Pi explicitly to plain T3 Code channels plans its
@@ -508,9 +514,12 @@ and `licenses/` with Carillon's licence and notices for the Rust crates, npm
 packages and Bun built into the programs. Every component reports the
 workspace version. A `MANIFEST` lists every file and which must be
 executable; the installer refuses anything else. It is a completeness check,
-not a signature. Registration publishes every unit the archive ships. The
-uninstaller removes each service that names its installation, so it needs
-neither a list of units nor the application directory.
+not a signature. Registration publishes every unit the archive ships, the
+services first and the target last. The uninstaller keeps no list of units:
+when core's unit names its installation, it removes the target and each
+service that names that installation too. It looks at the units only while
+the application directory is there. Once that is gone it reports so and
+leaves the units as they are.
 
 ## Trust and authority
 

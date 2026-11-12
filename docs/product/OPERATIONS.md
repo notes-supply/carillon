@@ -633,7 +633,7 @@ reach your files.
 # carillon.toml, the web chat's [[providers]] entry
 url = "http://127.0.0.1:43804"
 max_upload_mib = 1024     # the largest file an answer carries to the page
-delivery = "retained"     # answers are read from core; nothing delivers them
+delivery = "retained"     # answers are read from core; the provider serves no other entry
 ```
 
 The provider has no settings file. `carillon logs web` shows its log. Its
@@ -668,11 +668,21 @@ Discord, Pi or T3, none of which it runs or reaches.
   it with the web chat.
 - **Run again**, it changes nothing and restarts nothing, and says so.
 
-Setup refuses when another provider holds the web chat's port, and names
-it: give that provider another `url` in `carillon.toml`, then run setup
-again. `carillon setup --interface discord` adds Discord to an installation
-that has only the web chat in the same way. It runs Discord's own setup,
-which asks for the bot and its channels, and nothing else.
+Setup refuses before it writes anything when the web chat's port is taken.
+When another provider in `carillon.toml` has it, setup names that provider:
+give it another `url`, then run setup again. When another program on the
+machine listens there, setup names the port: stop that program, then run
+setup again.
+
+When core is there and does not answer, setup cannot tell what Carillon
+serves. The command fails with core's error, the entry stays in
+`carillon.toml`, and `carillon restart` applies it.
+
+`carillon setup --interface discord` adds Discord to an installation that
+has only the web chat in the same way. It runs Discord's own setup, which
+asks for the bot and its channels, and nothing else. If you cancel it, or it
+does not finish, setup takes Discord's entry out of `carillon.toml` again,
+so Carillon starts as it did before. Run the command again to add it.
 
 ### The page's files
 
@@ -1215,5 +1225,9 @@ in T3's settings.
 ```
 
 It removes the user services, the `~/.local/bin/carillon` link and the
-application. Configuration, credentials, sessions and other data stay in the
+application. It removes the services only when they run this installation:
+units that another installation of yours registered stay. If the application
+directory is already gone, it says so and removes no unit. The release
+archive's `uninstall.sh`, run with `CARILLON_HOME` set, finishes an uninstall
+that was interrupted. Configuration, credentials, sessions and other data stay in the
 installation directory; delete it yourself if you no longer need it.
