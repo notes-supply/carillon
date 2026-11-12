@@ -666,7 +666,12 @@ Discord, Pi or T3, none of which it runs or reaches.
   web chat starts at the next `carillon restart`.
 - **While Carillon is stopped**, it stays stopped. `carillon start` starts
   it with the web chat.
-- **Run again**, it changes nothing and restarts nothing, and says so.
+- **Run again** once Carillon serves the web chat, it changes nothing and
+  restarts nothing, and says so. Run again before that, as after a drain
+  that did not finish, it restarts Carillon to serve it.
+- **While the web chat is disabled** in `carillon.toml`, it restarts
+  nothing and says so: `carillon provider web enable`, then `carillon
+  restart`.
 
 Setup refuses before it writes anything when the web chat's port is taken.
 When another provider in `carillon.toml` has it, setup names that provider:

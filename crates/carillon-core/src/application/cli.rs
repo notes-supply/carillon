@@ -469,6 +469,21 @@ async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
         return Ok(());
     }
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let enabled = |interface: &Bundled| {
+        let mut entries = config.value.providers.iter();
+        entries.any(|entry| entry.id == interface.id() && entry.enabled)
+    };
+    let (added, disabled): (Vec<Bundled>, Vec<Bundled>) = added.into_iter().partition(enabled);
+    for id in disabled.iter().map(|interface| interface.id()) {
+        println!(
+            "{id} is disabled in carillon.toml, so Carillon does not serve it and was not \
+             restarted. `carillon provider {id} enable` enables it, and `carillon restart` then \
+             starts it."
+        );
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
     let ids: Vec<&str> = added.iter().map(|interface| interface.id()).collect();
     let ids = ids.join(", ");
     let report = status_if_running(&config).await.with_context(|| {
@@ -482,11 +497,10 @@ async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
         println!("Carillon is not running. `carillon start` starts it with {ids}.");
         return Ok(());
     };
+    // Core reports an entry its own registry has disabled, and does not serve it.
     let serves = |interface: &Bundled| {
-        report
-            .providers
-            .iter()
-            .any(|health| health.id == interface.id())
+        let mut reported = report.providers.iter();
+        reported.any(|health| health.id == interface.id() && health.status != "disabled")
     };
     if added.iter().all(serves) {
         println!("Carillon already serves {ids}, so it was not restarted.");

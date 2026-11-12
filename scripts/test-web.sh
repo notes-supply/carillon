@@ -164,6 +164,15 @@ grep -Fx 'Carillon already serves web, so it was not restarted.' "$TEST_ROOT/aga
 cmp "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
 [ ! -e "$TRACE" ] || fail 'setting up a served interface again reached the service manager'
 [ "$(session)" = 200 ]
+# Disabled by its owner, it is listed by core and not served.
+carillon provider web disable >/dev/null
+carillon restart >/dev/null
+rm -f "$TRACE"
+carillon setup --interface web </dev/null >"$TEST_ROOT/disabled.log" 2>&1
+grep -Fx "web is disabled in carillon.toml, so Carillon does not serve it and was not restarted. \`carillon provider web enable\` enables it, and \`carillon restart\` then starts it." \
+  "$TEST_ROOT/disabled.log" >/dev/null
+! grep -F 'already serves' "$TEST_ROOT/disabled.log" >/dev/null || fail 'a disabled interface was called served'
+[ ! -e "$TRACE" ] || fail 'setting up a disabled interface reached the service manager'
 carillon stop >/dev/null
 uninstall
-printf 'web chat added passed: one command on a stopped installation, nothing else changed, a rerun changes nothing\n'
+printf 'web chat added passed: one command on a stopped installation, nothing else changed, a rerun changes nothing, a disabled entry is not served\n'
