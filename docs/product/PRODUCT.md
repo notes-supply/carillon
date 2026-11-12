@@ -98,6 +98,8 @@ native state between engines or T3 projects.
 - **Authority.** Every service runs as the installing user. Carillon adds no
   command broker, path allowlist or approval system; confinement, if wanted,
   belongs to the runtime or its extensions.
-- **Beta formats.** State and configuration use the current format only.
-  When a format changes, an update refuses before stopping anything; there are
-  no migrations.
+- **Beta formats.** State and configuration use the current format only,
+  and there are no migrations. When a format changes, an update refuses
+  before stopping or publishing anything and prints how to cross in place:
+  core's record of past turns and the files it kept start over, and the
+  assistant's conversations, schedules, settings and sign-ins stay.
