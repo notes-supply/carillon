@@ -65,7 +65,7 @@ trusts nothing a browser attaches on its own.
 - An `Origin` other than the provider's own is 403, a preflight's included.
   No answer has a CORS header.
 - The page runs under a content security policy that allows only its own
-  scripts, styles and images.
+  scripts, styles, images and fonts.
 - The token, a sign-in code and every file link are HMACs of the browser
   key. `carillon web sign-out` replaces the key, which voids them all.
 
@@ -77,6 +77,10 @@ here, as its other providers do. `carillon web sign-out` voids what such a
 page could have taken. `carillon web open` refuses to make a link when
 nothing listens, but it cannot tell another listener from the provider.
 
+`carillon web open` hands the sign-in link, with its two-minute code, to the
+browser opener as a process argument. Other users of the machine can read
+a process's arguments while it runs.
+
 ## The page's files
 
 The page is plain files, read from disk on each request, so an edit shows
@@ -87,7 +91,8 @@ In a checkout, name the directory: `--site crates/carillon-web/site`.
 A complete copy in `state/components/<id>/site/` is served instead of the
 release's. A copy is complete when it has an `index.html`. No file comes
 from the release while the copy is served. The directory is flat, and the
-provider serves `.html`, `.js`, `.css`, `.svg` and `.png` files from it.
+provider serves `.html`, `.js`, `.css`, `.svg`, `.png` and `.woff2` files
+from it.
 
 Only a regular file in the folder is served. A symbolic link inside the
 folder is answered with 404, because the page's files need no token and such
@@ -97,7 +102,41 @@ page. So a `site` that is a link to a folder with an `index.html` counts as
 the custom page, and everything servable in that folder is public to this
 machine.
 
-The files in [`site/`](site) only prove sign-in, reading and sending.
+### What the page is made of
+
+The files in [`site/`](site) are the source. Nothing builds them, so an
+edit there, or in your own copy, is the whole change.
+
+- [`index.html`](site/index.html) has every element the script looks up by
+  ID. [`style.css`](site/style.css) has both colour schemes as one named
+  palette at its top, and the phone layout at its end.
+- [`model.js`](site/model.js) decides, and touches no document: what a poll
+  compares, how turns merge, how a message waits for its receipt, what a
+  turn shows for each state and which controls to offer. Its tests are in
+  [`test/`](test), outside the folder that ships.
+- [`view.js`](site/view.js) builds elements from what the model decides.
+  Every string goes in as text. The one exception is `prose`, which
+  inserts the HTML the provider rendered for an answer.
+- [`api.js`](site/api.js) makes the requests. [`app.js`](site/app.js) holds
+  what is on screen and wires the page together.
+
+The modules are JavaScript with JSDoc types. `mise run check:ts` formats,
+lints and type-checks them against the DOM, and runs the model's tests.
+
+In the browser the page keeps the token and, for each conversation, the
+text not yet received by Carillon: what is in the composer and, until its
+receipt, the message on its way. It keeps no event ID and no file, so a
+reload sends nothing by itself. A receipt clears only the text that was
+sent. Tabs share this storage. Two tabs that hold different unsent text for
+one conversation store the text typed last, and a tab stores its own again
+when another tab's receipt clears the draft.
+
+Answers are set in Literata, by the Literata Project Authors, under the SIL
+Open Font License 1.1. [`literata.woff2`](site/literata.woff2) and
+[`literata-italic.woff2`](site/literata-italic.woff2) are subsets of it for
+Latin text, and [`literata-OFL.txt`](site/literata-OFL.txt) is its license.
+A copy of the page without the font files reads in the faces `style.css`
+names after it.
 
 ## Browser API
 
@@ -127,7 +166,7 @@ These statuses mean the same on every route:
 
 | Status | Meaning | What the page does |
 | --- | --- | --- |
-| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token and ask the person to run `carillon web open`. |
+| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token the request carried, if it is still the one stored, and ask the person to run `carillon web open`. |
 | 403, 421 | The request did not come from the page's own origin, or named another host. | Nothing. A page loaded from the provider never sees these. |
 | 503 | Carillon cannot answer now: core is away, as it is for a moment at every restart, or it failed, or the provider is stopping. | Keep what is on screen and try again. The body is always the same sentence. |
 
@@ -149,6 +188,9 @@ POST /api/sign-in
 Take the code from the fragment and remove the fragment from the address
 before the request. A code that was traded already, has expired, was made
 before the provider started or was not signed by the current key is 401.
+That 401 says nothing of a token the browser already has, which every tab
+shares: keep it, and use it. An old link opened in a browser that is signed
+in opens the chat.
 
 ### Read the session
 
@@ -266,7 +308,7 @@ does not have is 404.
 | `running` | It is not finished. Its runtime has it. | |
 | `answered` | It has its answer. | `html`, `files` |
 | `interrupted` | It did not complete. `html` is core's or the runtime's explanation. | `html` |
-| `steered` | The message went into a turn already running. | |
+| `steered` | A later message joined it. Its answer is on the newest message that took part. | |
 | `stopped` | Someone stopped it. | |
 
 The turns tell you that a turn is unfinished and not whether it waits. A
@@ -274,18 +316,22 @@ message that its runtime holds behind a running answer reads `running`
 here. Whether an unfinished turn is queued or running comes from the
 [live read](#read-live-turns) alone.
 
-A steered message has no answer of its own. The answer is on the newest
-message that took part, which may not be the one above, so label it
-neutrally.
+A steered turn has no answer of its own. When messages join one answer, Pi
+settles every one of them but the newest as `steered` and puts the answer
+on the newest. So the steered turn is the earlier message, the one that
+began the work, and its answer is below it. Say so from the person's side.
 
 `html` is the answer's Markdown, rendered by the provider. Insert it as it
 is. Raw HTML in an answer is shown as text. A link stays a link only to
 `http`, `https` or `mailto`, and opens in a new tab. An image becomes a link
-to it.
+to it. A table's cell that is aligned has the class `align-left`,
+`align-center` or `align-right`, because the page's policy allows no inline
+style.
 
 `report` is an ended turn's final [activity snapshot](#the-activity-snapshot),
 or null. Its `phase` is the last phase the turn was in while it ran. Draw an
-ended turn from `state`, never from `report.phase`.
+ended turn from `state`, never from `report.phase`. Pi posts a report with
+an answer, so a turn that was stopped has none.
 
 ### Files
 
@@ -320,7 +366,9 @@ file=<numbers.csv>
 
 The body has one `text` part and any number of `file` parts. A message needs
 text or a file. Leave out a `file` part that has no file: an HTML form sends
-an empty one when nothing is chosen.
+an empty one when nothing is chosen. A browser writes `"`, a carriage return
+and a line feed in a file's name as `%22`, `%0D` and `%0A`, and the provider
+reads those three back, so a file keeps the name it has on disk.
 
 - `agent` names the agent of a conversation's first message. Later messages
   need none. Naming another agent than the conversation's is 409.
@@ -446,7 +494,7 @@ lists `stop`. A turn the runtime opened lists none.
 
 | `action` | On | What it does | How the turns end |
 | --- | --- | --- | --- |
-| `steer` | A waiting message | Hands it to the running turn. | The message's turn is `steered`. The answer comes on the newest message that took part. |
+| `steer` | A waiting message | Hands it to the running turn. | The turn that was running is `steered`. The answer comes on the newest message that took part. |
 | `interrupt` | A waiting message | Ends the running turn and runs the message next. | The earlier turn is `stopped`. The message's turn runs and is `answered`. |
 | `stop` | A waiting message | Does not run it. | The message's turn is `stopped`. The running turn goes on. |
 | `stop` | A running answer | Ends that answer, and none that follows it. | Its turn is `stopped`, and so is the turn of every message that was steered into it. |
@@ -471,8 +519,9 @@ GET /api/conversations/<conversation>/commands?agent=assistant
 The list is what the conversation's runtime offers its agent, in the
 runtime's order. `description` and `hint`, the arguments a command expects,
 are optional. Pass `agent` for a conversation that has no message yet. To
-invoke a command, send a message whose text starts with the command's name,
-with `command=true`.
+invoke a command, send a message whose text is `/`, the command's name and
+then any arguments, with `command=true`: `/skill:carillon-status` for the
+command above.
 
 The refusals are those of a send's `agent`: 404 for a new conversation with
 no agent named, 422 for an agent Carillon does not have, and 409 for another
@@ -504,4 +553,5 @@ its agent's model. Change that with `carillon settings --agent`.
   its files.
 - [`files.rs`](src/files.rs): signed file links. [`markdown.rs`](src/markdown.rs):
   answers as HTML.
-- [`site.rs`](src/site.rs): the page's files.
+- [`site.rs`](src/site.rs): how the page's files are served.
+  [`site/`](site): the page.

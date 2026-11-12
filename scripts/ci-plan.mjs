@@ -36,7 +36,9 @@ function lanesOf(path) {
   if (path.endsWith(".md")) return [];
   // Rust, including the example module the release ships built.
   if (/^(crates\/|examples\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
-    return /\.(json|mjs|ts)$/u.test(path) ? ["rust", "ts", "release"] : ["rust", "release"];
+    return /\.(json|mjs|ts|js|css|html)$/u.test(path)
+      ? ["rust", "ts", "release"]
+      : ["rust", "release"];
   }
   if (
     path.startsWith("packages/") ||

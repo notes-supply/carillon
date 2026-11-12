@@ -47,12 +47,17 @@ pub(crate) fn render(markdown: &str) -> String {
     });
     let mut rendered = String::new();
     html::push_html(&mut rendered, events);
-    // Every `<` of the source is escaped by now, so each anchor here is one
-    // the renderer wrote.
-    rendered.replace(
-        "<a href=",
-        "<a target=\"_blank\" rel=\"noreferrer noopener\" href=",
-    )
+    // Every `<` of the source is escaped by now, so each tag here is one the
+    // renderer wrote. It aligns a table's column with an inline style, which
+    // the page's policy refuses, so the alignment becomes a class the page's
+    // stylesheet knows.
+    rendered
+        .replace(
+            "<a href=",
+            "<a target=\"_blank\" rel=\"noreferrer noopener\" href=",
+        )
+        .replace("<th style=\"text-align: ", "<th class=\"align-")
+        .replace("<td style=\"text-align: ", "<td class=\"align-")
 }
 
 fn allowed(url: &str) -> bool {
@@ -90,6 +95,23 @@ mod tests {
             assert!(!rendered.contains("<iframe") && !rendered.contains("<style"));
             assert!(!rendered.contains("<a "), "{rendered}");
         }
+    }
+
+    #[test]
+    fn a_table_s_alignment_is_a_class_and_never_an_inline_style() {
+        let rendered = render(
+            "| Day | Turns | Note |\n| :-- | --: | :-: |\n\
+             | Monday | 58 | say style=\"text-align: right\" |",
+        );
+        for cell in [
+            "<th class=\"align-left\">Day</th>",
+            "<td class=\"align-right\">58</td>",
+            "<th class=\"align-center\">Note</th>",
+            ">say style=\"text-align: right\"</td>",
+        ] {
+            assert!(rendered.contains(cell), "{cell} is not in {rendered}");
+        }
+        assert!(!rendered.contains("<td style=") && !rendered.contains("<th style="));
     }
 
     #[test]

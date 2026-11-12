@@ -209,9 +209,11 @@ missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 The web provider (`carillon-web`) serves a chat page to the installing
 user's own browser on the same machine. No release registers it yet: a
 registry entry with `program = "web"` and `delivery = "retained"` runs it.
-It keeps no conversation. The page lists conversations and reads turns
-through the provider from core's history, polls the list, and asks for
-the live state of the unfinished turns on screen. A conversation is one UUID
+It keeps no conversation. The page is plain files with no build step, read
+from disk on each request. It lists conversations and reads turns
+through the provider from core's history, polls the list while it is
+visible, and asks for the live state of the unfinished turns on screen. In
+the browser it keeps its token and each conversation's unsent text. A conversation is one UUID
 the page mints, which is its audience, its channel and its delivery target
 in core, and its agent is chosen with its first message and never changes.
 A message's event ID is the page's too, so a retry is the first message
@@ -519,3 +521,6 @@ machine can take the port and serve a page at the chat's own origin, which
 can read what the real page stored there. Carillon trusts the machine's
 local programs here, as its other providers do, and remote admission is the
 boundary. `carillon web sign-out` voids what such a page could have taken.
+`carillon web open` hands the sign-in link, with its two-minute code, to the
+browser opener as a process argument, which other users of the machine can
+read while it runs.

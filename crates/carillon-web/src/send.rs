@@ -107,6 +107,15 @@ fn malformed(error: MultipartError) -> InterfaceError {
     )
 }
 
+/// A file's name as the person's file has it. A browser writes `"`, CR and
+/// LF in a form's file name as `%22`, `%0D` and `%0A`, as the HTML standard
+/// has it, and nothing else that way, so only those three are read back.
+fn as_chosen(name: &str) -> String {
+    name.replace("%22", "\"")
+        .replace("%0D", "\r")
+        .replace("%0A", "\n")
+}
+
 /// Reads the request's parts: `text`, then any number of `file`. A part
 /// past core's limits is not kept, and the rest of the body is still read
 /// before the refusal is given: a browser that is answered while it
@@ -131,8 +140,8 @@ async fn stage(
                         )
                     });
                 }
-                let name = match part.file_name().map(str::trim) {
-                    Some(name) if !name.is_empty() => name.to_owned(),
+                let name = match part.file_name().map(as_chosen) {
+                    Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
                     _ => "file".to_owned(),
                 };
                 let content_type = part.content_type().map(str::to_owned);

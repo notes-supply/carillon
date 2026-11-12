@@ -148,11 +148,9 @@ async fn health(State(web): State<Arc<Web>>) -> Json<Health> {
     Json(web.health.clone())
 }
 
-/// The page may load only its own scripts, styles and images, and talk only
-/// to this provider.
 const PAGE_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-    img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; \
-    frame-ancestors 'none'";
+    img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; \
+    form-action 'none'; frame-ancestors 'none'";
 
 /// Refuses a request that does not name this provider or comes from
 /// another origin, before anything reads it, and gives every answer the
