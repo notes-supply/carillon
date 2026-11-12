@@ -163,6 +163,38 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
 }
 
 #[tokio::test]
+async fn a_file_keeps_the_name_the_person_s_file_has() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // As a browser writes `say "hi"`, a name with a line end, and a name that has a percent sign.
+    let written = [
+        "say %22hi%22.txt",
+        "two%0D%0Alines.txt",
+        "100%25 %41 %2F.txt",
+    ];
+    let parts: Vec<_> = std::iter::once(Part::Text("three files"))
+        .chain(written.map(|name| Part::File(name, None, b"x")))
+        .collect();
+    let sent = send(&fixture, &token, "?agent=second", &parts).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    let core = fixture.core();
+    let [(event, _)] = core.events.as_slice() else {
+        anyhow::bail!("expected one event, not {}", core.events.len());
+    };
+    let named: Vec<_> = event
+        .attachments
+        .iter()
+        .flat_map(|attached| &attached.files)
+        .map(|file| file.name.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        ["say \"hi\".txt", "two\r\nlines.txt", "100%25 %41 %2F.txt"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
