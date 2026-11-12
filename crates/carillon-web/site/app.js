@@ -8,6 +8,7 @@ import {
   earlier,
   invokes,
   joined,
+  linksAged,
   merge,
   offered,
   overLimit,
@@ -84,7 +85,7 @@ let older = [];
 /** @type {number | null} */
 let next = null;
 /**
- * @type {{ id: string, page: Page, loaded: boolean, stale: boolean, inCore: boolean, listedAtRead: Conversation | undefined }}
+ * @type {{ id: string, page: Page, loaded: boolean, stale: boolean, inCore: boolean, listedAtRead: Conversation | undefined, readAt: number }}
  */
 let open = {
   id: "",
@@ -93,6 +94,7 @@ let open = {
   stale: true,
   inCore: false,
   listedAtRead: undefined,
+  readAt: 0,
 };
 /** @type {Map<string, Live>} */
 let live = new Map();
@@ -111,8 +113,8 @@ const activityWhenLooked = new Map();
 /** @type {Map<string, { key: string, node: HTMLLIElement }>} */
 const drawn = new Map();
 
-const reads = sequence();
-let [round, failures, timer, choice, railKey] = [0, 0, 0, 0, ""];
+const polls = sequence();
+let [failures, timer, choice, railKey] = [0, 0, 0, ""];
 let menuDismissed = false;
 let followEnd = true;
 let signedOut = false;
@@ -155,22 +157,33 @@ function okOrNotice(answer) {
   return kind === "ok";
 }
 
+/** Polls now, unless the page is hidden: it polls at once when it shows again. */
 function kick() {
-  void tick();
+  if (!document.hidden) void tick();
 }
 
+const pause = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function tick() {
-  const mine = ++round;
+  const ticket = polls.next();
   clearTimeout(timer);
-  const answered = await poll();
-  if (mine !== round || signedOut) return;
+  const answered = await poll(ticket);
+  if (!polls.current(ticket) || signedOut) return;
   failures = answered ? 0 : failures + 1;
   if (answered) say("");
   if (!document.hidden) timer = setTimeout(kick, wait(failures));
 }
 
-async function poll() {
+/**
+ * One poll: the list, then the open conversation's turns when the list
+ * says they changed, then the live state of its unfinished turns. Once a
+ * newer poll has begun, or another conversation is on screen, this one's
+ * answers are dropped.
+ * @param {number} ticket
+ */
+async function poll(ticket) {
   const answer = await ask("/api/conversations");
+  if (!polls.current(ticket)) return true;
   if (!okOrNotice(answer)) return false;
   /** @type {{ conversations: Conversation[], next: number | null }} */
   const first = data(answer);
@@ -178,25 +191,26 @@ async function poll() {
   if (older.length === 0) next = first.next;
   drawRail();
   const current = listed.find(({ id }) => id === open.id);
-  if ((open.stale || changed(open.listedAtRead, current)) && !(await readTurns(current)))
+  if (open.inCore && linksAged(open.readAt, now())) open.stale = true;
+  if ((open.stale || changed(open.listedAtRead, current)) && !(await readTurns(current, ticket)))
     return false;
   const ids = unfinished(open.page.turns);
-  return ids.length === 0 || (await readLive(ids, current));
+  return ids.length === 0 || (await readLive(ids, current, ticket));
 }
 
 /**
- * @param {Conversation | undefined} current
+ * @param {Conversation | undefined} current How the list had the conversation before the read began.
+ * @param {number} ticket
  */
-async function readTurns(current) {
-  const ticket = reads.next();
+async function readTurns(current, ticket) {
   const answer = await ask(`/api/conversations/${open.id}/turns`);
-  if (!reads.current(ticket)) return true;
+  if (!polls.current(ticket)) return true;
   const inCore = answer.status !== 404;
   if (inCore) {
     if (!okOrNotice(answer)) return false;
     open.page = merge(open.page, data(answer));
   }
-  Object.assign(open, { inCore, listedAtRead: current, stale: false, loaded: true });
+  Object.assign(open, { inCore, listedAtRead: current, stale: false, loaded: true, readAt: now() });
   drawRail();
   drawTurns();
   drawComposer();
@@ -206,16 +220,16 @@ async function readTurns(current) {
 /**
  * @param {string[]} ids
  * @param {Conversation | undefined} current
+ * @param {number} ticket
  */
-async function readLive(ids, current) {
-  const { id } = open;
+async function readLive(ids, current, ticket) {
   const answer = await ask(`/api/turns?ids=${ids.join(",")}`);
-  if (id !== open.id) return true;
+  if (!polls.current(ticket)) return true;
   if (!okOrNotice(answer)) return false;
   /** @type {{ turns: Live[] }} */
   const read = data(answer);
   live = new Map(read.turns.map((turn) => [turn.id, turn]));
-  if (read.turns.some((turn) => turn.state === "ended")) return await readTurns(current);
+  if (read.turns.some((turn) => turn.state === "ended")) return await readTurns(current, ticket);
   drawTurns();
   return true;
 }
@@ -361,7 +375,7 @@ function storeDraft(id, text) {
  * @param {boolean} minted
  */
 function show(id, minted) {
-  reads.next();
+  polls.next();
   open = {
     id,
     page: EMPTY,
@@ -369,6 +383,7 @@ function show(id, minted) {
     stale: !minted,
     inCore: false,
     listedAtRead: undefined,
+    readAt: 0,
   };
   live = new Map();
   drawn.clear();
@@ -432,8 +447,16 @@ function send() {
  * @param {Pending} message
  */
 async function deliver(id, message) {
+  const redraw = () => {
+    if (id === open.id) drawTurns();
+  };
   if (message.text.startsWith("/")) {
-    await loadCommands(id, message.agent);
+    // Whether a text is a command is the runtime's to say, so the message waits for its list.
+    for (let failed = 0; !(await loadCommands(id, message.agent)); failed += 1) {
+      message.stage = "retrying";
+      redraw();
+      await pause(wait(failed));
+    }
     message.command = invokes(message.text, commands.get(id) ?? []);
   }
   const query = [
@@ -441,9 +464,6 @@ async function deliver(id, message) {
     ...(message.command ? ["command=true"] : []),
   ];
   const path = `/api/conversations/${id}/messages/${message.eventId}${query.length > 0 ? "?" : ""}${query.join("&")}`;
-  const redraw = () => {
-    if (id === open.id) drawTurns();
-  };
   for (let failed = 0; ; failed += 1) {
     // A form of the page's own, so no empty `file` part is sent.
     const form = new FormData();
@@ -480,7 +500,7 @@ async function deliver(id, message) {
     }
     message.stage = "retrying";
     redraw();
-    await new Promise((resolve) => setTimeout(resolve, wait(failed)));
+    await pause(wait(failed));
   }
 }
 
@@ -511,16 +531,19 @@ async function press(turn, action) {
 /**
  * @param {string} id
  * @param {string | null} agent The agent, for a conversation core does not have yet.
+ * @returns {Promise<boolean>} Whether the runtime said: its list, or a refusal a send would get too.
  */
 async function loadCommands(id, agent) {
-  if (commands.has(id)) return;
+  if (commands.has(id)) return true;
   const query = agent === null ? "" : `?agent=${encodeURIComponent(agent)}`;
   const answer = await ask(`/api/conversations/${id}/commands${query}`);
-  if (reading(answer.status) !== "ok") return;
+  const kind = reading(answer.status);
+  if (kind !== "ok") return kind !== "away";
   /** @type {{ commands: Command[] }} */
   const runtime = data(answer);
   commands.set(id, runtime.commands);
   if (id === open.id) drawMenu();
+  return true;
 }
 
 function offers() {
@@ -689,7 +712,7 @@ async function start() {
     }
     page.door.hidden = false;
     page.doorWhy.replaceChildren(...phrase(AWAY));
-    await new Promise((resolve) => setTimeout(resolve, wait(failed)));
+    await pause(wait(failed));
   }
   page.door.hidden = true;
   page.app.hidden = false;

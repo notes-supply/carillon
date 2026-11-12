@@ -10,6 +10,7 @@ import {
   invokes,
   joined,
   ledger,
+  linksAged,
   merge,
   offered,
   overLimit,
@@ -208,6 +209,13 @@ describe("turns", () => {
     const all = earlier(held, older);
     expect(all.turns.map(({ id }) => id)).toEqual(["0", "a", "b", "c"]);
     expect(all.before).toBeNull();
+  });
+
+  it("reads turns again on a later UTC day, before their file links stop working", () => {
+    const at = (/** @type {string} */ iso) => Date.parse(iso) / 1000;
+    expect(linksAged(at("2026-11-12T00:00:01Z"), at("2026-11-12T23:59:59Z"))).toBe(false);
+    expect(linksAged(at("2026-11-12T23:59:59Z"), at("2026-11-13T00:00:00Z"))).toBe(true);
+    expect(linksAged(at("2026-11-10T12:00:00Z"), at("2026-11-12T12:00:00Z"))).toBe(true);
   });
 
   it("names a conversation by its title or the first line written", () => {

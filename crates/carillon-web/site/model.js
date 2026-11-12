@@ -102,6 +102,17 @@ export function earlier(held, older) {
 }
 
 /**
+ * Whether turns read at `readAt` may hold file links that no longer work. A
+ * link is the same for a whole UTC day and works until the end of the next,
+ * so turns read on an earlier UTC day are read again.
+ * @param {number} readAt Unix seconds.
+ * @param {number} now Unix seconds.
+ */
+export function linksAged(readAt, now) {
+  return Math.floor(readAt / 86_400) !== Math.floor(now / 86_400);
+}
+
+/**
  * The turns a live read asks about: the newest unfinished ones, as many as
  * one read takes.
  * @param {Turn[]} turns
