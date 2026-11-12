@@ -1,15 +1,21 @@
 # Carillon product brief
 
-Carillon connects messaging platforms to agent runtimes on one Linux host.
-Discord is the first interface and Pi the default runtime, with T3 Code as an
-alternative. Each is a separate program behind the `carillon` command, so a
-new interface or runtime doesn't mean rebuilding the rest.
+Carillon connects the places its owner talks to agent runtimes on one Linux
+host. It bundles two interfaces, a web chat in the owner's own browser and
+Discord, and two runtimes, Pi by default and T3 Code as an alternative. Each
+is a separate program behind the `carillon` command, so a new interface or
+runtime doesn't mean rebuilding the rest.
 
 ## What an owner can do
 
-1. Install Carillon as an ordinary Unix user.
-2. Configure a Discord server, allowlisted users and routed channels.
-3. Talk to the agent in channels, threads and direct messages to the bot,
+1. Install Carillon as an ordinary Unix user, with the web chat, Discord or
+   both, and add the other later with one command.
+2. Open the web chat in a browser on the same machine with `carillon web
+   open`, start a conversation with any agent, send it messages and files,
+   and read its answers and their files there. It needs no bot and no
+   account beyond the model's.
+3. Configure a Discord server, allowlisted users and routed channels, and
+   talk to the agent in channels, threads and direct messages to the bot,
    with files, images and voice messages, and receive the files it makes
    with its answers.
 4. Let the agent use its runtime's native tools, extensions and skills with
@@ -50,8 +56,10 @@ native state between engines or T3 projects.
 
 ## Behaviour
 
-- **Admission.** Discord refuses anything outside its guild, allowlist and
-  routes before core sees it. Direct messages to the bot are admitted only
+- **Admission.** The web chat serves only this machine, and only a browser
+  its owner signed in: `carillon web open` makes a link that works once,
+  and `carillon web sign-out` signs every browser out. Discord refuses
+  anything outside its guild, allowlist and routes before core sees it. Direct messages to the bot are admitted only
   from allowlisted people, and only while the Discord settings name the
   agent that answers them; each person's direct messages are one rolling
   conversation with it. A person's direct message opens with what agents
@@ -69,7 +77,8 @@ native state between engines or T3 projects.
   converted, transcribed or executed on arrival. A voice message, forwarded
   or not, reaches the agent as its audio file. An answer can carry files
   too: on Pi the agent attaches them, and core keeps a copy of each with
-  the answer, which Discord uploads with it. A file that can't be kept or
+  the answer, which Discord uploads with it and the web chat serves by a
+  link. A file that can't be kept or
   sent never fails the answer; the answer names it and where it is. Files
   attached while the agent worked on an answer that never came, because it
   was stopped, interrupted or failed, are dropped. T3 answers are text.
@@ -81,7 +90,8 @@ native state between engines or T3 projects.
   T3's records rather than running it twice, and a turn whose outcome T3
   can't show fails and is never replayed. Either way the conversation is
   told, and the next message carries on with the same native conversation.
-  Delivery retries without rerunning the model.
+  Delivery retries without rerunning the model. A web chat's answer is
+  delivered once core records it, because the page reads it from core.
 - **Busy conversations.** A message that arrives while Pi answers in its
   conversation steers that answer by default, or waits for it or interrupts
   it, as the agent's settings choose. People can steer a waiting message in,

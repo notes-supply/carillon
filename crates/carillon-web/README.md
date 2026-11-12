@@ -7,8 +7,9 @@ conversation: core has every turn, file and answer, and the provider reads
 them back. Its only durable file is the browser key,
 `state/components/<id>/browser.key`.
 
-A registry entry with `program = "web"` runs it. No release registers one
-yet, so write the entry yourself:
+A registry entry with `program = "web"` runs it. Setup registers one, when
+you choose the web chat at install or run `carillon setup --interface web`
+on an installation without it:
 
 ```toml
 [[providers]]
@@ -30,6 +31,7 @@ it, and the provider claims no delivery.
 
 ```sh
 carillon web serve --config carillon.toml --provider web --token-file credentials/web.token
+carillon web setup           # check the entry and its credential; asks nothing (run by `carillon setup`)
 carillon web open            # sign this machine's browser in and open the chat
 carillon web open --print    # print the link instead
 carillon web sign-out        # sign every browser out and void every file link

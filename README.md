@@ -1,9 +1,10 @@
 # Carillon
 
-A self-hosted AI agent you talk to in Discord, powered by
+A self-hosted AI agent you talk to in your browser or in Discord, powered by
 [Pi](https://github.com/earendil-works/pi) or [T3 Code](https://github.com/pingdotgg/t3code).
 
-Chat in channels or threads, attach files and images, change a channel's
+The web chat is a page in your own browser on the machine that runs
+Carillon, and needs no bot. In Discord, chat in channels or threads, attach files and images, change a channel's
 model and settings with `/settings` or `carillon settings`, and run the
 agent's own commands with `/command`. A card shows what
 the agent is doing while it works. Send another message while it answers to
@@ -19,8 +20,9 @@ migrations.
 
 - x86_64 Linux with glibc 2.39 or newer and systemd
 - GNU coreutils 9.5 or newer, for updates
-- A Discord application with a bot, and Message Content Intent turned on
-  for it in the Discord Developer Portal
+- For Discord, a Discord application with a bot, and Message Content Intent
+  turned on for it in the Discord Developer Portal. The web chat needs only
+  a browser on the same machine
 - A model provider account that Pi supports, or a T3 Code server on the
   same machine
 
@@ -37,10 +39,13 @@ checks it against its published checksum, and asks you:
 
 - **Pi or T3 Code.** Pi opens its own sign-in and model picker. For T3, give
   its address and a token, then pick one of its projects and a model.
-- **Discord.** Paste the bot token (it isn't shown), then pick the server,
-  the channels, how the agent answers and who may talk to it.
+- **Where you talk to it.** The web chat, Discord, or both. The web chat is
+  preselected and asks nothing more. For Discord, paste the bot token (it
+  isn't shown), then pick the server, the channels, how the agent answers
+  and who may talk to it.
 
-Then it starts Carillon and links `carillon` into `~/.local/bin`. For a
+Then it starts Carillon and links `carillon` into `~/.local/bin`. With the
+web chat, `carillon web open` signs your browser in and opens it. For a
 particular release, run `sh -s -- --version 0.1.0-beta.2` instead of `sh`.
 
 The [operations guide](docs/product/OPERATIONS.md) covers installing without

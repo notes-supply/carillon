@@ -9,6 +9,7 @@
 
 - [Core](../../crates/carillon-core/README.md): conversations, turns and delivery.
 - [Discord](../../crates/carillon-discord/README.md): admission, replies, cards and commands.
+- [Web chat](../../crates/carillon-web/README.md): the page, its browser API and sign-in.
 - [Pi](../../packages/runtime-pi/README.md) and [T3 Code](../../packages/runtime-t3/README.md) runtimes.
 - [Interface boundary](../../crates/carillon-interface/README.md): what every interface does with core.
 - [Runtime boundary](../../packages/runtime/README.md): the shared HTTP adapter.

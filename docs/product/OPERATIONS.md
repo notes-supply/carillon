@@ -10,7 +10,8 @@ Carillon.
   application directory atomically with `mv --exchange` on a filesystem that
   supports it (ext4, Btrfs and XFS do). Without it, an update is refused
   before anything stops.
-- A Discord application with a bot in one server (guild), invited with the
+- A browser on the same machine for the web chat, or, for Discord, a Discord
+  application with a bot in one server (guild), invited with the
   `applications.commands` scope.
 - A model account Pi can use, or a [T3 Code](../../packages/runtime-t3/README.md)
   server.
@@ -28,16 +29,18 @@ stopping anything and prints how to cross
 
 The [README](../../README.md#install)'s command downloads the newest release
 and runs its installer as you, the user who will own Carillon (not root).
-Without Discord options, the installer asks at the terminal:
+Without [unattended options](#without-questions), the installer asks at the
+terminal:
 
 1. **The runtimes.** Pi, a T3 Code server already running on this machine,
    or both (`--runtime pi` and `--runtime t3` answer it). Pi runs Carillon's
    assistant, the agent with Discord's context and Carillon's resources. T3
    runs T3 Code channels.
-2. **The interfaces.** Where people talk to Carillon. This release bundles
-   Discord. An installation needs at least one. `carillon setup` and
-   `carillon init` take `--interface discord` as the answer; the installer
-   has no such option.
+2. **The interfaces.** Where people talk to Carillon: the
+   [web chat](#web-chat) in your own browser on this machine, which is
+   preselected, Discord, or both. An installation needs at least one.
+   `carillon setup` and `carillon init` take `--interface web` and
+   `--interface discord` as the answer.
 3. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), and the projects T3 Code channels
    work in: each becomes an agent that is plain T3 Code through Discord.
@@ -47,7 +50,7 @@ Without Discord options, the installer asks at the terminal:
    it again until it is. Then it asks the model of each Pi agent that has
    none yet.
 5. **Each interface** is set up by its own program; a rerun skips one that
-   is disabled. Discord asks for the
+   is disabled. The web chat asks nothing. Discord asks for the
    bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
@@ -57,7 +60,8 @@ Without Discord options, the installer asks at the terminal:
    checks that the bot may answer that way in each channel, and asks again
    until it may. Then who it answers: the bot application's owners, and
    anyone else by Discord user ID. Only those people can talk to the agent.
-6. Carillon starts.
+6. Carillon starts. With the web chat, `carillon web open` signs your
+   browser in and opens it.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
@@ -66,8 +70,7 @@ reach T3 only for those agents. The installer refuses while Carillon runs:
 stop it with `carillon stop` first, or update it with `carillon update
 ARCHIVE`. On an installed release, `carillon setup` asks the same
 questions, except that a rerun keeps the interfaces already registered
-without asking (`--interface discord` adds one), and `carillon discord
-setup` asks only Discord's. A rerun that
+without asking, and `carillon discord setup` asks only Discord's. A rerun that
 changes the T3 settings or the bot token takes effect in a running Carillon
 at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
@@ -77,23 +80,25 @@ without creating anything until that thread exists, then use it. Returning to th
 original thread. A conversation without a T3 thread yet starts in the current
 project. Work already running in another project continues there.
 
-An explicit `--runtime` adds that runtime to an existing installation, and
-an explicit `--interface` adds that interface. A rerun sets up every
+An explicit `--runtime` adds that runtime to an existing installation and
+asks the rest again. `--interface` alone
+[adds that interface](#add-the-web-chat-to-an-installation) and asks about
+nothing else. A plain rerun sets up every
 interface `carillon.toml` registers, each with its own program:
 `carillon-PROGRAM setup --provider ID`. Pi sign-in is skipped when no agent
 runs on Pi.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
-services (`carillon.target` with core, Discord and both runtimes; a
-runtime you didn't choose ends at once) and links `~/.local/bin/carillon`.
+services (`carillon.target` with core, both interfaces and both runtimes;
+one you didn't choose ends at once) and links `~/.local/bin/carillon`.
 It never replaces an unrelated program there. If `~/.local/bin` isn't on
 your `PATH`, run `~/.local/bin/carillon` instead of `carillon`, or add that
 directory to your `PATH`. With Pi, `--workspace` sets the assistant's
 folder (default: your home).
 
 Core listens on `--base-port` (default 43800). Each bundled program has its
-own port above it, the same in every installation: Discord +1, Pi +2 and T3
-+3. Port +4 is kept for the web interface. Setup never changes an address
+own port above it, the same in every installation: Discord +1, Pi +2, T3 +3
+and the web chat +4. Setup never changes an address
 `carillon.toml` already has. When another provider holds a program's port,
 setup refuses and names that provider: give it another `url` in
 `carillon.toml`, then run setup again. An installation that an earlier
@@ -104,8 +109,16 @@ To start Carillon at boot without logging in, an administrator can run
 
 ### Without questions
 
-With the Discord options, the installer asks nothing and registers Discord
-as the interface:
+With `--interface web`, the installer asks nothing and registers the web
+chat as the interface:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh |
+  sh -s -- --interface web
+```
+
+With the Discord options, it asks nothing and registers Discord. Add
+`--interface web` to them for both:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh |
@@ -122,11 +135,12 @@ curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.
   `carillon setup --runtime t3`.
 - `--version VERSION`, first, installs that release instead of the newest.
 
-Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
-0600), sign in to Pi with the printed `carillon-pi` command, and run
-`carillon start`. Choose the assistant's model last, with `carillon settings
---agent assistant model=PROVIDER/MODEL`. A value that names no model lists
-the models Pi offers.
+Then, for Discord, put the bot token in
+`~/.carillon/credentials/discord-bot.token` (mode 0600). Sign in to Pi with
+the printed `carillon-pi` command, and run `carillon start`. Choose the
+assistant's model last, with `carillon settings --agent assistant
+model=PROVIDER/MODEL`. A value that names no model lists the models Pi
+offers. With the web chat, `carillon web open` then opens it.
 
 Rerunning the installer with options keeps the registry, credentials and
 state, and writes the guild, bot and people from them. A `carillon.toml`
@@ -154,11 +168,12 @@ carillon status              # health of core and each provider
 carillon start
 carillon stop
 carillon restart
-carillon logs -f core        # or discord, runtime-pi, runtime-t3; without a name, all logs
+carillon logs -f core        # or web, discord, runtime-pi, runtime-t3; without a name, all logs
 carillon recent              # recent turns
 carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
 carillon settings            # each interface's routed channels, one line each
+carillon web open            # sign this machine's browser in to the web chat and open it
 ```
 
 An enabled runtime with no assigned agents is `idle`. Core does not probe it,
@@ -179,7 +194,8 @@ time; switch with the other installation's `app/bin/carillon-register-services`.
 only once nothing would be lost, waiting up to `--timeout` seconds:
 
 - no turn is being handed to its runtime;
-- answers are delivered while Discord still runs;
+- answers are delivered while Discord still runs. A web chat's answers are
+  delivered once core records them, so no browser has to be open;
 - every running runtime says a restart loses nothing it alone knows. A
   runtime that isn't running, such as one that is disabled or serves no
   agent, holds nothing.
@@ -300,8 +316,8 @@ Carillon's next turn in that thread.
 
 `carillon.toml` is the registry: core's address, the agent, and each
 provider with its role, program, address, credential hash and expected
-version. `program` names the program that serves the provider: `discord`,
-`runtime-pi` or `runtime-t3`, or `NAME` for a `carillon-NAME` you installed
+version. `program` names the program that serves the provider: `web`,
+`discord`, `runtime-pi` or `runtime-t3`, or `NAME` for a `carillon-NAME` you installed
 separately. Every provider needs it. Unknown fields make the file invalid. Each provider keeps its own settings in
 `providers/ID.toml`.
 
@@ -583,6 +599,99 @@ channel's page, which has neither line.
   `http:` or `https:` `url` (with optional `headers`). Pi refuses to start
   with a file it cannot use, and `carillon logs runtime-pi` says why. A
   server Pi loses offers no tools until it reconnects.
+
+## Web chat
+
+The web chat is a page in your own browser on the machine that runs
+Carillon. It answers at the web provider's address, `http://127.0.0.1:43804`
+with the default ports, and only there: a request that names the machine any
+other way, `localhost` included, is refused.
+
+```sh
+carillon web open            # sign this machine's browser in and open the chat
+carillon web open --print    # print the link instead, to paste into a browser
+carillon web sign-out        # sign every browser out
+```
+
+`open` makes a link that signs one browser in. The link works once, within
+two minutes, and only while Carillon runs. The browser then stays signed in,
+across restarts and updates. `sign-out` signs every browser out and voids
+every link to a file, whether or not Carillon runs. Run `open` again to sign
+in again.
+
+A conversation starts with the agent you pick and stays with it. It takes
+its agent's model, which `carillon settings --agent` changes. Answers reach
+the page from core's own record, so nothing is lost while no browser is
+open, and [a restart or update](#restart-and-update-drain-first) waits for
+none.
+
+The chat is for the machine's own user. It has no accounts and no remote
+access. Any program you run on the machine can reach its address, as it can
+reach your files.
+
+```toml
+# carillon.toml, the web chat's [[providers]] entry
+url = "http://127.0.0.1:43804"
+max_upload_mib = 1024     # the largest file an answer carries to the page
+delivery = "retained"     # answers are read from core; nothing delivers them
+```
+
+The provider has no settings file. `carillon logs web` shows its log. Its
+only file of its own is the browser key, `state/components/web/browser.key`,
+which `sign-out` replaces.
+
+### Add the web chat to an installation
+
+An installation set up without the web chat, such as one from an earlier
+release, adds it with one command. Update first, so that the installed
+release bundles it:
+
+```sh
+carillon update carillon-VERSION-linux-x86_64.tar.gz
+carillon setup --interface web
+carillon web open
+```
+
+`carillon setup --interface web` registers the provider `web`, on the port
+four above core's, with a credential of its own. It asks nothing and changes
+nothing else: no other entry of `carillon.toml`, no agent, and no settings of
+Discord, Pi or T3, none of which it runs or reaches.
+
+- **While Carillon runs**, it then restarts Carillon, because core takes a
+  new provider only when it starts. It says so first.
+  The restart [drains](#restart-and-update-drain-first) as `carillon
+  restart` does, for up to `--timeout` seconds (default 60), and work that
+  is running carries on afterwards. If the drain doesn't finish, nothing is
+  stopped and the command fails. The entry stays in `carillon.toml`, and the
+  web chat starts at the next `carillon restart`.
+- **While Carillon is stopped**, it stays stopped. `carillon start` starts
+  it with the web chat.
+- **Run again**, it changes nothing and restarts nothing, and says so.
+
+Setup refuses when another provider holds the web chat's port, and names
+it: give that provider another `url` in `carillon.toml`, then run setup
+again. `carillon setup --interface discord` adds Discord to an installation
+that has only the web chat in the same way. It runs Discord's own setup,
+which asks for the bot and its channels, and nothing else.
+
+### The page's files
+
+The page is plain HTML, CSS and JavaScript files in `app/lib/web`, read from
+disk on every request. An update replaces them with the release's.
+
+To change the page and keep your changes across updates, make a complete
+copy in the provider's own folder and edit it there:
+
+```sh
+cp -R ~/.carillon/app/lib/web ~/.carillon/state/components/web/site
+```
+
+A `site` folder with an `index.html` is served instead of the release's
+copy, at the next reload, and no file comes from the release while it is
+there. An update leaves it alone, so it does not gain the release's
+changes: remove the folder to return to the release's page. The
+[web guide](../../crates/carillon-web/README.md) describes the API the page
+uses.
 
 ## Discord
 
@@ -908,10 +1017,15 @@ the tools can administer the server.
   again until core records it, and the turn shows as running meanwhile.
 - **Delegated T3 work** reports later in its own message, even across
   restarts.
+- **The web chat does not open.** `carillon web open` says so when nothing
+  answers at its address: `carillon start` starts Carillon. A page that
+  asks you to sign in again was signed out, or its link was used or is over
+  two minutes old: run `carillon web open` again.
 
 ## Credentials
 
-The bot token belongs to Discord, model credentials to the runtime (Pi keeps
+The bot token belongs to Discord, the browser key to the web chat, model
+credentials to the runtime (Pi keeps
 its own under `~/.carillon/pi`, separate from `~/.pi`). Loopback tokens in
 `credentials/` authenticate the services to each other; `operator` authorizes
 diagnostics and maintenance. None of them reach prompts, sessions or logs.
@@ -964,8 +1078,10 @@ they enable. `carillon discord check` runs that last check by hand: without
 when there is none. It then drains,
 stops, swaps the application directory atomically, and starts what was
 running. In `carillon.toml`, it sets the `version` of each provider whose
-`program` the release bundles (`discord`, `runtime-pi` and `runtime-t3`),
-whatever its ID, and leaves the rest of the file as it was. A provider you
+`program` the release bundles (`web`, `discord`, `runtime-pi` and
+`runtime-t3`), whatever its ID, and leaves the rest of the file as it was.
+It registers nothing: an installation without the web chat
+[adds it](#add-the-web-chat-to-an-installation) afterwards. A provider you
 installed separately keeps its version. Update keeps credentials, provider settings, state, sessions and
 logs. A refusal changes nothing. If a later step fails, the message says what
 changed; rerun the same update until it succeeds before starting services.
