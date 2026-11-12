@@ -52,8 +52,9 @@ impl Fixture {
     }
 
     fn run(&self, workspace: bool) -> anyhow::Result<std::process::Output> {
-        let workspace = workspace.then_some(self.workspace.as_path());
-        rerun(CHILD, self.directory.path(), &self.home, workspace)
+        let named = ("CARILLON_TEST_SETUP_WORKSPACE", self.workspace.as_os_str());
+        let variables = if workspace { &[named][..] } else { &[] };
+        rerun(CHILD, self.directory.path(), &self.home, variables)
     }
 }
 
@@ -74,25 +75,25 @@ pub(super) fn fake_providers(directory: &Path, interfaces: &[&str]) -> anyhow::R
     Ok(())
 }
 
+/// Runs the ignored test `test` as setup's process, with the fake programs
+/// in `directory` first on its path and `variables` in its environment.
 pub(super) fn rerun(
     test: &str,
     directory: &Path,
     home: &Path,
-    workspace: Option<&Path>,
+    variables: &[(&str, &std::ffi::OsStr)],
 ) -> anyhow::Result<std::process::Output> {
     let path = std::env::join_paths(std::iter::once(directory.to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))?;
-    let mut child = std::process::Command::new(std::env::current_exe()?);
-    child
+    std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", test, "--ignored", "--nocapture"])
         .env("PATH", path)
         .env("CARILLON_HOME", home)
-        .env("CARILLON_TEST_SETUP_HOME", home);
-    if let Some(workspace) = workspace {
-        child.env("CARILLON_TEST_SETUP_WORKSPACE", workspace);
-    }
-    child.output().context("run the setup rerun")
+        .env("CARILLON_TEST_SETUP_HOME", home)
+        .envs(variables.iter().copied())
+        .output()
+        .context("run the setup rerun")
 }
 
 #[test]

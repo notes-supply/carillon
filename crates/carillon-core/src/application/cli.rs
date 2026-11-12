@@ -460,23 +460,36 @@ async fn serve_added(home: &Path, added: &[Bundled]) -> Result<()> {
         return Ok(());
     }
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let ids: Vec<&str> = added.iter().map(|interface| interface.id()).collect();
+    let ids = ids.join(", ");
     let Ok(report) = status(&config).await else {
-        println!("Carillon is not running. `carillon start` starts it with what setup added.");
+        println!("Carillon is not running. `carillon start` starts it with {ids}.");
         return Ok(());
     };
     let serves = |interface: &Bundled| {
-        report
-            .providers
-            .iter()
-            .any(|health| health.id == interface.id())
+        let mut serving = report.providers.iter();
+        serving.any(|health| health.id == interface.id())
     };
     if added.iter().all(serves) {
+        println!("Carillon already serves {ids}, so it was not restarted.");
         return Ok(());
     }
-    println!("Restarting Carillon, which serves a new interface once it starts again.");
+    println!(
+        "Carillon is running and takes a new interface only when it starts, so it restarts now. \
+         It stops once nothing would be lost, as `carillon restart` does, and work that is \
+         running carries on afterwards."
+    );
     let wait = Wait { timeout: 60 };
-    restart(home, &config, wait.timeout(), false).await?;
-    report_running(&config, &wait).await
+    restart(home, &config, wait.timeout(), false)
+        .await
+        .with_context(|| {
+            format!("{ids} is in carillon.toml and starts at the next `carillon restart`")
+        })?;
+    report_running(&config, &wait).await?;
+    if added.contains(&Bundled::Web) {
+        println!("`carillon web open` opens the web chat in your browser.");
+    }
+    Ok(())
 }
 
 async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {

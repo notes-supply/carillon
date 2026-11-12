@@ -78,7 +78,7 @@ fn each_enabled_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyh
     }
     added_pi::fake_providers(directory.path(), &["discord", "example"])?;
 
-    let output = added_pi::rerun(added_pi::CHILD, directory.path(), &home, None)?;
+    let output = added_pi::rerun(added_pi::CHILD, directory.path(), &home, &[])?;
     assert!(output.status.success(), "{output:?}");
     for (program, arguments) in [
         ("discord", "setup --provider discord-private\n"),
@@ -100,54 +100,74 @@ fn each_enabled_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyh
     Ok(())
 }
 
-const ADD_WEB: &str = "application::setup::tests::interfaces::setup_adding_the_web_chat_child";
+const ADD: &str = "application::setup::tests::interfaces::setup_adding_an_interface_child";
 
 #[test]
 #[ignore = "run by the test below with isolated provider programs"]
-fn setup_adding_the_web_chat_child() -> anyhow::Result<()> {
+fn setup_adding_an_interface_child() -> anyhow::Result<()> {
     let home = std::env::var_os("CARILLON_TEST_SETUP_HOME").context("setup home")?;
+    let name = std::env::var("CARILLON_TEST_SETUP_INTERFACE")?;
+    let interface = Bundled::named(ProviderRole::Interface, &name)?;
     let named = Options {
-        interfaces: vec![Bundled::Web],
+        interfaces: vec![interface],
         ..options()
     };
-    assert_eq!(
-        setup(Path::new(&home), named, &mut Unasked)?,
-        [Bundled::Web]
-    );
+    assert_eq!(setup(Path::new(&home), named, &mut Unasked)?, [interface]);
     Ok(())
 }
 
-/// The walk would refuse the disabled runtime and set Discord up again.
+/// The walk would refuse the disabled runtime and set the other interface
+/// up again.
 #[test]
 fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let home = directory.path().join("home");
-    let config_path = initialized(&home, directory.path(), Bundled::Pi)?;
-    set_provider(&config_path, "runtime-pi", false)?;
-    let before = std::fs::read_to_string(&config_path)?;
-    added_pi::fake_providers(directory.path(), &["discord", "web"])?;
+    let cases = [
+        (
+            Bundled::Discord,
+            Bundled::Web,
+            "url = \"http://127.0.0.1:44004\"",
+            "max_upload_mib = 1024\ndelivery = \"retained\"\n",
+        ),
+        (
+            Bundled::Web,
+            Bundled::Discord,
+            "url = \"http://127.0.0.1:44001\"",
+            "max_upload_mib = 20\n",
+        ),
+    ];
+    for (has, adds, url, facts) in cases {
+        let directory = tempfile::tempdir()?;
+        let home = directory.path().join("home");
+        let agents = vec![assistant(directory.path())];
+        let config_path = initialize(&home, 44_000, &[has, Bundled::Pi], agents)?;
+        set_provider(&config_path, "runtime-pi", false)?;
+        let before = std::fs::read_to_string(&config_path)?;
+        added_pi::fake_providers(directory.path(), &["discord", "web"])?;
 
-    for _ in 0..2 {
-        let output = added_pi::rerun(ADD_WEB, directory.path(), &home, None)?;
-        assert!(output.status.success(), "{output:?}");
+        let named = ("CARILLON_TEST_SETUP_INTERFACE", adds.name().as_ref());
+        for _ in 0..2 {
+            let output = added_pi::rerun(ADD, directory.path(), &home, &[named])?;
+            assert!(output.status.success(), "{output:?}");
+        }
+        let (id, program) = (adds.id(), adds.program());
+        let config = LoadedConfig::load(&config_path)?;
+        let added = config.provider(id, ProviderRole::Interface)?;
+        let (providers, agents) = before.split_at(before.find("\n[[agents]]").context("agents")?);
+        assert_eq!(
+            std::fs::read_to_string(&config_path)?,
+            format!(
+                "{providers}\n[[providers]]\nid = \"{id}\"\nrole = \"interface\"\n\
+                 program = \"{program}\"\nversion = \"{}\"\n{url}\ntoken_hash = \"{}\"\n\
+                 enabled = true\n{facts}{agents}",
+                added.version, added.token_hash
+            )
+        );
+        let call = format!("setup --provider {id}\n");
+        assert_eq!(
+            std::fs::read_to_string(home.join(format!("{program}-calls")))?,
+            call.repeat(2)
+        );
+        assert!(!home.join(format!("{}-calls", has.program())).exists());
+        assert!(!home.join("pi-calls").exists());
     }
-    let config = LoadedConfig::load(&config_path)?;
-    let web = config.provider("web", ProviderRole::Interface)?;
-    let (providers, agents) = before.split_at(before.find("\n[[agents]]").context("agents")?);
-    assert_eq!(
-        std::fs::read_to_string(&config_path)?,
-        format!(
-            "{providers}\n[[providers]]\nid = \"web\"\nrole = \"interface\"\nprogram = \"web\"\n\
-             version = \"{}\"\nurl = \"http://127.0.0.1:44004\"\ntoken_hash = \"{}\"\n\
-             enabled = true\nmax_upload_mib = 1024\ndelivery = \"retained\"\n{agents}",
-            web.version, web.token_hash
-        )
-    );
-    assert_eq!(
-        std::fs::read_to_string(home.join("web-calls"))?,
-        "setup --provider web\nsetup --provider web\n"
-    );
-    assert!(!home.join("discord-calls").exists());
-    assert!(!home.join("pi-calls").exists());
     Ok(())
 }
