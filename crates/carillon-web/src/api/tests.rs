@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::{
     api::AWAY,
-    fixture::{Fixture, bearer, conversation},
+    fixture::{Answer, Fixture, bearer, conversation},
 };
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
@@ -447,7 +447,6 @@ async fn a_live_read_says_how_each_named_turn_stands_and_what_may_be_done_with_i
 
     let none = fixture.get("/api/turns?ids=", &token).await?;
     assert_eq!(none.json()?, json!({"turns": []}));
-    // Core bounds a read, and its refusal is the page's.
     let many = vec!["t"; 33].join(",");
     let refused = fixture
         .get(&format!("/api/turns?ids={many}"), &token)
@@ -559,22 +558,28 @@ async fn commands_are_those_of_the_conversations_own_agent() -> Result<()> {
     Ok(())
 }
 
-/// Each read of the page's, and a control.
-async fn every_call(fixture: &Fixture, token: &str) -> Result<Vec<crate::fixture::Answer>> {
-    let mut answers = Vec::new();
-    for path in [
-        "/api/conversations".to_owned(),
-        format!("/api/conversations/{CHAT}/turns"),
-        format!("/api/conversations/{CHAT}/commands"),
-        "/api/turns?ids=t1".to_owned(),
-    ] {
-        answers.push(fixture.get(&path, token).await?);
-    }
+async fn command_list(fixture: &Fixture, token: &str) -> Result<Answer> {
+    let commands = format!("/api/conversations/{CHAT}/commands");
+    fixture.get(&commands, token).await
+}
+
+async fn stop(fixture: &Fixture, token: &str) -> Result<Answer> {
     let control = "/api/messages/m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa/control";
     let control = bearer(Method::POST, control, token)
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from("{\"action\":\"stop\"}"))?;
-    answers.push(fixture.send(control).await?);
+    fixture.send(control).await
+}
+
+async fn every_call(fixture: &Fixture, token: &str) -> Result<Vec<Answer>> {
+    let turns = format!("/api/conversations/{CHAT}/turns");
+    let mut answers = vec![
+        command_list(fixture, token).await?,
+        stop(fixture, token).await?,
+    ];
+    for read in ["/api/conversations", &turns, "/api/turns?ids=t1"] {
+        answers.push(fixture.get(read, token).await?);
+    }
     Ok(answers)
 }
 
@@ -583,7 +588,6 @@ async fn while_core_is_away_the_page_is_told_to_try_again_and_never_what_went_wr
 {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // Core is not there at all, as for a moment at every restart.
     fixture.serving.abort();
     while !fixture.serving.is_finished() {
         tokio::task::yield_now().await;
@@ -618,21 +622,17 @@ async fn what_core_says_of_its_own_failure_stays_in_the_log() -> Result<()> {
         ),
     ] {
         fixture.core().refusal = Some((status, said));
-        let answers = every_call(&fixture, &token).await?;
-        // The fake refuses its command reads and controls.
-        for answer in &answers[2..] {
-            if answer.status == StatusCode::OK {
-                continue;
-            }
+        let refused = [
+            command_list(&fixture, &token).await?,
+            stop(&fixture, &token).await?,
+        ];
+        for answer in refused {
             assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{status}");
             assert_eq!(answer.json()?, json!({ "error": AWAY }), "{status}");
         }
-        assert_eq!(answers[2].status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(answers[4].status, StatusCode::SERVICE_UNAVAILABLE);
     }
-    // Every request core answers as it does while it shuts down.
     fixture.core().refusal = None;
-    fixture.core().away = usize::MAX;
+    fixture.core().away_for_requests = usize::MAX;
     for answer in every_call(&fixture, &token).await? {
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(answer.json()?, json!({ "error": AWAY }));

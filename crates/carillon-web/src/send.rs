@@ -230,8 +230,7 @@ pub(crate) async fn send(
     };
     // Core copies the files before it answers, which can take minutes. The
     // submission runs in a task of its own, so a browser that leaves does
-    // not end it and take the staged files from under core. It waits for
-    // core until core answers or the provider stops.
+    // not end it and take the staged files from under core.
     let submission = tokio::spawn(async move {
         let outcome = submit_event_with_retry(&web.core, &web.stopping, &event).await;
         let _ = tokio::task::spawn_blocking(move || drop(batch)).await;

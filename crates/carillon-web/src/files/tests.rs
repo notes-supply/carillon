@@ -145,7 +145,6 @@ async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<(
         );
     }
 
-    // What `carillon web sign-out` does, and the very next request sees it.
     Key::replace(&fixture.key_file())?;
     assert_eq!(follow(&fixture, &good).await?.status, StatusCode::FORBIDDEN);
     let renewed = link(&fixture, "capture/0", "chart.png").await?;

@@ -398,8 +398,6 @@ try {
   assert.equal(after.status, 200, JSON.stringify(after.body));
   assert.equal((await settled(token, chat)).at(-1).state, "answered");
 
-  // While core is away the page is told to try again, and a message sent
-  // then is core's once it is back.
   services("stop", "core");
   const away = await api(token, "/api/conversations");
   assert.deepEqual(
@@ -412,12 +410,9 @@ try {
   assert.equal((await across).status, 200, "a message sent while core was away was lost");
   assert.equal((await settled(token, chat)).at(-1).from.text, "while core was away");
 
-  // Signing out replaces the key file, which the provider reads again for
-  // the very next request.
   assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
   assert.equal((await api(token, "/api/session")).status, 401);
   assert.equal((await fetch(`${origin}${link}`)).status, 403);
-  // It needs no provider: one that starts afterwards knows no earlier browser.
   const later = await signIn();
   services("stop", "web");
   assert.match(refused("web", "open", "--print"), /web chat is not running at /u);

@@ -62,7 +62,7 @@ pub(crate) struct Core {
     pub(crate) refusal: Option<(StatusCode, &'static str)>,
     /// How many requests yet, of any kind, core answers as it does while
     /// it shuts down.
-    pub(crate) away: usize,
+    pub(crate) away_for_requests: usize,
     pub(crate) jobs: Vec<Job>,
     pub(crate) controls: Vec<(String, TurnControl)>,
     /// Each request's path and query.
@@ -153,7 +153,6 @@ async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> R
     if let Some(refused) = refused(&core) {
         return refused;
     }
-    // A conversation is core's from its first admitted message.
     if !core
         .conversations
         .iter()
@@ -222,8 +221,8 @@ fn fake(core: &Fake) -> Router {
         {
             let mut core = locked(&core);
             core.asked.push(request.uri().to_string());
-            if core.away > 0 {
-                core.away -= 1;
+            if core.away_for_requests > 0 {
+                core.away_for_requests -= 1;
                 let shutting_down = json!({ "error": "Carillon is shutting down" });
                 return (StatusCode::SERVICE_UNAVAILABLE, Json(shutting_down)).into_response();
             }
@@ -248,7 +247,6 @@ pub(crate) struct Fixture {
     pub(crate) directory: TempDir,
     pub(crate) web: Arc<Web>,
     core: Fake,
-    /// The fake of core, serving.
     pub(crate) serving: JoinHandle<()>,
 }
 
@@ -343,7 +341,6 @@ workspace = "work"
             let _ = axum::serve(listener, fake).await;
         });
         let staging = Staging::open(staging)?;
-        // As `carillon web open` leaves it.
         Key::replace(&browser::key_file(&data_dir, "web"))?;
         let web = Arc::new(Web {
             core: CoreClient::new(

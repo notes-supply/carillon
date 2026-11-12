@@ -175,8 +175,6 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
     let key_file = fixture.key_file();
     let before = std::fs::read_to_string(&key_file)?;
     assert!(!before.contains(&token), "the token is not the key");
-    // What `carillon web sign-out` does. The provider is not told: the
-    // very next request reads the new key.
     Key::replace(&key_file)?;
     assert_ne!(std::fs::read_to_string(&key_file)?, before);
     assert_eq!(
@@ -188,8 +186,6 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
     let again = fixture.sign_in().await?;
     assert_ne!(again, token);
 
-    // Without a key, or with an empty one, nobody is signed in: not even
-    // with the token anyone can make from no key at all.
     let mut keyless = Hmac::<Sha256>::new_from_slice(b"")?;
     keyless.update(&5_u64.to_be_bytes());
     keyless.update(b"token");
@@ -221,38 +217,31 @@ fn signing_out_needs_no_provider_running() -> Result<()> {
     Ok(())
 }
 
-/// What a trade of `code` is answered with, which names the way back in
-/// when it is a refusal.
-async fn traded(fixture: &Fixture, code: String) -> Result<StatusCode> {
-    let answer = fixture.send(trade(&code)?).await?;
-    if answer.status != StatusCode::OK {
-        assert!(
-            answer.json()?["error"]
-                .as_str()
-                .is_some_and(|said| said.contains("carillon web open"))
-        );
-    }
-    Ok(answer.status)
+async fn trade_status(fixture: &Fixture, code: String) -> Result<StatusCode> {
+    Ok(fixture.send(trade(&code)?).await?.status)
 }
 
 #[tokio::test]
 async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let status = |code: String| traded(&fixture, code);
+    let status = |code: String| trade_status(&fixture, code);
     let code = fixture.code(now() + 120)?;
     assert_eq!(status(code.clone()).await?, StatusCode::OK);
-    assert_eq!(status(code.clone()).await?, StatusCode::UNAUTHORIZED);
-    // The same code in other letters is the same code.
+    let again = fixture.send(trade(&code)?).await?;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        again.json()?["error"]
+            .as_str()
+            .is_some_and(|said| said.contains("carillon web open"))
+    );
     let (signed, signature) = code.rsplit_once('.').unwrap_or_default();
     let respelled = format!("{signed}.{}", signature.to_uppercase());
     assert_eq!(status(respelled).await?, StatusCode::UNAUTHORIZED);
 
-    // Past its expiry, though the key signed it.
     for past in [now() - 1, 1] {
         let expired = fixture.code(past)?;
         assert_eq!(status(expired).await?, StatusCode::UNAUTHORIZED);
     }
-    // Not what the key signed.
     let good = fixture.code(now() + 120)?;
     let (expires, rest) = good.split_once('.').unwrap_or_default();
     let (name, signature) = rest.split_once('.').unwrap_or_default();
@@ -272,10 +261,8 @@ async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it
             "{forged}"
         );
     }
-    // None of those spent it.
     assert_eq!(status(good).await?, StatusCode::OK);
 
-    // Signed by a key since replaced.
     let waiting = fixture.code(now() + 120)?;
     Key::replace(&fixture.key_file())?;
     assert_eq!(status(waiting).await?, StatusCode::UNAUTHORIZED);
@@ -324,8 +311,6 @@ async fn an_operator_route_takes_only_the_operator_credential() -> Result<()> {
             );
         }
     }
-    // `carillon settings` is told that a web chat has no page of its own,
-    // and nothing the operator's credential reaches signs a browser in or out.
     let listed = fixture
         .send(operator(Method::GET, "/v1/channels").body(Body::empty())?)
         .await?;
@@ -448,7 +433,6 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     assert!(pipe.success());
     let custom = root.join("state/components/web/site");
     std::fs::create_dir_all(&custom)?;
-    // A page that is a link to one is no copy of the page.
     symlink(root.join("release/index.html"), custom.join("index.html"))?;
     for folder in [root.join("release"), custom.clone()] {
         symlink(root.join("secret.token"), folder.join("leak.js"))?;
@@ -481,8 +465,6 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
 #[tokio::test]
 async fn open_makes_a_link_the_provider_takes_and_says_when_none_runs() -> Result<()> {
     let fixture = Fixture::new().await?;
-    // The same installation, with the provider at an address that is this
-    // test's alone.
     let listening = TcpListener::bind("127.0.0.1:0")?;
     let address = listening.local_addr()?.to_string();
     let root = fixture.directory.path();
@@ -502,7 +484,6 @@ async fn open_makes_a_link_the_provider_takes_and_says_when_none_runs() -> Resul
         (now() + 115..=now() + 120).contains(&expires),
         "the link does not work for two minutes"
     );
-    // Nothing was asked of the listener, and the code is good all the same.
     listening.set_nonblocking(true)?;
     let (probe, _) = listening.accept()?;
     let mut sent = [0_u8; 1];

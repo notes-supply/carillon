@@ -375,14 +375,12 @@ async fn a_send_waits_out_a_core_that_is_away_for_a_moment() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let hello = [Part::Text("hello")];
-    // Away for the look at the conversation, which comes before any upload.
-    fixture.core().away = 2;
+    fixture.core().away_for_requests = 2;
     let sent = send(&fixture, &token, "?agent=assistant", &hello).await?;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(fixture.core().events.len(), 1);
 
-    // A provider that is stopping waits for nothing.
-    fixture.core().away = usize::MAX;
+    fixture.core().away_for_requests = usize::MAX;
     fixture.web.stopping.cancel();
     let stopping = send(&fixture, &token, "", &hello).await?;
     assert_eq!(stopping.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -424,15 +422,12 @@ async fn first_messages_racing_with_different_agents_start_one_conversation() ->
     };
     let slow = begin(CHAT, EVENT, "second");
     assert!(reaches_core(1).await);
-    // Another conversation is not held up by this one.
     let elsewhere = begin(
         "0190f3a8-7b1c-7def-8a2b-000000000002",
         "m-0190f3a8-7b1c-7def-8a2b-bbbbbbbbbbbb",
         "assistant",
     );
     assert!(reaches_core(2).await, "one conversation held up another");
-    // The same conversation again, for another agent, while core has not
-    // answered the first.
     let fast = begin(CHAT, "m-0190f3a8-7b1c-7def-8a2b-cccccccccccc", "assistant");
     assert!(!reaches_core(3).await, "both first messages reached core");
     fixture.core().hold = None;
