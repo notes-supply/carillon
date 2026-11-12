@@ -6,8 +6,11 @@ Discord provider. It is separate from the Wasm module behind slash commands.
 ## In the Pi runtime
 
 The Pi runtime brings these tools as its built-in `discord` extension, which
-its agents select by default when Carillon has a Discord provider; an agent's
-`settings.json` can remove it. A conversation sees one small tool,
+its agents select by default when Carillon has an enabled Discord provider;
+an agent's `settings.json` can remove it. The tools reach that provider
+from every conversation. A conversation on another interface has no Discord
+origin, so an operation there names its `channel_id` or `user_id`. With
+several Discord providers, only their own conversations reach them. A conversation sees one small tool,
 `enable_discord`: it identifies the guild, bot and current origin, returns
 the Discord skill's guidance, and loads the Discord tools into that
 conversation. That's context management, not a security boundary: the agent

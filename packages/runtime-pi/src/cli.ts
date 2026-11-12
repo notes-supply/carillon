@@ -24,6 +24,7 @@ import {
 } from "./attachments.ts";
 import { checkResources, LOAD_RESOURCES, REPORT_FD, type Report } from "./check.ts";
 import { deterministicCatalogue } from "./deterministic.ts";
+import { defaultExtensions, discordContext } from "./discord.ts";
 import { ConversationInfo } from "./documents.ts";
 import { createMcpServer, loadMcpConfig, mcpTransport } from "./mcp.ts";
 import { modelSettings, openPiCatalogue, type PiCatalogue } from "./models.ts";
@@ -199,24 +200,11 @@ async function openRuntime(
   );
   const discord = createDiscordExtension({
     guidance: embedded?.discordSkill ?? (await readFile(DISCORD_SKILL, "utf8")),
-    // The conversation's own interface, with the operator credential's file:
-    // host data, never the model's.
     async context(api, context) {
-      const conversation = await api.snapshot(ConversationInfo, api.conversationId, context);
-      const provider = config.interfaces.find((item) => item.id === conversation?.interface_id);
-      return {
-        interface_id: conversation?.interface_id,
-        agent_id: conversation?.agent_id,
-        native: conversation?.native,
-        connection:
-          provider === undefined
-            ? undefined
-            : {
-                url: provider.url,
-                token_file: join(config.root, "credentials", "operator.token"),
-                token_hash: config.operatorTokenHash,
-              },
-      };
+      return discordContext(
+        config,
+        await api.snapshot(ConversationInfo, api.conversationId, context),
+      );
     },
   });
   const runtime = await createPiRuntime({
@@ -233,8 +221,7 @@ async function openRuntime(
       createToolSearchExtension(),
       discord,
     ],
-    // Carillon's interface providers are its Discord providers.
-    defaults: ["coding", "tool-search", ...(config.interfaces.length > 0 ? ["discord"] : [])],
+    defaults: defaultExtensions(config),
     mcp,
   });
   return {

@@ -9,6 +9,8 @@ import { providerAddress } from "./endpoint.ts";
 
 export interface RegisteredProvider {
   readonly id: string;
+  /** The program that serves the provider, `carillon-<program>`. */
+  readonly program: string;
   readonly url: string;
   readonly token_hash: string;
 }
@@ -45,6 +47,7 @@ const ProviderIdentitySchema = Type.String({
 const ProviderSchema = Type.Object({
   id: ProviderIdentitySchema,
   role: Type.String({ minLength: 1 }),
+  program: ProviderIdentitySchema,
   version: Type.String({ minLength: 1 }),
   url: Type.String({ minLength: 1 }),
   token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),

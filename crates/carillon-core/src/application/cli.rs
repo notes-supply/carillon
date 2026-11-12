@@ -12,7 +12,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use carillon_installation::{
-    config::{LoadedConfig, RELEASE_VERSION},
+    bundled::Bundled,
+    config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
     home,
     maintenance::MaintenanceLock,
     prompt::Terminal,
@@ -25,14 +26,14 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{Runtime, backup, restore, set_provider},
+    admin::{backup, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
         operator_url, print_health, registry_status, status, wait_until_healthy,
     },
-    settings::settings,
+    settings::{Named, settings},
     setup::{Options as SetupOptions, init, setup},
     update::update,
 };
@@ -102,21 +103,15 @@ enum Command {
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
+        /// An interface to register: `discord`. A new installation needs
+        /// one; repeat it for more.
+        #[arg(long, value_parser = interface)]
+        interface: Vec<Bundled>,
     },
     /// Set up an installation at the terminal: the runtimes, Pi for
-    /// Carillon's assistant and T3 for T3 Code channels, then Discord. A
-    /// rerun keeps what is already set up when asked to.
-    Setup {
-        /// The assistant's folder with Pi (default: your home). On T3, an
-        /// agent works in its project's folder.
-        #[arg(long)]
-        workspace: Option<PathBuf>,
-        #[arg(long, default_value_t = 43_800)]
-        base_port: u16,
-        /// A runtime to use, instead of asking; repeat it for both.
-        #[arg(long, value_enum)]
-        runtime: Vec<Runtime>,
-    },
+    /// Carillon's assistant and T3 for T3 Code channels, then each
+    /// interface. A rerun keeps what is already set up when asked to.
+    Setup(SetupOptions),
     /// Run the core service with an explicit registry.
     Core {
         #[arg(long)]
@@ -192,8 +187,9 @@ and applies when Carillon restarts.")]
     },
     /// Show one turn's state, output or failure explanation.
     Inspect { turn_id: String },
-    /// List the routed channels, or show and change one channel's settings,
-    /// or with `--agent` an agent's own, which its channels inherit.
+    /// List each interface's routed channels, or show and change one
+    /// channel's settings, or with `--agent` an agent's own, which its
+    /// channels inherit.
     #[command(after_help = "\
 Changes apply left to right, each to the page read just before it, and
 the first one refused stops the rest, naming its key and those already
@@ -203,13 +199,17 @@ ID or name. `reset <key>` returns a line to what it inherits. An unknown
 key or value lists what the line accepts.
 
   carillon settings
-  carillon settings 300 thinking=high
+  carillon settings --interface discord-private 300 thinking=high
   carillon settings 300 reset model
   carillon settings --agent assistant model=openai-codex/gpt-6.1-sol")]
     Settings {
         /// The agent whose own settings to show or change.
         #[arg(long, value_name = "ID")]
         agent: Option<String>,
+        /// The interface the channel belongs to. It may be left out while
+        /// only one interface is enabled.
+        #[arg(long, value_name = "ID", conflicts_with = "agent")]
+        interface: Option<String>,
         /// The channel's ID, unless `--agent` names an agent, then the
         /// changes: `key=value` or `reset <key>`.
         #[arg(value_name = "CHANNEL] [CHANGE")]
@@ -235,6 +235,14 @@ key or value lists what the line accepts.
     /// commands share one entry point without core knowing them.
     #[command(external_subcommand)]
     External(Vec<OsString>),
+}
+
+pub(super) fn interface(name: &str) -> Result<Bundled> {
+    Bundled::named(ProviderRole::Interface, name)
+}
+
+pub(super) fn runtime(name: &str) -> Result<Bundled> {
+    Bundled::named(ProviderRole::Runtime, name)
 }
 
 fn initialize_tracing() {
@@ -265,23 +273,12 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
+            interface,
         } => println!(
             "{}",
-            init(&home()?, workspace.as_deref(), base_port)?.display()
+            init(&home()?, workspace.as_deref(), base_port, &interface)?.display()
         ),
-        Command::Setup {
-            workspace,
-            base_port,
-            runtime,
-        } => setup(
-            &home()?,
-            &SetupOptions {
-                workspace,
-                base_port,
-                runtimes: runtime,
-            },
-            &mut Terminal,
-        )?,
+        Command::Setup(options) => setup(&home()?, options, &mut Terminal)?,
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
@@ -331,8 +328,13 @@ pub(crate) async fn run() -> Result<()> {
             print_recent(&load(&home()?)?, event_id.as_deref(), limit).await?;
         }
         Command::Inspect { turn_id } => print_inspection(&load(&home()?)?, &turn_id).await?,
-        Command::Settings { agent, words } => {
-            print!("{}", settings(&load(&home()?)?, agent, &words).await?);
+        Command::Settings {
+            agent,
+            interface,
+            words,
+        } => {
+            let named = agent.map_or(Named::Interface(interface), Named::Agent);
+            print!("{}", settings(&load(&home()?)?, named, &words).await?);
         }
         Command::Backup { output } => {
             let home = home()?;

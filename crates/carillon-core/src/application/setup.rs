@@ -1,10 +1,11 @@
 //! `carillon setup`: an installation guided at the terminal. It asks which
-//! runtimes Carillon uses, has each runtime set up by its own program, Pi
-//! for Carillon's assistant and T3 for the projects T3 Code channels work
-//! in, then has Discord's program ask for the bot and who answers in which
-//! channel. Each provider's program owns its part; setup only asks the
-//! questions that choose between them and runs them in order. A rerun keeps
-//! what is already set up when asked to.
+//! runtimes and interfaces Carillon uses, has each runtime set up by its own
+//! program, Pi for Carillon's assistant and T3 for the projects T3 Code
+//! channels work in, then has each interface's program ask what it needs,
+//! as Discord's asks for the bot and who answers in which channel. Each
+//! provider's program owns its part; setup only asks the questions that
+//! choose between them and runs them in order. A rerun keeps what is
+//! already set up when asked to.
 
 use std::{
     collections::BTreeMap,
@@ -15,25 +16,36 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{AgentConfig, Config, LoadedConfig, ProviderRole, RELEASE_VERSION},
+    bundled::Bundled,
+    config::{AgentConfig, Config, LoadedConfig, ProviderRole},
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
 use serde::Deserialize;
 
 use super::{
-    admin::{self, Runtime, initialize, register_runtime, set_agents},
-    cli::provider_binary,
+    admin::{self, initialize, register, set_agents},
+    cli::{self, provider_binary},
 };
 use crate::db::Database;
 
 /// What `carillon setup` was told on its command line.
+#[derive(Debug, clap::Args)]
 pub(super) struct Options {
-    /// The assistant's folder with Pi; a T3 project decides its own.
+    /// The assistant's folder with Pi (default: your home). On T3, an
+    /// agent works in its project's folder.
+    #[arg(long)]
     pub workspace: Option<PathBuf>,
+    #[arg(long, default_value_t = 43_800)]
     pub base_port: u16,
-    /// The runtimes, when not asked.
-    pub runtimes: Vec<Runtime>,
+    /// A runtime to use, instead of asking: `pi` or `t3`; repeat it for
+    /// both.
+    #[arg(long = "runtime", value_name = "RUNTIME", value_parser = cli::runtime)]
+    pub runtimes: Vec<Bundled>,
+    /// An interface to set up, instead of asking, or to add to an
+    /// installation: `discord`; repeat it for more.
+    #[arg(long = "interface", value_name = "INTERFACE", value_parser = cli::interface)]
+    pub interfaces: Vec<Bundled>,
 }
 
 /// What a T3 server offers, as `carillon-runtime-t3 discover` prints it.
@@ -77,17 +89,26 @@ struct Project {
 ///
 /// Returns an error when a question goes unanswered, a provider's program
 /// fails, or the installation cannot be created; what was finished stays.
-pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questions) -> Result<()> {
-    let existing = home.join("carillon.toml").exists();
-    let runtimes = runtimes(home, options)?;
+pub(super) fn setup(
+    home: &Path,
+    mut options: Options,
+    questions: &mut impl Questions,
+) -> Result<()> {
+    let config_path = home.join("carillon.toml");
+    let existing = config_path.exists();
+    let runtimes = runtimes(home, &options)?;
     let runtimes = if runtimes.is_empty() {
-        ask_runtimes(questions)?
+        ask(ProviderRole::Runtime, questions)?
     } else {
         runtimes
     };
+    if !existing && options.interfaces.is_empty() {
+        options.interfaces = ask(ProviderRole::Interface, questions)?;
+    }
+    let options = &options;
     // Carillon's assistant runs on Pi, whenever Pi is used.
-    let pi = runtimes.contains(&Runtime::Pi);
-    let t3 = runtimes.contains(&Runtime::T3);
+    let pi = runtimes.contains(&Bundled::Pi);
+    let t3 = runtimes.contains(&Bundled::T3);
     if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
@@ -110,30 +131,38 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     }
     {
         let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
-        for &runtime in &runtimes {
-            register_runtime(&home.join("carillon.toml"), runtime)?;
+        for &program in options.interfaces.iter().chain(&runtimes) {
+            register(&config_path, program)?;
         }
         adopt_release(home)?;
     }
-    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let config = LoadedConfig::load(&config_path)?;
     let agents = &config.value.agents;
-    if agents.iter().any(|agent| agent.runtime == Runtime::Pi.id()) {
+    if agents.iter().any(|agent| agent.runtime == Bundled::Pi.id()) {
         let pi = provider_binary("runtime-pi")?;
         sign_in_to_pi(home, &pi, existing, questions)?;
         choose_pi_models(home, &pi, agents, questions)?;
     }
-    let discord = Command::new(provider_binary("discord")?)
-        .arg("setup")
-        .env("CARILLON_HOME", home)
-        .status()
-        .context("run Discord setup")?;
-    if !discord.success() {
-        bail!("Discord setup did not finish; run setup again to finish it");
+    for interface in &config.value.providers {
+        if interface.role != ProviderRole::Interface || !interface.enabled {
+            continue;
+        }
+        let finished = Command::new(provider_binary(&interface.program)?)
+            .args(["setup", "--provider", &interface.id])
+            .env("CARILLON_HOME", home)
+            .status()
+            .with_context(|| format!("run the setup of {}", interface.id))?;
+        if !finished.success() {
+            bail!(
+                "the setup of {} did not finish; run setup again to finish it",
+                interface.id
+            );
+        }
     }
     Ok(())
 }
 
-fn runtimes(home: &Path, options: &Options) -> Result<Vec<Runtime>> {
+fn runtimes(home: &Path, options: &Options) -> Result<Vec<Bundled>> {
     let mut runtimes = if home.join("carillon.toml").exists() {
         registered_runtimes(home)?
     } else {
@@ -147,19 +176,25 @@ fn runtimes(home: &Path, options: &Options) -> Result<Vec<Runtime>> {
     Ok(runtimes)
 }
 
-fn ask_runtimes(questions: &mut impl Questions) -> Result<Vec<Runtime>> {
-    let choices = [
-        "Pi, signed in to a model provider such as Anthropic or OpenAI".to_owned(),
-        "T3 Code, using a T3 Code server already running on this machine".to_owned(),
-    ];
+fn ask(role: ProviderRole, questions: &mut impl Questions) -> Result<Vec<Bundled>> {
+    let offered: Vec<Bundled> = Bundled::of_role(role).collect();
+    let choices: Vec<String> = offered
+        .iter()
+        .map(|program| match program {
+            Bundled::Discord => "Discord, as a bot in a server of yours",
+            Bundled::Pi => "Pi, signed in to a model provider such as Anthropic or OpenAI",
+            Bundled::T3 => "T3 Code, using a T3 Code server already running on this machine",
+        })
+        .map(str::to_owned)
+        .collect();
+    let question = match role {
+        ProviderRole::Interface => "Where should people talk to Carillon?",
+        ProviderRole::Runtime => "Which should Carillon use?",
+    };
     loop {
-        let chosen = questions.choose_many("Which should Carillon use?", &choices, &[0])?;
-        let runtimes: Vec<Runtime> = chosen
-            .into_iter()
-            .map(|index| if index == 0 { Runtime::Pi } else { Runtime::T3 })
-            .collect();
-        if !runtimes.is_empty() {
-            return Ok(runtimes);
+        let chosen = questions.choose_many(question, &choices, &[0])?;
+        if !chosen.is_empty() {
+            return Ok(chosen.into_iter().map(|index| offered[index]).collect());
         }
         questions.say("Choose at least one.")?;
     }
@@ -168,10 +203,10 @@ fn ask_runtimes(questions: &mut impl Questions) -> Result<Vec<Runtime>> {
 /// The bundled runtimes an existing installation registers. A disabled one
 /// is refused before anything opens: its own checks could never pass, and
 /// enabling it is the operator's decision.
-fn registered_runtimes(home: &Path) -> Result<Vec<Runtime>> {
+fn registered_runtimes(home: &Path) -> Result<Vec<Bundled>> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let mut runtimes = Vec::new();
-    for runtime in [Runtime::Pi, Runtime::T3] {
+    for runtime in Bundled::of_role(ProviderRole::Runtime) {
         let Ok(provider) = config.provider(runtime.id(), ProviderRole::Runtime) else {
             continue;
         };
@@ -257,7 +292,7 @@ fn choose_pi_models(
 ) -> Result<()> {
     for agent in agents
         .iter()
-        .filter(|agent| agent.runtime == Runtime::Pi.id())
+        .filter(|agent| agent.runtime == Bundled::Pi.id())
     {
         let listed = output(
             pi_command(home, pi, &["--models", "--agent", &agent.id]),
@@ -283,35 +318,40 @@ fn choose_pi_models(
     Ok(())
 }
 
-pub(super) fn init(home: &Path, workspace: Option<&Path>, base_port: u16) -> Result<PathBuf> {
+pub(super) fn init(
+    home: &Path,
+    workspace: Option<&Path>,
+    base_port: u16,
+    interfaces: &[Bundled],
+) -> Result<PathBuf> {
     let path = home.join("carillon.toml");
     if !path.exists() {
         let workspace = workspace.context("--workspace is required to create an installation")?;
+        let programs: Vec<Bundled> = interfaces.iter().copied().chain([Bundled::Pi]).collect();
         return initialize(
             home,
             base_port,
-            Runtime::Pi,
+            &programs,
             vec![admin::assistant(workspace)],
         );
     }
     let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    for &interface in interfaces {
+        register(&path, interface)?;
+    }
     adopt_release(home)?;
     Ok(path)
 }
 
-/// Expect the providers this release bundles, and create the database an
-/// installation carried without state lacks.
+/// Expect the version of each program this release bundles, whichever
+/// entries it serves, and create the database an installation carried
+/// without state lacks. Another program's entry keeps its version.
 fn adopt_release(home: &Path) -> Result<()> {
     let config_path = home.join("carillon.toml");
-    let bundled = [
-        ("discord-private", RELEASE_VERSION.to_owned()),
-        (Runtime::Pi.id(), Runtime::Pi.version()?),
-        (Runtime::T3.id(), Runtime::T3.version()?),
-    ];
-    let mut config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let mut config = Config::read(&config_path)?;
     for provider in &mut config.providers {
-        if let Some((_, version)) = bundled.iter().find(|(id, _)| *id == provider.id) {
-            version.clone_into(&mut provider.version);
+        if let Some(bundled) = Bundled::of(&provider.program) {
+            provider.version = bundled.version()?;
         }
     }
     config.write(&config_path)?;
@@ -508,7 +548,7 @@ fn choose_kept_models(
     let agents: Vec<&AgentConfig> = config
         .agents
         .iter()
-        .filter(|agent| agent.runtime == Runtime::T3.id())
+        .filter(|agent| agent.runtime == Bundled::T3.id())
         .collect();
     for &agent in &agents {
         if ledger_model(home, server.t3, &agent.id)?.is_some() {
@@ -613,23 +653,26 @@ fn agents<'a>(
     } else {
         None
     };
-    let runtime = if assistant { Runtime::Pi } else { Runtime::T3 };
+    let runtime = if assistant { Bundled::Pi } else { Bundled::T3 };
     if !config_path.exists() {
         let agents = workspace
             .iter()
             .map(|workspace| admin::assistant(workspace));
-        initialize(home, options.base_port, runtime, agents.collect())?;
+        let programs: Vec<Bundled> = (options.interfaces.iter().copied())
+            .chain([runtime])
+            .collect();
+        initialize(home, options.base_port, &programs, agents.collect())?;
     }
     let _maintenance = MaintenanceLock::acquire_unless_held(home)
         .context("the installation's agents were not changed")?;
-    register_runtime(&config_path, runtime)?;
+    register(&config_path, runtime)?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     let projects = saved_projects(home)?;
     let mut registry: Vec<AgentConfig> = config
         .agents
         .iter()
         .filter(|agent| {
-            agent.resources.is_none() && (code.is_none() || agent.runtime != Runtime::T3.id())
+            agent.resources.is_none() && (code.is_none() || agent.runtime != Bundled::T3.id())
         })
         .cloned()
         .collect();
@@ -640,7 +683,7 @@ fn agents<'a>(
             .find(|agent| agent.resources.is_some())
             .cloned()
             .unwrap_or_else(|| admin::assistant(&workspace));
-        Runtime::Pi.id().clone_into(&mut agent.runtime);
+        Bundled::Pi.id().clone_into(&mut agent.runtime);
         agent.workspace = workspace;
         registry.push(agent);
     }
@@ -650,7 +693,7 @@ fn agents<'a>(
         let agent = AgentConfig {
             id,
             name: format!("T3 Code · {}", project.title),
-            runtime: Runtime::T3.id().to_owned(),
+            runtime: Bundled::T3.id().to_owned(),
             workspace: project.workspace.clone(),
             resources: None,
         };
@@ -658,7 +701,7 @@ fn agents<'a>(
         t3.push((agent, project));
     }
     if !t3.is_empty() {
-        register_runtime(&config_path, Runtime::T3)?;
+        register(&config_path, Bundled::T3)?;
     }
     set_agents(&config_path, registry)?;
     Ok(t3)
@@ -714,7 +757,7 @@ fn project_agent_id(
     project: &Project,
 ) -> String {
     if let Some(agent) = existing.iter().find(|agent| {
-        agent.runtime == Runtime::T3.id()
+        agent.runtime == Bundled::T3.id()
             && agent.resources.is_none()
             && projects
                 .get(&agent.id)

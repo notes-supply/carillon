@@ -9,12 +9,13 @@ import {
 import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createDiscordExtension } from "@carillon/discord-pi";
+import { defaultExtensions, discordContext } from "./discord.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -43,20 +44,33 @@ async function provider() {
   return { url: `http://127.0.0.1:${String(address.port)}`, operations, authorizations };
 }
 
+type Calls = Record<string, string | number | Record<string, string>>[];
+
 /**
  * Runs one conversation from `origin` whose model enables the Discord tools
  * and then makes `calls`, returning what it saw and what the provider got.
  */
-async function converse(
-  origin: Record<string, unknown>,
-  calls: Record<string, string | number | Record<string, string>>[],
-) {
+async function converse(origin: Record<string, unknown>, calls: Calls) {
   const root = await mkdtemp(join(tmpdir(), "carillon-discord-tools-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const token = "operator-test-token";
   const tokenFile = join(root, "operator.token");
   await writeFile(tokenFile, token);
   const discord = await provider();
+  const context = {
+    interface_id: "discord-private",
+    agent_id: "assistant",
+    native: { origin },
+    connection: {
+      url: discord.url,
+      token_file: tokenFile,
+      token_hash: createHash("sha256").update(token).digest("hex"),
+    },
+  };
+  return { ...(await run(context, calls)), discord, token };
+}
+
+async function run(toolContext: unknown, calls: Calls) {
   const seen: (readonly Message[])[] = [];
   const model = fauxProvider();
   model.setResponses([
@@ -78,17 +92,7 @@ async function converse(
   registry.install(
     createDiscordExtension({
       guidance: "Discord guidance for the model.",
-      context: () =>
-        Promise.resolve({
-          interface_id: "discord-private",
-          agent_id: "assistant",
-          native: { origin },
-          connection: {
-            url: discord.url,
-            token_file: tokenFile,
-            token_hash: createHash("sha256").update(token).digest("hex"),
-          },
-        }),
+      context: () => Promise.resolve(toolContext),
     }),
   );
   const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
@@ -99,7 +103,7 @@ async function converse(
   const settled = await (
     await conversation.submit({ type: "input", content: "use Discord" }, context)
   ).wait(context);
-  return { settled, seen, discord, token };
+  return { settled, seen };
 }
 
 const offered = (messages: readonly Message[] = []) =>
@@ -188,4 +192,87 @@ it("says which agent sends, from which conversation, and never lets the model sa
       sender: { agent_id: "assistant", channel_id: "2" },
     },
   ]);
+});
+
+async function installation(interfaces: Record<string, { program: string; url: string }>) {
+  const root = await mkdtemp(join(tmpdir(), "carillon-discord-registry-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "credentials"));
+  await writeFile(join(root, "credentials", "operator.token"), "operator-test-token");
+  const hash = createHash("sha256").update("operator-test-token").digest("hex");
+  return {
+    root,
+    operatorTokenHash: hash,
+    interfaces: Object.entries(interfaces).map(([id, provider]) => ({
+      id,
+      token_hash: hash,
+      ...provider,
+    })),
+  };
+}
+
+const toolResults = (messages: readonly Message[] = []) =>
+  messages.flatMap((message) =>
+    message.role === "toolResult"
+      ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
+      : [],
+  );
+
+it("reaches the Discord provider from another interface's conversation, with no origin", async () => {
+  const [chat, discord] = [await provider(), await provider()];
+  const config = await installation({
+    chat: { program: "example", url: chat.url },
+    "discord-private": { program: "discord", url: discord.url },
+  });
+  expect(defaultExtensions(config)).toContain("discord");
+  const origin = { channel_id: "2", source_channel_id: "2", message_id: "3", user_id: "4" };
+  const conversation = { interface_id: "chat", agent_id: "assistant", native: { origin } };
+  const { settled, seen } = await run(discordContext(config, conversation), [
+    { action: "messages.list", limit: 2 },
+    { action: "messages.send", channel_id: "5", content: "From the chat page." },
+  ]);
+  expect(settled.status).toBe("done");
+  expect(toolResults(seen[1])[0]).toContain('"origin":null');
+  expect(toolResults(seen[2]).at(-1)).toContain(
+    "This conversation has no Discord channel of its own. Supply channel_id",
+  );
+  expect(discord.operations).toEqual([
+    { action: "server.info" },
+    {
+      action: "messages.send",
+      channel_id: "5",
+      content: "From the chat page.",
+      sender: { agent_id: "assistant" },
+    },
+  ]);
+  expect(chat.operations).toEqual([]);
+});
+
+it("keeps a Discord conversation on its own provider, and is no default without one", async () => {
+  const [first, second] = [await provider(), await provider()];
+  const config = await installation({
+    "discord-private": { program: "discord", url: first.url },
+    "discord-work": { program: "discord", url: second.url },
+    chat: { program: "example", url: "http://127.0.0.1:1" },
+  });
+  const native = {
+    origin: { channel_id: "2", source_channel_id: "2", message_id: "3", user_id: "4" },
+  };
+  const own = { interface_id: "discord-work", agent_id: "assistant", native };
+  await run(discordContext(config, own), [{ action: "messages.list", limit: 2 }]);
+  expect(first.operations).toEqual([]);
+  expect(second.operations).toEqual([
+    { action: "server.info" },
+    { action: "messages.list", limit: 2, channel_id: "2" },
+  ]);
+
+  const elsewhere = { interface_id: "chat", agent_id: "assistant" };
+  const { seen } = await run(discordContext(config, elsewhere), []);
+  expect(toolResults(seen[1])[0]).toContain(
+    "Discord is not connected here: this is not a Discord conversation",
+  );
+  expect(first.operations).toEqual([]);
+
+  const withoutDiscord = { ...config, interfaces: config.interfaces.slice(2) };
+  expect(defaultExtensions(withoutDiscord)).toEqual(["coding", "tool-search"]);
 });

@@ -12,6 +12,7 @@ inquire = { version = "0.9.4", default-features = false, features = ["crossterm"
 hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 toml = { workspace = true, features = ["preserve_order"] }

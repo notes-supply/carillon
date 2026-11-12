@@ -1,8 +1,10 @@
-//! Installation configuration, credentials, location, maintenance lock,
-//! durable filesystem utilities, in-place edits of its TOML files, the
-//! loopback HTTP client and setup's terminal questions. Library construction
-//! does not discover or modify an installation.
+//! Installation configuration, the programs a release bundles, credentials,
+//! location, maintenance lock, durable filesystem utilities, in-place edits
+//! of its TOML files, the loopback HTTP client and setup's terminal
+//! questions. Library construction does not discover or modify an
+//! installation.
 
+pub mod bundled;
 pub mod config;
 pub mod edit;
 pub mod filesystem;

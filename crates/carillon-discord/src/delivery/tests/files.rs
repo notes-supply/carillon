@@ -456,6 +456,7 @@ fn discord_takes_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
     let provider = |max_upload_mib| Provider {
         id: "discord-private".to_owned(),
         role: ProviderRole::Interface,
+        program: "discord".to_owned(),
         version: "test".to_owned(),
         url: "http://127.0.0.1:1".to_owned(),
         token_hash: String::new(),

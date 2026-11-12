@@ -21,7 +21,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isolateEnvironment } from "./environment.ts";
 import { testFiles } from "./integration/files.mjs";
-import { availableBasePort } from "./integration/ports.mjs";
+import { availableBasePort, PORT_OFFSETS } from "./integration/ports.mjs";
 import { embedText, seen } from "./integration/replies.mjs";
 import { testSettings } from "./integration/settings.mjs";
 import { testSkills } from "./integration/skills.mjs";
@@ -29,6 +29,7 @@ import { testSkills } from "./integration/skills.mjs";
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
 const basePort = await availableBasePort();
+const servicePort = (name) => basePort + PORT_OFFSETS[name];
 const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
@@ -57,7 +58,8 @@ const DISCORD_ROUTES = [
 ];
 
 try {
-  run("--home", installation, "init", "--workspace", workspace, "--base-port", String(basePort));
+  const created = ["--interface", "discord", "--workspace", workspace, "--base-port", basePort];
+  run("--home", installation, "init", ...created.map(String));
   // Attachment captures here must not depend on the host's free space. The
   // setting survives core's own rewrite of the registry, which also puts it
   // in canonical form for the byte comparisons below.
@@ -1041,6 +1043,7 @@ async function testT3ActivityThroughDelivery() {
 [[providers]]
 id = "runtime-t3"
 role = "runtime"
+program = "runtime-t3"
 version = "${version}"
 url = "http://127.0.0.1:${String(servicePort("runtime-t3"))}"
 token_hash = "${createHash("sha256").update(token).digest("hex")}"
@@ -1759,10 +1762,6 @@ function serviceArguments(name, { nativePi = false, module = discordModule, conf
       "--deterministic",
     ],
   ];
-}
-
-function servicePort(name) {
-  return basePort + { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 }[name];
 }
 
 async function start(name, options = {}) {

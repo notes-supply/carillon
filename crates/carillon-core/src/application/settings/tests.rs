@@ -8,15 +8,18 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_installation::config::{LoadedConfig, ProviderRole};
+use carillon_installation::{
+    bundled::Bundled,
+    config::{LoadedConfig, ProviderRole},
+};
 use carillon_protocol::settings::{
     Change, Choice, Page, Revision, RuntimePart, RuntimeSettings, Setting, SettingsRequest,
     Subject, Value,
 };
 use serde_json::json;
 
-use super::{Edit, change, edits, render, settings, summary};
-use crate::application::admin::{Runtime, assistant, initialize};
+use super::{Edit, Named, change, edits, render, settings, summary};
+use crate::application::admin::{assistant, initialize};
 
 fn revision(number: usize) -> Revision {
     Revision::try_from(format!("{number:064x}")).unwrap_or_else(|_| unreachable!())
@@ -184,7 +187,7 @@ fn routed_channels_are_listed_one_line_each() {
     };
     assert_eq!(
         summary(&[home(0), other]),
-        "300   #home                    assistant, always, threads, GPT-6.1 Sol, Medium\n\
+        "  300   #home                    assistant, always, threads, GPT-6.1 Sol, Medium\n  \
          3010  #carillon-fresh-install  assistant, always, threads  ⚠ The runtime did not answer in time.\n"
     );
 }
@@ -362,7 +365,9 @@ fn a_line_of_many_values_is_a_comma_list_both_ways() -> Result<()> {
 
 struct Stub {
     token: String,
+    channel: String,
     home: Page,
+    drifts: bool,
     generation: usize,
     agent: Option<String>,
     calls: Vec<serde_json::Value>,
@@ -440,12 +445,20 @@ fn stub_router(stub: Shared) -> Router {
                 |State(stub): State<Shared>,
                  headers: HeaderMap,
                  AxumPath(channel): AxumPath<String>| async move {
-                    let stub = lock(&stub);
-                    match (stub.authorized(&headers), channel.as_str()) {
-                        (false, _) => StatusCode::FORBIDDEN.into_response(),
-                        (true, "300") => Json(stub.home.clone()).into_response(),
-                        (true, _) => refused(StatusCode::NOT_FOUND, "not a routed channel"),
+                    let mut stub = lock(&stub);
+                    if !stub.authorized(&headers) {
+                        return StatusCode::FORBIDDEN.into_response();
                     }
+                    if channel != stub.channel {
+                        return refused(StatusCode::NOT_FOUND, "not a routed channel");
+                    }
+                    let page = stub.home.clone();
+                    if stub.drifts {
+                        stub.generation += 1;
+                        let generation = stub.generation;
+                        renumber(&mut stub.home, generation);
+                    }
+                    Json(page).into_response()
                 },
             )
             .put(
@@ -454,7 +467,7 @@ fn stub_router(stub: Shared) -> Router {
                  AxumPath(channel): AxumPath<String>,
                  Json(change): Json<Change>| async move {
                     let mut stub = lock(&stub);
-                    if !stub.authorized(&headers) || channel != "300" {
+                    if !stub.authorized(&headers) || channel != stub.channel {
                         return StatusCode::FORBIDDEN.into_response();
                     }
                     stub.calls.push(json!({ "put": channel, "change": change }));
@@ -497,13 +510,15 @@ async fn installation(
     let path = initialize(
         &directory.join("home"),
         44_100,
-        Runtime::Pi,
+        &[Bundled::Discord, Bundled::Pi],
         vec![assistant(directory)],
     )?;
     let mut config = LoadedConfig::load(&path)?;
     let stub = Arc::new(Mutex::new(Stub {
         token: config.credential("operator")?,
+        channel: "300".to_owned(),
         home: home(0),
+        drifts: false,
         generation: 0,
         agent: None,
         calls: Vec::new(),
@@ -524,7 +539,11 @@ async fn installation(
 }
 
 async fn run(config: &LoadedConfig, agent: Option<&str>, arguments: &[&str]) -> Result<String> {
-    settings(config, agent.map(str::to_owned), &words(arguments)).await
+    let named = match agent {
+        Some(agent) => Named::Agent(agent.to_owned()),
+        None => Named::Interface(None),
+    };
+    settings(config, named, &words(arguments)).await
 }
 
 fn calls(stub: &Shared) -> Vec<serde_json::Value> {
@@ -537,7 +556,7 @@ async fn channels_are_listed_shown_and_changed_left_to_right() -> Result<()> {
     let (config, stub, served) = installation(directory.path()).await?;
     assert_eq!(
         run(&config, None, &[]).await?,
-        "300  #home  assistant, always, threads, GPT-6.1 Sol, Medium\n"
+        "discord-private\n  300  #home  assistant, always, threads, GPT-6.1 Sol, Medium\n"
     );
     assert_eq!(run(&config, None, &["300"]).await?, render(&home(0)));
     assert_eq!(
@@ -574,10 +593,7 @@ async fn channels_are_listed_shown_and_changed_left_to_right() -> Result<()> {
         ],
         "each change names the revision of the page read before it"
     );
-    crate::assert_refused(
-        run(&config, None, &["999"]).await,
-        "no interface routes channel 999",
-    )?;
+    crate::assert_refused(run(&config, None, &["999"]).await, "not a routed channel")?;
     served.abort();
     Ok(())
 }
@@ -695,3 +711,5 @@ fn a_change_while_the_runtime_is_out_names_the_outage() {
         "thinking cannot be changed now. The runtime is not reachable right now."
     );
 }
+
+mod interfaces;

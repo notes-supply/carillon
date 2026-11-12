@@ -36,7 +36,7 @@ esac
     Ok(program)
 }
 
-fn agent(id: &str, name: &str, runtime: Runtime) -> AgentConfig {
+fn agent(id: &str, name: &str, runtime: Bundled) -> AgentConfig {
     AgentConfig {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -52,9 +52,9 @@ fn each_pi_agent_is_asked_its_model_until_it_has_one() -> anyhow::Result<()> {
     let home = directory.path().join("home");
     let pi = fake_pi(directory.path())?;
     let agents = [
-        agent("assistant", "Assistant", Runtime::Pi),
-        agent("helper", "Helper", Runtime::Pi),
-        agent("t3-notes", "T3 Code · Notes", Runtime::T3),
+        agent("assistant", "Assistant", Bundled::Pi),
+        agent("helper", "Helper", Bundled::Pi),
+        agent("t3-notes", "T3 Code · Notes", Bundled::T3),
     ];
     let mut questions = Shown::answering(&["1", "0"]);
     choose_pi_models(&home, &pi, &agents, &mut questions)?;

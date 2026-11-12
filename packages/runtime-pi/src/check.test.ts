@@ -28,6 +28,7 @@ async function installation(agents: Record<string, Record<string, string>>): Pro
         {
           id: "runtime-pi",
           role: "runtime",
+          program: "runtime-pi",
           version: "0.0.0",
           url: "http://127.0.0.1:2",
           token_hash: hash,

@@ -29,9 +29,9 @@ pub(crate) fn installation(
     fs::create_dir_all(root.join("state"))?;
     fs::create_dir_all(root.join("workspace"))?;
     let mut providers = Vec::new();
-    for (port, (id, role)) in [
-        (interface_id, ProviderRole::Interface),
-        ("test-runtime", ProviderRole::Runtime),
+    for (port, (id, role, program)) in [
+        (interface_id, ProviderRole::Interface, "discord"),
+        ("test-runtime", ProviderRole::Runtime, "test-runtime"),
     ]
     .into_iter()
     .enumerate()
@@ -45,6 +45,7 @@ pub(crate) fn installation(
         providers.push(Provider {
             id: id.to_owned(),
             role,
+            program: program.to_owned(),
             version: carillon_installation::config::RELEASE_VERSION.to_owned(),
             url: format!("http://127.0.0.1:{port}"),
             token_hash: hash_token(id),

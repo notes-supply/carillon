@@ -6,20 +6,20 @@ use std::{
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
-    Options, Runtime, SavedT3, adopt_release, initialize, registered_runtimes, run, saved_t3,
+    Bundled, Options, SavedT3, adopt_release, initialize, registered_runtimes, run, saved_t3,
     set_up_t3, setup,
 };
-use crate::application::admin::{ASSISTANT, assistant, backup, register_runtime, set_provider};
+use crate::application::admin::{ASSISTANT, assistant, backup, register, set_provider};
 
 /// A new installation on `runtime`: on Pi with Carillon's assistant working
 /// in `workspace`, on T3 with no agent yet.
-fn initialized(home: &Path, workspace: &Path, runtime: Runtime) -> anyhow::Result<PathBuf> {
-    let agents = if runtime == Runtime::Pi {
+fn initialized(home: &Path, workspace: &Path, runtime: Bundled) -> anyhow::Result<PathBuf> {
+    let agents = if runtime == Bundled::Pi {
         vec![assistant(workspace)]
     } else {
         Vec::new()
     };
-    initialize(home, 44_000, runtime, agents)
+    initialize(home, 44_000, &[Bundled::Discord, runtime], agents)
 }
 
 #[test]
@@ -84,16 +84,11 @@ impl carillon_installation::prompt::Questions for Unasked {
 #[test]
 fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    for runtime in [Runtime::Pi, Runtime::T3] {
+    for runtime in [Bundled::Pi, Bundled::T3] {
         let home = directory.path().join(runtime.id());
         let config = initialized(&home, directory.path(), runtime)?;
         set_provider(&config, runtime.id(), false)?;
-        let options = Options {
-            workspace: None,
-            base_port: 44_000,
-            runtimes: Vec::new(),
-        };
-        let refusal = setup(&home, &options, &mut Unasked)
+        let refusal = setup(&home, options(), &mut Unasked)
             .err()
             .map(|error| format!("{error:#}"))
             .unwrap_or_default();
@@ -190,7 +185,7 @@ impl carillon_installation::prompt::Questions for Shown {
 fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::T3)?;
+    initialized(&home, directory.path(), Bundled::T3)?;
     std::fs::create_dir_all(home.join("providers"))?;
     std::fs::write(home.join("providers/runtime-t3.toml"), "saved")?;
     let program = directory.path().join("carillon-runtime-t3");
@@ -226,13 +221,13 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
 #[test]
 fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    for runtime in [Runtime::Pi, Runtime::T3] {
+    for runtime in [Bundled::Pi, Bundled::T3] {
         let home = directory.path().join(runtime.id());
         let config = initialized(&home, directory.path(), runtime)?;
         assert_eq!(registered_runtimes(&home)?, [runtime]);
-        register_runtime(&config, Runtime::T3)?;
-        register_runtime(&config, Runtime::Pi)?;
-        assert_eq!(registered_runtimes(&home)?, [Runtime::Pi, Runtime::T3]);
+        register(&config, Bundled::T3)?;
+        register(&config, Bundled::Pi)?;
+        assert_eq!(registered_runtimes(&home)?, [Bundled::Pi, Bundled::T3]);
     }
     Ok(())
 }
@@ -504,6 +499,7 @@ fn options() -> Options {
         workspace: None,
         base_port: 44_000,
         runtimes: Vec::new(),
+        interfaces: vec![Bundled::Discord],
     }
 }
 
@@ -559,6 +555,7 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
 
 mod added_pi;
 mod carried;
+mod interfaces;
 mod pi_models;
 mod projects;
 mod reruns;

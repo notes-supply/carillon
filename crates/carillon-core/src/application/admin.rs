@@ -16,11 +16,12 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
+use carillon_installation::bundled::Bundled;
 pub(super) use carillon_installation::config::ASSISTANT;
 use carillon_installation::config::{
     AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, DeliveryMode,
-    LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, attachment_staging, hash_token,
-    new_token, validate_provider_identity,
+    LoadedConfig, Provider, ProviderRole, attachment_staging, hash_token, new_token,
+    validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 use carillon_installation::maintenance::ServiceLock;
@@ -42,68 +43,44 @@ Never expose credentials or place secrets in messages, prompts, sessions, ordina
 Treat each conversation according to context supplied by its interface. Do not import assumptions from unrelated conversations.
 ";
 
-/// The bundled runtime an installation's agent runs on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(super) enum Runtime {
-    /// Pi, signed in to a model provider.
-    Pi,
-    /// An existing T3 Code server.
-    T3,
-}
-
-impl Runtime {
-    /// The runtime provider's registry ID.
-    #[must_use]
-    pub(super) const fn id(self) -> &'static str {
-        match self {
-            Self::Pi => "runtime-pi",
-            Self::T3 => "runtime-t3",
-        }
-    }
-
-    /// The version of the runtime this release bundles.
-    pub(super) fn version(self) -> Result<String> {
-        #[derive(serde::Deserialize)]
-        struct Package {
-            version: String,
-        }
-        let package = match self {
-            Self::Pi => include_str!("../../../../packages/runtime-pi/package.json"),
-            Self::T3 => include_str!("../../../../packages/runtime-t3/package.json"),
-        };
-        Ok(serde_json::from_str::<Package>(package)?.version)
-    }
-}
-
-/// Creates an installation with `agents`, and the Discord provider and
-/// `runtime` registered and credentialed, and only those. Provider-owned
+/// Creates an installation with `agents`, and the bundled `programs`
+/// registered and credentialed, and only those. At least one of them is an
+/// interface: an installation nobody can talk to is refused. Provider-owned
 /// settings are written afterwards by each provider's own commands.
 pub(super) fn initialize(
     root: &Path,
     base_port: u16,
-    runtime: Runtime,
+    programs: &[Bundled],
     agents: Vec<AgentConfig>,
 ) -> Result<PathBuf> {
     let usable = |workspace: &Path| workspace.is_absolute() && workspace.is_dir();
     if !agents.iter().all(|agent| usable(&agent.workspace)) {
         bail!("workspace must be an absolute path to an existing directory");
     }
+    if !programs
+        .iter()
+        .any(|program| program.role() == ProviderRole::Interface)
+    {
+        bail!("an installation needs an interface; name one with --interface");
+    }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
-    let discord_token = new_token();
     let operator_token = new_token();
-    let runtime_token = new_token();
-
-    let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let tokens: Vec<String> = programs.iter().map(|_| new_token()).collect();
+    let listen = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
     let config = Config {
         data_dir: PathBuf::from("state"),
         core: CoreConfig {
-            listen: SocketAddr::new(loopback, base_port),
+            listen,
             operator_token_hash: hash_token(&operator_token),
             attachments: AttachmentLimits::default(),
         },
-        providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
+        providers: programs
+            .iter()
+            .zip(&tokens)
+            .map(|(&program, token)| provider(program, listen, token))
+            .collect::<Result<_>>()?,
         agents,
     };
     config.validate()?;
@@ -116,21 +93,24 @@ pub(super) fn initialize(
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
     let result = (|| -> Result<()> {
         let root = &staging;
-        create_installation_directories(root, runtime)?;
+        private_directory(root)?;
+        for directory in ["state", "credentials", "providers", "logs"] {
+            private_directory(&root.join(directory))?;
+        }
+        for subtree in ["extensions", "skills"] {
+            private_directory(&root.join(RESOURCES).join(subtree))?;
+        }
         let config_path = root.join("carillon.toml");
         atomic_write(
             &config_path,
             toml::to_string_pretty(&config)?.as_bytes(),
             0o600,
         )?;
-        write_credentials(
-            root,
-            &[
-                ("operator", &operator_token),
-                ("discord-private", &discord_token),
-                (runtime.id(), &runtime_token),
-            ],
-        )?;
+        write_credential(root, "operator", &operator_token)?;
+        for (&program, token) in programs.iter().zip(&tokens) {
+            create_directories(root, program)?;
+            write_credential(root, program.id(), token)?;
+        }
         let agent = root.join(RESOURCES);
         atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
         atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
@@ -157,7 +137,7 @@ pub(super) fn assistant(workspace: &Path) -> AgentConfig {
     AgentConfig {
         id: ASSISTANT.to_owned(),
         name: "Carillon".to_owned(),
-        runtime: Runtime::Pi.id().to_owned(),
+        runtime: Bundled::Pi.id().to_owned(),
         workspace: workspace.to_path_buf(),
         resources: Some(PathBuf::from(RESOURCES)),
     }
@@ -166,36 +146,43 @@ pub(super) fn assistant(workspace: &Path) -> AgentConfig {
 /// The installation's own agent resources, relative to its root.
 const RESOURCES: &str = "agents/default";
 
-/// Registers the bundled `runtime` after the installation's providers, on
-/// the first loopback port after theirs, with a credential of its own; it
-/// does nothing when the runtime is registered already. The caller holds
-/// the maintenance lock.
-pub(super) fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
+/// Registers the bundled `program` under its own ID, on its own port above
+/// core's, with a credential and a component directory. An entry already
+/// there is left as it is, address included, and a credential file already
+/// there is the one the new entry expects. The caller holds the maintenance
+/// lock.
+pub(super) fn register(config_path: &Path, program: Bundled) -> Result<()> {
     let config_path = config_path
         .canonicalize()
         .context("resolve configuration path")?;
     let root = config_path
         .parent()
         .context("configuration path has no parent")?;
-    let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
-    if config
-        .providers
-        .iter()
-        .any(|provider| provider.id == runtime.id())
-    {
+    let mut config = Config::read(&config_path)?;
+    let id = program.id();
+    if config.providers.iter().any(|provider| provider.id == id) {
         return Ok(());
     }
-    let mut port = config.core.listen.port();
-    for provider in &config.providers {
-        port = port.max(provider.listen_address()?.port());
+    let credential = root.join("credentials").join(format!("{id}.token"));
+    let kept = fs::read_to_string(&credential).unwrap_or_default();
+    let token = match kept.trim() {
+        "" => new_token(),
+        kept => kept.to_owned(),
+    };
+    let entry = provider(program, config.core.listen, &token)?;
+    if let Some(holder) = config.providers.iter().find(|held| held.url == entry.url) {
+        bail!(
+            "{id} registers at {}, which {} has; give {} another port in carillon.toml, then \
+             run this again",
+            entry.url,
+            holder.id,
+            holder.id
+        );
     }
-    let token = new_token();
-    config
-        .providers
-        .push(runtime_provider(runtime, checked_port(port, 1)?, &token)?);
+    config.providers.push(entry);
     config.validate()?;
-    create_runtime_directories(root, runtime)?;
-    write_credentials(root, &[(runtime.id(), &token)])?;
+    create_directories(root, program)?;
+    write_credential(root, id, &token)?;
     config.write(&config_path)
 }
 
@@ -215,61 +202,29 @@ pub(super) fn set_agents(config_path: &Path, mut agents: Vec<AgentConfig>) -> Re
     config.write(&config_path)
 }
 
-fn default_providers(
-    base_port: u16,
-    discord_token: &str,
-    runtime: Runtime,
-    runtime_token: &str,
-) -> Result<Vec<Provider>> {
-    Ok(vec![
-        Provider {
-            id: "discord-private".to_owned(),
-            role: ProviderRole::Interface,
-            version: RELEASE_VERSION.to_owned(),
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
-            token_hash: hash_token(discord_token),
-            enabled: true,
-            max_upload_mib: Some(DEFAULT_UPLOAD_MIB),
-            delivery: DeliveryMode::External,
-        },
-        runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
-    ])
-}
-
-fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider> {
+fn provider(program: Bundled, core: SocketAddr, token: &str) -> Result<Provider> {
+    let port = core
+        .port()
+        .checked_add(program.port_offset())
+        .context("base port does not leave room for all services")?;
+    let interface = program.role() == ProviderRole::Interface;
     Ok(Provider {
-        id: runtime.id().to_owned(),
-        role: ProviderRole::Runtime,
-        version: runtime.version()?,
+        id: program.id().to_owned(),
+        role: program.role(),
+        program: program.program().to_owned(),
+        version: program.version()?,
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
-        max_upload_mib: None,
+        max_upload_mib: interface.then_some(DEFAULT_UPLOAD_MIB),
         delivery: DeliveryMode::External,
     })
 }
 
-fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> {
-    private_directory(root)?;
-    for directory in [
-        "state",
-        "credentials",
-        "providers",
-        "logs",
-        "state/components/discord-private",
-    ] {
-        private_directory(&root.join(directory))?;
-    }
-    for subtree in ["extensions", "skills"] {
-        private_directory(&root.join(RESOURCES).join(subtree))?;
-    }
-    create_runtime_directories(root, runtime)
-}
-
-fn create_runtime_directories(root: &Path, runtime: Runtime) -> Result<()> {
-    private_directory(&root.join("state/components").join(runtime.id()))?;
+fn create_directories(root: &Path, program: Bundled) -> Result<()> {
+    private_directory(&root.join("state/components").join(program.id()))?;
     // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
-    if runtime == Runtime::Pi {
+    if program == Bundled::Pi {
         private_directory(&root.join("pi"))?;
     }
     Ok(())
@@ -281,14 +236,12 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
-    for (id, token) in credentials {
-        atomic_write(
-            &root.join("credentials").join(format!("{id}.token")),
-            format!("{token}\n").as_bytes(),
-            0o600,
-        )?;
-    }
+fn write_credential(root: &Path, id: &str, token: &str) -> Result<()> {
+    atomic_write(
+        &root.join("credentials").join(format!("{id}.token")),
+        format!("{token}\n").as_bytes(),
+        0o600,
+    )?;
     Ok(())
 }
 
@@ -577,11 +530,6 @@ fn append_directory<W: std::io::Write>(
     Ok(())
 }
 
-fn checked_port(base: u16, offset: u16) -> Result<u16> {
-    base.checked_add(offset)
-        .context("base port does not leave room for all services")
-}
-
 fn absolute_destination(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -608,14 +556,19 @@ mod tests {
         Config, LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token,
     };
 
-    use super::{Runtime, assistant, backup, initialize, restore, set_provider};
+    use super::{Bundled, assistant, backup, initialize, restore, set_provider};
 
     fn initialize_test_installation(
         root: &Path,
         workspace: &Path,
         base_port: u16,
     ) -> Result<PathBuf> {
-        initialize(root, base_port, Runtime::Pi, vec![assistant(workspace)])
+        initialize(
+            root,
+            base_port,
+            &[Bundled::Discord, Bundled::Pi],
+            vec![assistant(workspace)],
+        )
     }
 
     /// A base port for backups that must find their services stopped, away
@@ -732,7 +685,7 @@ mod tests {
     fn a_t3_installation_registers_only_the_t3_runtime() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize(&root, 44_000, Runtime::T3, Vec::new())?;
+        let config_path = initialize(&root, 44_000, &[Bundled::Discord, Bundled::T3], Vec::new())?;
         let config = LoadedConfig::load(&config_path)?;
         assert!(config.value.agents.is_empty());
         let ids: Vec<&str> = config
@@ -751,7 +704,7 @@ mod tests {
                 .as_str()
                 .context("T3 package version")?
         );
-        assert_eq!(runtime.url, "http://127.0.0.1:44002");
+        assert_eq!(runtime.url, "http://127.0.0.1:44003");
         assert_eq!(
             hash_token(&config.credential("runtime-t3")?),
             runtime.token_hash

@@ -85,6 +85,7 @@ printf '%s\n' \
   '[[providers]]' \
   'id = "runtime-t3"' \
   'role = "runtime"' \
+  'program = "runtime-t3"' \
   'version = "0.0.0"' \
   'url = "http://127.0.0.1:1"' \
   "token_hash = \"$T3_HASH\"" \

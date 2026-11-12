@@ -121,7 +121,7 @@ admitted earlier. Each snapshot is read once:
 
   `extensions` is a list that selects exactly those, or `add` and `remove`
   over the default: `coding`, `tool-search`, and `discord` when Carillon has
-  a Discord provider. The built-in extensions are `coding` (read, write, edit
+  an enabled Discord provider (`program = "discord"` in `carillon.toml`). The built-in extensions are `coding` (read, write, edit
   and bash), `codemode`, `tool-search`, `discord`, and
   [`schedules`](#schedules), [`subagents`](#subagents) and
   [`mcp:<server>`](#mcp-servers) for each server of `mcp.json`, which no
