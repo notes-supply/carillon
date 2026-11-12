@@ -55,7 +55,10 @@ discord_options() {
   set -- --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel:assistant
   printf '%s ' "$@"
 }
-providers() { sed -n 's/^id = "\(.*\)"$/\1/p' "$INSTALLATION/carillon.toml" | tr '\n' ' '; }
+# The registry's provider IDs in order; its agents follow them.
+providers() {
+  sed -n -e '/^\[\[agents\]\]/q' -e 's/^id = "\(.*\)"$/\1/p' "$INSTALLATION/carillon.toml" | tr '\n' ' '
+}
 chat() { "$SCRIPTS/test-web-chat.sh" "$1" "$TEST_ROOT/headers"; }
 session() {
   curl --silent --output /dev/null --write-out '%{http_code}' -H "@$TEST_ROOT/headers" \

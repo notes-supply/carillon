@@ -64,8 +64,12 @@ done
 # did not choose finds itself absent from the registry and ends at once.
 grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service' \
   "$RELEASE/systemd/carillon.target" >/dev/null
-# The page ships as the files it is written in.
+# The page ships as the files it is written in, and a licence beside them is
+# among the release's notices too.
 diff -r "$ROOT/crates/carillon-web/site" "$RELEASE/lib/web"
+find "$ROOT/crates/carillon-web/site" -maxdepth 1 -name '*.txt' | while read -r notice; do
+  cmp "$notice" "$RELEASE/licenses/${notice##*/}"
+done
 # The T3 executable is standalone: it starts without a source checkout and
 # fails closed on its arguments before touching anything.
 if "$RELEASE/bin/carillon-runtime-t3" --provider runtime-t3 >"$TEST_ROOT_T3_OUT" 2>&1; then

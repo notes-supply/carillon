@@ -18,6 +18,7 @@ cp "$ROOT/scripts/carillon-pi.sh" "$ROOT/scripts/register-services.sh" \
 mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discord-pi/skill" \
   "$FIXTURE/packages/runtime-pi" "$FIXTURE/crates/carillon-web/site"
 printf page >"$FIXTURE/crates/carillon-web/site/index.html"
+printf 'typeface licence' >"$FIXTURE/crates/carillon-web/site/typeface-OFL.txt"
 cp "$ROOT/LICENSE" "$FIXTURE/"
 cp "$ROOT/licenses/MIT.txt" "$ROOT/licenses/bun.md" "$FIXTURE/licenses/"
 # One npm dependency with a licence file, one without, as pnpm lists them.
@@ -137,7 +138,8 @@ for arch in x86_64 aarch64; do
   # The manifest lists exactly the shipped files, marking what must be executable.
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-web' \
-    'r lib/web/index.html' 'x bin/carillon-register-services' \
+    'r lib/web/index.html' 'r lib/web/typeface-OFL.txt' 'r licenses/typeface-OFL.txt' \
+    'x bin/carillon-register-services' \
     'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
     'r lib/carillon-discord-SKILL.md' 'r lib/pi-skills/conversation-history/SKILL.md' \
     'r lib/pi-skills/conversation-history/views.sql' 'r lib/pi-skills/carillon-hooks/SKILL.md' \
