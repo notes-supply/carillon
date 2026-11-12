@@ -42,7 +42,7 @@ impl InterfaceError {
 
 impl From<anyhow::Error> for InterfaceError {
     fn from(error: anyhow::Error) -> Self {
-        error!(%error, "component request failed");
+        error!(error = format!("{error:#}"), "component request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
