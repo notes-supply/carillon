@@ -32,7 +32,10 @@ mise run example:core
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
   delivery with the interface instance that claimed it, and never treat an
-  uncertain send as safe to repeat.
+  uncertain send as safe to repeat. An interface in `CoreOptions::retained`
+  has nothing to claim: each of its deliveries is written as delivered with
+  its turn's end, by the one function in [`db.rs`](src/db.rs) that writes a
+  delivery.
 - `jobs_at_work` and `named_jobs` read an interface's jobs, one turn each.
 - `recover_interrupted` and `reconcile_attachments` are for exclusive
   startup, before events are accepted. Recovery returns the turns core

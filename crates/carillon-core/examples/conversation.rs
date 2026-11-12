@@ -40,6 +40,7 @@ async fn conversation() -> Result<()> {
         }],
         attachments: AttachmentLimits::default(),
         uploads: std::collections::BTreeMap::new(),
+        retained: std::collections::BTreeSet::new(),
     })?;
     // An application authenticates the caller before supplying this interface identity.
     let interface = SelectedProvider {

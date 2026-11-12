@@ -17,6 +17,7 @@ fn options(root: &std::path::Path) -> CoreOptions {
         runtimes: vec![],
         attachments: carillon_installation::config::AttachmentLimits::default(),
         uploads: std::collections::BTreeMap::new(),
+        retained: std::collections::BTreeSet::new(),
     }
 }
 

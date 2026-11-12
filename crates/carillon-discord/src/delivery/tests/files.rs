@@ -4,7 +4,7 @@
 use std::{fs, path::Path as FilePath};
 
 use axum::{body::Bytes, http::HeaderMap, routing::put};
-use carillon_installation::config::{MIB, Provider, ProviderRole};
+use carillon_installation::config::{DeliveryMode, MIB, Provider, ProviderRole};
 use carillon_protocol::model::AnswerFile;
 use sha2::{Digest as _, Sha256};
 
@@ -461,6 +461,7 @@ fn discord_takes_an_upload_limit_one_message_carries() -> anyhow::Result<()> {
         token_hash: String::new(),
         enabled: true,
         max_upload_mib,
+        delivery: DeliveryMode::External,
     };
     for accepted in [None, Some(20), Some(24)] {
         require_upload_limit(&provider(accepted))?;

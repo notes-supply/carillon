@@ -132,13 +132,7 @@ impl Database {
                         now
                     ],
                 )?;
-                transaction.execute(
-                    "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                         content, silence, state, updated_at)
-                     SELECT id, interface_id, target_id, feedback_target_id, ?2, ?3, 'pending', ?4
-                     FROM turns WHERE id = ?1",
-                    params![turn_id, notice, silence.map(Silence::as_str), now],
-                )?;
+                self.record_delivery(&transaction, turn_id, notice, silence, now)?;
                 if let Settlement::Answered { files, .. } = settlement {
                     for (ordinal, file) in files.iter().enumerate() {
                         transaction.execute(

@@ -10,6 +10,7 @@
 //! delivery:  pending -> delivering -> delivered
 //!               ^                 \-> uncertain (ack lost or claim abandoned)
 //!               \--------------------- claim of a silence abandoned
+//!            delivered (written so for an interface that retains its answers)
 //! ```
 //!
 //! Invariants:
@@ -23,6 +24,8 @@
 //! - A turn's final report is stored once, with the outcome it describes.
 //! - Each terminal turn has one delivery row; its outcome and delivery intent
 //!   commit in one transaction, including a turn interrupted during admission.
+//!   `record_delivery` alone writes that row: pending, or delivered for an
+//!   interface whose people read answers from core's record.
 //! - Transitions are guarded conditional updates that succeed exactly once, so
 //!   a stale caller fails instead of overwriting newer state.
 //! - A turn's attachment references commit with the turn, and only after the
@@ -49,6 +52,7 @@ pub use settle::Settled;
 pub(crate) use settle::Settlement;
 
 use std::{
+    collections::BTreeSet,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     str::FromStr,
@@ -56,9 +60,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, Origin, StateCounts,
-    TurnActivity, TurnState, TurnSummary,
+use carillon_protocol::{
+    model::{
+        Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, Origin, StateCounts,
+        TurnActivity, TurnState, TurnSummary,
+    },
+    turns::Silence,
 };
 use rusqlite::{
     Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params,
@@ -72,6 +79,8 @@ use crate::attachments::{Capture, CapturedFile};
 #[derive(Clone)]
 pub(crate) struct Database {
     path: PathBuf,
+    /// The interfaces whose people read answers from core's record.
+    retained: BTreeSet<String>,
 }
 
 /// Lifecycle states are stored by their wire names. The wire types live in
@@ -122,6 +131,7 @@ impl Database {
         }
         let database = Self {
             path: path.to_path_buf(),
+            retained: BTreeSet::new(),
         };
         // Reserve the name atomically before SQLite opens it. Existing files,
         // including symlinks and incomplete prior creations, are never adopted.
@@ -142,7 +152,14 @@ impl Database {
         Self::validate_backup(path)?;
         Ok(Self {
             path: path.to_path_buf(),
+            retained: BTreeSet::new(),
         })
+    }
+
+    /// This storage, writing the answers of the `retained` interfaces as
+    /// delivered.
+    pub(crate) fn retaining(self, retained: BTreeSet<String>) -> Self {
+        Self { retained, ..self }
     }
 
     fn connect(&self) -> Result<Connection> {
@@ -294,6 +311,40 @@ impl Database {
         audience_id: &str,
     ) -> Result<Option<String>> {
         conversation_runtime(&self.connect()?, interface_id, agent_id, audience_id)
+    }
+
+    fn record_delivery(
+        &self,
+        transaction: &Transaction<'_>,
+        turn_id: &str,
+        content: &str,
+        silence: Option<Silence>,
+        now: i64,
+    ) -> Result<()> {
+        let interface: String = transaction.query_row(
+            "SELECT interface_id FROM turns WHERE id = ?1",
+            [turn_id],
+            |row| row.get(0),
+        )?;
+        let state = if self.retained.contains(&interface) {
+            DeliveryState::Delivered
+        } else {
+            DeliveryState::Pending
+        };
+        transaction.execute(
+            "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
+                 content, silence, state, updated_at)
+             SELECT id, interface_id, target_id, feedback_target_id, ?2, ?3, ?4, ?5
+             FROM turns WHERE id = ?1",
+            params![
+                turn_id,
+                content,
+                silence.map(Silence::as_str),
+                state.as_str(),
+                now
+            ],
+        )?;
+        Ok(())
     }
 
     /// Releases delivery claims held by other, presumed dead, instances of an
@@ -703,7 +754,9 @@ mod tests {
         Ok(())
     }
 
+    mod deliveries;
     mod format;
+    mod jobs;
     mod ownership;
 
     #[test]
@@ -785,147 +838,6 @@ mod tests {
         }))?)
     }
 
-    /// Every job at work, one page after another, as `(runtime, job)`.
-    fn at_work(database: &Database, interface: &str) -> Result<Vec<(String, Job)>> {
-        let super::JobPage { mut jobs, mut next } = database
-            .jobs_at_work(interface, None)?
-            .context("first page")?;
-        while let Some(after) = next {
-            let page = database
-                .jobs_at_work(interface, Some(&after))?
-                .context("next page")?;
-            assert!(page.jobs.len() <= JOB_READ_LIMIT);
-            jobs.extend(page.jobs);
-            next = page.next;
-        }
-        Ok(jobs)
-    }
-
-    #[test]
-    fn an_interrupted_jobs_report_is_kept_with_its_notice() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        accept(&database, "two", "conversation")?;
-        let failed = hold(&database, "runtime")?;
-        let report = report(1)?;
-        database.settle_held(
-            "runtime",
-            &failed.turn_id,
-            Settlement::Failed {
-                error: "runtime failed",
-                notice: "That turn was interrupted: It broke.",
-                activity: Some(&report),
-            },
-        )?;
-        let notice = database
-            .claim_delivery("discord", "instance")?
-            .context("notice missing")?;
-        assert_eq!(notice.turn_state, TurnState::Interrupted);
-        assert_eq!(notice.origin.turn_id, failed.turn_id);
-        let named = database.named_jobs("discord", std::slice::from_ref(&failed.turn_id))?;
-        let [(runtime, job)] = named.as_slice() else {
-            bail!("expected one job: {named:?}");
-        };
-        assert_eq!(runtime, "runtime");
-        assert_eq!(job.origin.turn_id, failed.turn_id);
-        let [turn] = job.turns.as_slice() else {
-            bail!("a job is one turn: {job:?}");
-        };
-        assert_eq!(
-            (
-                turn.state,
-                turn.delivery,
-                turn.activity.as_ref().map(|report| report.tool_calls)
-            ),
-            (
-                TurnState::Interrupted,
-                Some(DeliveryState::Delivering),
-                Some(1)
-            )
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn job_reads_name_only_the_interfaces_own_jobs_and_page_through_all_at_work() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        // Messages of one conversation are jobs of their own.
-        let one = accept(&database, "one", "conversation")?;
-        let two = accept(&database, "two", "conversation")?;
-        let listed = at_work(&database, "discord")?;
-        assert_eq!(
-            listed
-                .iter()
-                .map(|(_, job)| job.origin.turn_id.as_str())
-                .collect::<Vec<_>>(),
-            [one.turn_id.as_str(), two.turn_id.as_str()]
-        );
-        // Neither another interface's job nor an unknown turn names a job.
-        let other = database.accept_event(
-            "other",
-            "runtime",
-            &event("foreign", "elsewhere"),
-            Admission::Queued {
-                providers: &json!({}),
-                resource_snapshot_id: "snapshot",
-            },
-            None,
-        )?;
-        let named = [
-            other.turn_id.clone(),
-            "unknown".to_owned(),
-            two.turn_id.clone(),
-        ];
-        let listed = database.named_jobs("discord", &named)?;
-        assert_eq!(
-            listed
-                .iter()
-                .map(|(_, job)| job.origin.turn_id.as_str())
-                .collect::<Vec<_>>(),
-            [two.turn_id.as_str()]
-        );
-        assert_eq!(at_work(&database, "other")?.len(), 1);
-        assert!(
-            database
-                .named_jobs("other", std::slice::from_ref(&one.turn_id))?
-                .is_empty()
-        );
-        // A page cursor is one of the interface's own turns.
-        assert!(
-            database
-                .jobs_at_work("discord", Some(&other.turn_id))?
-                .is_none()
-        );
-        // A job that ended is no longer at work.
-        let first = hold(&database, "runtime")?;
-        assert_eq!(first.turn_id, one.turn_id);
-        answer(&database, &one.turn_id, "done")?;
-        // Every job at work is read, a bounded page at a time, oldest first.
-        let mut accepted = vec![two.turn_id];
-        for index in 0..2 * JOB_READ_LIMIT {
-            accepted.push(
-                accept(
-                    &database,
-                    &format!("many-{index}"),
-                    &format!("many-{index}"),
-                )?
-                .turn_id,
-            );
-        }
-        let page = database
-            .jobs_at_work("discord", None)?
-            .context("first page")?;
-        assert_eq!(page.jobs.len(), JOB_READ_LIMIT);
-        assert!(page.next.is_some());
-        let listed = at_work(&database, "discord")?
-            .into_iter()
-            .map(|(_, job)| job.origin.turn_id)
-            .collect::<Vec<_>>();
-        assert_eq!(listed, accepted);
-        Ok(())
-    }
-
     #[test]
     fn acceptance_order_survives_clock_rollback_and_reopening() -> Result<()> {
         // Force timestamps and opaque identifiers to disagree with insertion order.
@@ -952,101 +864,6 @@ mod tests {
             assert_eq!(hold(&database, "runtime")?.turn_id, "z-first");
             assert_eq!(hold(&database, "runtime")?.turn_id, "a-second");
         }
-        Ok(())
-    }
-
-    #[test]
-    fn delivery_claim_and_ack_retries_are_idempotent() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        accept(&database, "one", "first")?;
-        accept(&database, "two", "second")?;
-        for output in ["first reply", "second reply"] {
-            let turn = hold(&database, "runtime")?;
-            answer(&database, &turn.turn_id, output)?;
-        }
-
-        let first = database
-            .claim_delivery("discord", "instance")?
-            .context("first delivery missing")?;
-        let retried = database
-            .claim_delivery("discord", "instance")?
-            .context("retried delivery missing")?;
-        assert_eq!(retried.id, first.id);
-
-        assert!(database.acknowledge_delivery(
-            "discord",
-            first.id,
-            "instance",
-            DeliveryOutcome::Delivered,
-            Some("message"),
-        )?);
-        assert!(database.acknowledge_delivery(
-            "discord",
-            first.id,
-            "instance",
-            DeliveryOutcome::Delivered,
-            Some("message"),
-        )?);
-        assert!(!database.acknowledge_delivery(
-            "discord",
-            first.id,
-            "instance",
-            DeliveryOutcome::Uncertain,
-            Some("message"),
-        )?);
-        assert!(!database.acknowledge_delivery(
-            "other-interface",
-            first.id,
-            "instance",
-            DeliveryOutcome::Delivered,
-            Some("message"),
-        )?);
-
-        let second = database
-            .claim_delivery("discord", "instance")?
-            .context("second delivery missing")?;
-        assert_ne!(second.id, first.id);
-        Ok(())
-    }
-
-    #[test]
-    fn a_turns_delivery_is_claimed_without_touching_older_ones() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        let mut turns = Vec::new();
-        for (event, output) in [("older", "older reply"), ("wanted", "wanted reply")] {
-            accept(&database, event, output)?;
-            let turn = hold(&database, "runtime")?;
-            answer(&database, &turn.turn_id, output)?;
-            turns.push(turn.turn_id);
-        }
-        let wanted = database
-            .claim_turn_delivery("discord", "instance", &turns[1])?
-            .context("wanted delivery missing")?;
-        assert_eq!(wanted.turn_id, turns[1]);
-        // Held by this instance, it is claimed again until acknowledged.
-        let again = database
-            .claim_turn_delivery("discord", "instance", &turns[1])?
-            .context("held delivery missing")?;
-        assert_eq!(again.id, wanted.id);
-        database.acknowledge_delivery(
-            "discord",
-            wanted.id,
-            "instance",
-            DeliveryOutcome::Delivered,
-            Some("message"),
-        )?;
-        assert!(
-            database
-                .claim_turn_delivery("discord", "instance", &turns[1])?
-                .is_none()
-        );
-        // The older turn's delivery was never claimed: it is still the next.
-        let older = database
-            .claim_delivery("discord", "other-instance")?
-            .context("older delivery missing")?;
-        assert_eq!(older.turn_id, turns[0]);
         Ok(())
     }
 }

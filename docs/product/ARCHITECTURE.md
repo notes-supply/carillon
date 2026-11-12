@@ -54,7 +54,9 @@ rest, and a retired dispatcher ends its hand-over before it ends.
    guaranteed to happen exactly once.
 5. Core copies the files an answer names, then stores the outcome, those
    files and a delivery intent in one transaction.
-6. The interface claims the delivery, sends it and records the outcome.
+6. The interface claims the delivery, sends it and records the outcome. An
+   interface that retains its deliveries skips this step: core records its
+   delivery as delivered in step 5.
 
 The dispatcher POSTs the turn to the runtime's `/v1/inbox`. On 202 the turn
 is running, which means the runtime holds it, and its files count as
@@ -103,6 +105,15 @@ runtime's dispatcher. Delivery is a separate outbox, so a lost
 interface never reruns the model, and a delivery claimed by a crashed
 interface becomes uncertain. A silence sends no message, so it is delivered
 again instead.
+
+An interface whose registry entry says `delivery = "retained"` shows its
+people core's own record, so nothing is sent. Core writes each of its
+deliveries as delivered, in the transaction that ends the turn, whichever
+way the turn ends: an outcome, a refused hand-over, a stranded
+conversation's notice or a startup interruption. No claim returns such a
+delivery, no reconciliation touches it, it is never uncertain, and no drain
+waits for it. The mode is the registry's when the turn ends, and changes
+only with a restart.
 
 ### Maintenance drain
 

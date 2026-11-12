@@ -187,7 +187,7 @@ async fn a_silence_a_crashed_interface_claimed_is_delivered_again() -> Result<()
     Ok(())
 }
 
-async fn open_turn(
+pub(super) async fn open_turn(
     state: &AppState,
     (runtime, token): (&str, &str),
     opening: &Value,
@@ -205,7 +205,7 @@ async fn open_turn(
         .map_err(|refusal| refusal.status))
 }
 
-fn opening(audience: &str, key: &str) -> Value {
+pub(super) fn opening(audience: &str, key: &str) -> Value {
     json!({
         "interface_id": "test-interface",
         "agent_id": "test-agent",

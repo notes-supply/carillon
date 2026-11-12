@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Display, fs, path::Path, str::FromStr};
 
 use anyhow::Context as _;
 use carillon_installation::config::{
-    AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, hash_token,
+    AgentConfig, Config, CoreConfig, DeliveryMode, LoadedConfig, Provider, ProviderRole, hash_token,
 };
 
 use super::{
@@ -50,6 +50,7 @@ pub(crate) fn installation(
             token_hash: hash_token(id),
             enabled: true,
             max_upload_mib: (role == ProviderRole::Interface).then_some(20),
+            delivery: DeliveryMode::External,
         });
     }
     fs::write(root.join("credentials").join("operator.token"), "operator")?;

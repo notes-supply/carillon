@@ -1,7 +1,6 @@
-use super::{Database, RUNTIME_EVENT_PREFIX, Result, params, timestamp, write_transaction};
+use rusqlite::Transaction;
 
-/// Running turns of a runtime not among the JSON array `?3`.
-const GONE: &str = "state = 'running' AND runtime_id NOT IN (SELECT value FROM json_each(?3))";
+use super::{Database, RUNTIME_EVENT_PREFIX, Result, params, timestamp, write_transaction};
 
 impl Database {
     pub(crate) fn queued_owners(&self) -> Result<Vec<(String, String)>> {
@@ -13,6 +12,25 @@ impl Database {
             .collect::<Result<_, _>>()?)
     }
 
+    fn interrupt(
+        &self,
+        transaction: &Transaction<'_>,
+        turns: &[String],
+        error: &str,
+        notice: &str,
+    ) -> Result<()> {
+        let now = timestamp()?;
+        for turn_id in turns {
+            transaction.execute(
+                "UPDATE turns SET state = 'interrupted', error = ?2, finished_at = ?3
+                 WHERE id = ?1",
+                params![turn_id, error, now],
+            )?;
+            self.record_delivery(transaction, turn_id, notice, None, now)?;
+        }
+        Ok(())
+    }
+
     /// Settles only unclaimed turns of this owner, with their notices in the same transaction.
     pub(crate) fn interrupt_queued(
         &self,
@@ -22,22 +40,17 @@ impl Database {
     ) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
-        let now = timestamp()?;
-        transaction.execute(
-            "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                 content, state, updated_at)
-             SELECT id, interface_id, target_id, feedback_target_id, ?3, 'pending', ?4
-             FROM turns WHERE state = 'queued' AND agent_id = ?1 AND runtime_id = ?2
-             ORDER BY acceptance_sequence",
-            params![agent_id, runtime_id, explanation, now],
-        )?;
-        let interrupted = transaction.execute(
-            "UPDATE turns SET state = 'interrupted', error = ?3, finished_at = ?4
-             WHERE state = 'queued' AND agent_id = ?1 AND runtime_id = ?2",
-            params![agent_id, runtime_id, explanation, now],
-        )?;
+        let queued = transaction
+            .prepare(
+                "SELECT id FROM turns
+                 WHERE state = 'queued' AND agent_id = ?1 AND runtime_id = ?2
+                 ORDER BY acceptance_sequence",
+            )?
+            .query_map(params![agent_id, runtime_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        self.interrupt(&transaction, &queued, explanation, explanation)?;
         transaction.commit()?;
-        Ok(interrupted)
+        Ok(queued.len())
     }
 
     /// Settles what core was doing when it stopped. Run at startup.
@@ -50,26 +63,19 @@ impl Database {
     pub(crate) fn recover_running_turns(&self, configured: &[&str]) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
-        let now = timestamp()?;
-        let configured = serde_json::to_string(configured)?;
-        transaction.execute(
-            &format!(
-                "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                     content, state, updated_at)
-                 SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
-                 FROM turns WHERE {GONE} ORDER BY acceptance_sequence"
-            ),
-            params![
-                "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
-                now,
-                configured
-            ],
-        )?;
-        let recovered = transaction.execute(
-            &format!(
-                "UPDATE turns SET state = 'interrupted', error = ?1, finished_at = ?2 WHERE {GONE}"
-            ),
-            params!["its runtime is no longer configured", now, configured],
+        let gone = transaction
+            .prepare(
+                "SELECT id FROM turns
+                 WHERE state = 'running' AND runtime_id NOT IN (SELECT value FROM json_each(?1))
+                 ORDER BY acceptance_sequence",
+            )?
+            .query_map([serde_json::to_string(configured)?], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        self.interrupt(
+            &transaction,
+            &gone,
+            "its runtime is no longer configured",
+            "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
         )?;
         transaction.execute(
             "UPDATE turns SET state = 'queued'
@@ -77,6 +83,6 @@ impl Database {
             params![RUNTIME_EVENT_PREFIX],
         )?;
         transaction.commit()?;
-        Ok(recovered)
+        Ok(gone.len())
     }
 }

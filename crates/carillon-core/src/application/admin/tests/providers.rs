@@ -45,3 +45,41 @@ fn provider_commands_change_only_their_own_lines() -> Result<()> {
     assert_eq!(fs::read_to_string(&config_path)?, registered);
     Ok(())
 }
+
+#[test]
+fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
+    let directory = tempdir()?;
+    let root = directory.path().join("installation");
+    let config = initialize_test_installation(&root, directory.path(), 44_000)?;
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o640))?;
+    let sibling = config.with_extension("tmp");
+    let external = directory.path().join("unrelated");
+    fs::write(&external, "owner data")?;
+    for linked in [false, true] {
+        if linked {
+            symlink(&external, &sibling)?;
+        } else {
+            fs::write(&sibling, "owner data")?;
+        }
+        set_provider(&config, "runtime-pi", false)?;
+        let loaded = LoadedConfig::load(&config)?;
+        assert!(
+            !loaded
+                .provider("runtime-pi", ProviderRole::Runtime)?
+                .enabled
+        );
+        set_provider(&config, "runtime-pi", true)?;
+        assert!(
+            LoadedConfig::load(&config)?
+                .provider("runtime-pi", ProviderRole::Runtime)?
+                .enabled
+        );
+        assert_eq!(fs::read_to_string(&sibling)?, "owner data");
+        assert_eq!(fs::read_to_string(&external)?, "owner data");
+        assert_eq!(fs::symlink_metadata(&sibling)?.is_symlink(), linked);
+        assert!(!fs::symlink_metadata(&config)?.is_symlink());
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o640);
+        fs::remove_file(&sibling)?;
+    }
+    Ok(())
+}

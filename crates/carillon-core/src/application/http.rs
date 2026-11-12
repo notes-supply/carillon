@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post, put},
 };
 use carillon_installation::{
-    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    config::{DeliveryMode, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
     loopback,
 };
 use carillon_protocol::{
@@ -85,6 +85,13 @@ pub(super) fn core_options(config: &LoadedConfig) -> CoreOptions {
             .iter()
             .filter(|provider| provider.role == ProviderRole::Interface)
             .map(|provider| (provider.id.clone(), provider.upload_mib()))
+            .collect(),
+        retained: config
+            .value
+            .providers
+            .iter()
+            .filter(|provider| provider.delivery == DeliveryMode::Retained)
+            .map(|provider| provider.id.clone())
             .collect(),
         runtimes: runtime_facts(config),
     }

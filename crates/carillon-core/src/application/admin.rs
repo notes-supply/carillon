@@ -18,9 +18,9 @@ use uuid::Uuid;
 
 pub(super) use carillon_installation::config::ASSISTANT;
 use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, LoadedConfig, Provider,
-    ProviderRole, RELEASE_VERSION, attachment_staging, hash_token, new_token,
-    validate_provider_identity,
+    AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, DeliveryMode,
+    LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, attachment_staging, hash_token,
+    new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 use carillon_installation::maintenance::ServiceLock;
@@ -230,6 +230,7 @@ fn default_providers(
             token_hash: hash_token(discord_token),
             enabled: true,
             max_upload_mib: Some(DEFAULT_UPLOAD_MIB),
+            delivery: DeliveryMode::External,
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -244,6 +245,7 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         token_hash: hash_token(token),
         enabled: true,
         max_upload_mib: None,
+        delivery: DeliveryMode::External,
     })
 }
 
@@ -622,44 +624,6 @@ mod tests {
     /// range (32768-60999), from which any socket on the host, including this
     /// binary's own, may be given a port.
     const OFFLINE_BACKUP_PORT: u16 = 31_400;
-
-    #[test]
-    fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
-        let directory = tempdir()?;
-        let root = directory.path().join("installation");
-        let config = initialize_test_installation(&root, directory.path(), 44_000)?;
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o640))?;
-        let sibling = config.with_extension("tmp");
-        let external = directory.path().join("unrelated");
-        fs::write(&external, "owner data")?;
-        for linked in [false, true] {
-            if linked {
-                symlink(&external, &sibling)?;
-            } else {
-                fs::write(&sibling, "owner data")?;
-            }
-            set_provider(&config, "runtime-pi", false)?;
-            let loaded = LoadedConfig::load(&config)?;
-            assert!(
-                !loaded
-                    .provider("runtime-pi", ProviderRole::Runtime)?
-                    .enabled
-            );
-            set_provider(&config, "runtime-pi", true)?;
-            assert!(
-                LoadedConfig::load(&config)?
-                    .provider("runtime-pi", ProviderRole::Runtime)?
-                    .enabled
-            );
-            assert_eq!(fs::read_to_string(&sibling)?, "owner data");
-            assert_eq!(fs::read_to_string(&external)?, "owner data");
-            assert_eq!(fs::symlink_metadata(&sibling)?.is_symlink(), linked);
-            assert!(!fs::symlink_metadata(&config)?.is_symlink());
-            assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o640);
-            fs::remove_file(&sibling)?;
-        }
-        Ok(())
-    }
 
     #[test]
     fn initialization_rejects_unusable_workspaces_without_publishing_state() -> Result<()> {
