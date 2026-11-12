@@ -60,6 +60,8 @@ pub(crate) async fn serve(
     token_file: &Path,
     site: PathBuf,
 ) -> Result<()> {
+    // Read before anything slow, so a code made once this process runs is good.
+    let started = browser::now_ms();
     let Some(Started {
         provider,
         listener,
@@ -85,7 +87,7 @@ pub(crate) async fn serve(
             key_file: browser::key_file(data_dir, &provider.id),
             // A browser names the address in one spelling whatever the registry's.
             authority: listener.local_addr()?.to_string(),
-            started: browser::now_ms(),
+            started,
             used: Mutex::default(),
         },
         staging,

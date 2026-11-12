@@ -512,3 +512,10 @@ credential, the one core presents to them. A runtime settles its own turns, even
 enabled opens turns in its own conversations. The
 Wasm sandbox bounds the Discord module's memory and time; it doesn't limit
 the owner.
+
+The web chat's address belongs to whichever local program holds the web
+provider's port. While the provider is stopped, another program on the
+machine can take the port and serve a page at the chat's own origin, which
+can read what the real page stored there. Carillon trusts the machine's
+local programs here, as its other providers do, and remote admission is the
+boundary. `carillon web sign-out` voids what such a page could have taken.

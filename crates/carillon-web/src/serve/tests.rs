@@ -466,6 +466,15 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     for path in &refused[..3] {
         assert_eq!(page(path).await?.status, StatusCode::NOT_FOUND, "{path}");
     }
+
+    // The folder itself may be a link: the owner names where the page
+    // lives, and that folder is the page.
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir(&elsewhere)?;
+    std::fs::write(elsewhere.join("index.html"), "<main>linked page</main>")?;
+    std::fs::remove_dir_all(&custom)?;
+    symlink(&elsewhere, &custom)?;
+    assert_eq!(page("/").await?.body, b"<main>linked page</main>");
     Ok(())
 }
 

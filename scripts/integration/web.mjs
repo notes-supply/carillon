@@ -365,6 +365,7 @@ async function testOpenedTurn(token, chat) {
 
 try {
   await install();
+  assert.match(carillon("web", "sign-out"), /has not started yet, so no browser is signed in/u);
   services("start", "runtime", "core", "web");
   for (const name of ["runtime", "core", "web"]) await healthy(name);
   assert.match(carillon("settings", "--agent", "assistant", "model=local/echo"), /Local echo/u);

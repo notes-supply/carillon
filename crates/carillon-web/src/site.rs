@@ -5,7 +5,9 @@
 //! served instead of the release's. Either directory is flat, and the page
 //! holds no data, so its files need no token. For that reason only a file
 //! that is itself in the directory is served: a link there could name
-//! anything the installing user reads.
+//! anything the installing user reads. The directory, and the path to it,
+//! may be reached through links: the owner names where the page lives, and
+//! whatever directory that leads to is the page.
 
 use std::{
     path::{Path, PathBuf},

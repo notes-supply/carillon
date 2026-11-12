@@ -69,10 +69,13 @@ trusts nothing a browser attaches on its own.
 - The token, a sign-in code and every file link are HMACs of the browser
   key. `carillon web sign-out` replaces the key, which voids them all.
 
-The gate protects the provider while it runs. While it is stopped, another
-program of this machine can take its port, and a browser sent there gives
-that program the page's origin. `carillon web open` refuses to open a link
-when nothing listens, but it cannot tell another listener from the provider.
+The page's address belongs to whichever local program holds the provider's
+port. While the provider is stopped, another program of this machine can
+take the port and serve a page at the chat's own origin, which can read what
+the real page stored there. Carillon trusts the machine's local programs
+here, as its other providers do. `carillon web sign-out` voids what such a
+page could have taken. `carillon web open` refuses to make a link when
+nothing listens, but it cannot tell another listener from the provider.
 
 ## The page's files
 
@@ -85,8 +88,14 @@ A complete copy in `state/components/<id>/site/` is served instead of the
 release's. A copy is complete when it has an `index.html`. No file comes
 from the release while the copy is served. The directory is flat, and the
 provider serves `.html`, `.js`, `.css`, `.svg` and `.png` files from it.
-Only a regular file is served. A symbolic link is answered with 404, because
-the page's files need no token and a link could name any file you can read.
+
+Only a regular file in the folder is served. A symbolic link inside the
+folder is answered with 404, because the page's files need no token and such
+a link could name any file you can read. The folder itself, and the path to
+it, may be reached through links, and whatever folder they lead to is the
+page. So a `site` that is a link to a folder with an `index.html` counts as
+the custom page, and everything servable in that folder is public to this
+machine.
 
 The files in [`site/`](site) only prove sign-in, reading and sending.
 
@@ -431,18 +440,19 @@ POST /api/messages/m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa/control
 
 A control names a turn by its message's event ID. Show a control only while
 the live read's `activity.controls` lists it. The runtime decides what it
-lists. Pi lists controls for a message that waits behind a running answer,
-and none for the running answer, so a page can offer to stop an answer only
-when its runtime lists `stop` for it. A turn the runtime opened lists none.
+lists. On Pi, a message that waits behind a running answer lists those of
+`steer`, `interrupt` and `stop` that apply to it, and a running answer
+lists `stop`. A turn the runtime opened lists none.
 
-| `action` | What it does | How the turns end |
-| --- | --- | --- |
-| `steer` | Hands the waiting message to the running turn. | The message's turn is `steered`. The answer comes on the newest message that took part. |
-| `interrupt` | Ends the running turn and runs the waiting message next. | The earlier turn is `stopped`. The message's turn runs and is `answered`. |
-| `stop` | Does not run the message. | The message's turn is `stopped`. The running turn goes on. |
+| `action` | On | What it does | How the turns end |
+| --- | --- | --- | --- |
+| `steer` | A waiting message | Hands it to the running turn. | The message's turn is `steered`. The answer comes on the newest message that took part. |
+| `interrupt` | A waiting message | Ends the running turn and runs the message next. | The earlier turn is `stopped`. The message's turn runs and is `answered`. |
+| `stop` | A waiting message | Does not run it. | The message's turn is `stopped`. The running turn goes on. |
+| `stop` | A running answer | Ends that answer, and none that follows it. | Its turn is `stopped`, and so is the turn of every message that was steered into it. |
 
-Neither the provider nor core checks that a control is listed. One that is
-not listed may be answered with 204 and change nothing.
+Neither the provider nor core checks that a control is listed. The runtime
+refuses one that does not apply, or takes it and changes nothing.
 
 A refusal comes back with core's or the runtime's status and words: 404
 when core has no such message, 409 when its turn is no longer running. After
