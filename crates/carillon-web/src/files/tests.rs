@@ -190,38 +190,27 @@ async fn a_signed_path_that_leaves_the_store_names_nothing() -> Result<()> {
 #[tokio::test]
 async fn any_file_name_makes_a_header_a_browser_can_read() -> Result<()> {
     let fixture = fixture().await?;
-    for (name, plain, extended) in [
+    for (name, extended) in [
         (
             "quarterly \"final\" report.pdf",
-            "quarterly _final_ report.pdf",
             "quarterly%20%22final%22%20report.pdf",
         ),
         (
             "line\r\nSet-Cookie: a=b.txt",
-            "line__Set-Cookie_ a_b.txt",
             "line%0D%0ASet-Cookie%3A%20a%3Db.txt",
         ),
         (
-            "résumé 履歴書.pdf",
-            "r_sum_ ___.pdf",
+            "r\u{e9}sum\u{e9} \u{5c65}\u{6b74}\u{66f8}.pdf",
             "r%C3%A9sum%C3%A9%20%E5%B1%A5%E6%AD%B4%E6%9B%B8.pdf",
         ),
-        (
-            "../../etc/passwd",
-            ".._.._etc_passwd",
-            "..%2F..%2Fetc%2Fpasswd",
-        ),
-        (
-            "semi;colon\\back.txt",
-            "semi_colon_back.txt",
-            "semi%3Bcolon%5Cback.txt",
-        ),
+        ("../../etc/passwd", "..%2F..%2Fetc%2Fpasswd"),
+        ("semi;colon\\back.txt", "semi%3Bcolon%5Cback.txt"),
     ] {
         let answer = follow(&fixture, &link(&fixture, "capture/2", name).await?).await?;
         assert_eq!(answer.status, StatusCode::OK, "{name}");
         assert_eq!(
             answer.header("content-disposition"),
-            format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{extended}")
+            format!("attachment; filename*=UTF-8''{extended}")
         );
         assert!(!answer.parts.headers.contains_key("set-cookie"));
     }

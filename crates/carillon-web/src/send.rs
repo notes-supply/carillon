@@ -31,9 +31,6 @@ use crate::{
     serve::Web,
 };
 
-/// The most bytes of text one message carries.
-const TEXT_LIMIT: usize = 1024 * 1024;
-
 #[derive(Deserialize)]
 pub(crate) struct Sending {
     /// The agent of a conversation's first message.
@@ -85,19 +82,7 @@ async fn stage(
     {
         match part.name() {
             Some("text") => {
-                let mut text = Vec::new();
-                while let Some(chunk) = chunk(&mut part).await? {
-                    if text.len() + chunk.len() > TEXT_LIMIT {
-                        refused.get_or_insert_with(|| {
-                            too_large("A message's text may have at most 1 MiB.".to_owned())
-                        });
-                    } else {
-                        text.extend_from_slice(&chunk);
-                    }
-                }
-                staged.text = String::from_utf8(text).map_err(|_| {
-                    refusal(StatusCode::BAD_REQUEST, "The message's text is not UTF-8.")
-                })?;
+                staged.text = part.text().await.map_err(|error| malformed(&error))?;
             }
             Some("file") => {
                 if staged.files.len() >= limits.max_files as usize {

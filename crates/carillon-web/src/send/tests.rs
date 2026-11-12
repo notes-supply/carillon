@@ -255,7 +255,6 @@ async fn a_message_that_cannot_be_taken_is_answered_in_words_and_leaves_nothing_
     let query = "?agent=assistant";
     let big = vec![b'a'; MIB + 1];
     let most = vec![b'b'; MIB - 1];
-    let text = "t".repeat(MIB + 1);
     for (parts, status, said) in [
         (
             vec![
@@ -284,11 +283,6 @@ async fn a_message_that_cannot_be_taken_is_answered_in_words_and_leaves_nothing_
             ],
             StatusCode::PAYLOAD_TOO_LARGE,
             "2 MiB together",
-        ),
-        (
-            vec![Part::Text(&text)],
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "text may have at most",
         ),
         (
             vec![Part::Text("  \n")],

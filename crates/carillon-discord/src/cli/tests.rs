@@ -1,9 +1,9 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context as _, Result};
-use carillon_installation::config::{LoadedConfig, Provider};
+use carillon_installation::config::LoadedConfig;
 
-use super::{Cli, Command, call, instance, instances, uploads};
+use super::{Cli, Command, call, uploads};
 use crate::operations::{Messages, Operation};
 use axum::{
     Router,
@@ -722,60 +722,6 @@ async fn a_declared_module_is_checked_where_the_update_takes_it_from() -> Result
     assert!(refusal.contains("cannot serve"), "{refusal}");
     fs::write(&own, &usable)?;
     check(declare(&own)?).await.map_err(anyhow::Error::msg)?;
-    Ok(())
-}
-
-#[test]
-fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let mut config = crate::config::tests::installation(directory.path(), "discord-a", 46_300)?;
-    assert_eq!(instance(&config, None)?, "discord-a");
-    assert_eq!(instance(&config, Some("chosen".to_owned()))?, "chosen");
-
-    let mut other = config.value.providers[0].clone();
-    "chat".clone_into(&mut other.id);
-    "example".clone_into(&mut other.program);
-    config.value.providers.push(other);
-    fs::copy(
-        config.provider_config_path("discord-a")?,
-        config.provider_config_path("chat")?,
-    )?;
-    assert_eq!(instance(&config, None)?, "discord-a");
-    let foreign = instance(&config, Some("chat".to_owned())).err();
-    assert_eq!(
-        foreign.map(|refusal| refusal.to_string()).as_deref(),
-        Some("chat is not a Discord instance: its program is \"example\"")
-    );
-
-    let second = Provider {
-        id: "discord-b".to_owned(),
-        enabled: false,
-        ..config.value.providers[0].clone()
-    };
-    config.value.providers.push(second);
-    assert_eq!(instances(&config), ["discord-a", "discord-b"]);
-    let ambiguous = instance(&config, None)
-        .err()
-        .context("inferred one of several instances")?;
-    assert!(
-        ambiguous.to_string().ends_with("discord-a, discord-b"),
-        "{ambiguous}"
-    );
-
-    config
-        .value
-        .providers
-        .retain(|provider| provider.program != "discord");
-    assert!(instances(&config).is_empty());
-    let unregistered = instance(&config, None)
-        .err()
-        .context("inferred an instance of another program")?;
-    assert!(
-        unregistered
-            .to_string()
-            .starts_with("carillon.toml registers no provider with program = \"discord\""),
-        "{unregistered}"
-    );
     Ok(())
 }
 

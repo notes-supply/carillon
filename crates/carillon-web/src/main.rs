@@ -25,6 +25,7 @@ use carillon_installation::{
     config::{LoadedConfig, ProviderRole},
     home, loopback,
 };
+use carillon_interface::instance;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -130,11 +131,11 @@ async fn run() -> Result<()> {
         }
         Command::Open { print, provider } => {
             let loaded = installation()?;
-            open(&loaded, &instance(&loaded, provider)?, print).await
+            open(&loaded, &instance(&loaded, PROGRAM, provider)?, print).await
         }
         Command::SignOut { provider } => {
             let loaded = installation()?;
-            sign_out(&loaded, &instance(&loaded, provider)?).await
+            sign_out(&loaded, &instance(&loaded, PROGRAM, provider)?).await
         }
     }
 }
@@ -148,33 +149,6 @@ fn release_site() -> Result<PathBuf> {
         .and_then(Path::parent)
         .map(|release| release.join("lib").join("web"))
         .context("cannot locate this program's release")
-}
-
-/// The web instance an operator action names, or the only one registered.
-fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
-    let mut instances = config.value.providers.iter();
-    if let Some(explicit) = explicit {
-        return match instances.find(|entry| entry.id == explicit) {
-            Some(entry) if entry.program == PROGRAM => Ok(explicit),
-            Some(entry) => bail!(
-                "{explicit} is not a web instance: its program is \"{}\"",
-                entry.program
-            ),
-            None => bail!("provider {explicit} is not configured"),
-        };
-    }
-    let instances: Vec<&str> = instances
-        .filter(|entry| entry.program == PROGRAM)
-        .map(|entry| entry.id.as_str())
-        .collect();
-    match instances.as_slice() {
-        [only] => Ok((*only).to_owned()),
-        [] => bail!("carillon.toml registers no provider with program = \"{PROGRAM}\""),
-        several => bail!(
-            "several web instances are registered; choose one with --provider from: {}",
-            several.join(", ")
-        ),
-    }
 }
 
 /// Posts to the running provider's operator API with the operator's
@@ -225,25 +199,10 @@ async fn open(loaded: &LoadedConfig, provider: &str, print: bool) -> Result<()> 
 
 async fn sign_out(loaded: &LoadedConfig, provider: &str) -> Result<()> {
     let url = &loaded.provider(provider, ProviderRole::Interface)?.url;
-    match operator(loaded, url, "sign-out").await? {
-        Ok(response) => {
-            accepted(response).await?;
-            println!("Every browser is signed out of Carillon's web chat.");
-        }
-        // Nothing serves the key, so replacing its file is the whole of it.
-        Err(error) if error.is_connect() => {
-            let key_file = browser::key_file(&loaded.value.data_dir, provider);
-            if key_file.exists() {
-                browser::replace_key(&key_file)
-                    .with_context(|| format!("replace {}", key_file.display()))?;
-            }
-            println!(
-                "The web provider is not running. No browser is signed in when it starts again."
-            );
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("the web provider did not answer at {url}"));
-        }
-    }
+    let response = operator(loaded, url, "sign-out")
+        .await?
+        .with_context(|| format!("the web provider does not answer at {url}"))?;
+    accepted(response).await?;
+    println!("Every browser is signed out of Carillon's web chat.");
     Ok(())
 }

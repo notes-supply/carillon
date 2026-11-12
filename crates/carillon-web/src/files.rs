@@ -160,17 +160,8 @@ pub(crate) async fn file(
     let gone = || refusal(StatusCode::NOT_FOUND, "Carillon does not have this file.");
     let (file, raster) = stored(&web, &path).await.ok_or_else(gone)?;
     let length = file.metadata().await.map_err(|_| gone())?.len();
-    // The plain name is for a browser that reads no `filename*`.
-    let plain: String = link
-        .name
-        .chars()
-        .map(|character| match character {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | ' ' | '.' | '-' | '_' => character,
-            _ => '_',
-        })
-        .collect();
     let disposition = format!(
-        "{}; filename=\"{plain}\"; filename*=UTF-8''{}",
+        "{}; filename*=UTF-8''{}",
         if raster.is_some() {
             "inline"
         } else {

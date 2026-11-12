@@ -232,7 +232,7 @@ pub(crate) async fn run() -> Result<()> {
             let loaded = installation()?;
             let checked = match &provider {
                 Some(provider) => vec![provider.as_str()],
-                None => instances(&loaded),
+                None => carillon_interface::instances(&loaded, Bundled::Discord.program()),
             };
             if checked.is_empty() {
                 println!("carillon.toml registers no Discord provider, so nothing was checked");
@@ -396,38 +396,10 @@ fn release() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-fn instances(config: &LoadedConfig) -> Vec<&str> {
-    let providers = config.value.providers.iter();
-    providers
-        .filter(|provider| provider.program == Bundled::Discord.program())
-        .map(|provider| provider.id.as_str())
-        .collect()
-}
-
 /// The Discord instance an operator action names, or the only one
-/// registered. Anything else is a choice for the operator.
+/// registered.
 fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
-    if let Some(explicit) = explicit {
-        let mut entries = config.value.providers.iter();
-        let program = entries
-            .find(|entry| entry.id == explicit)
-            .map(|entry| &entry.program);
-        if let Some(program) = program.filter(|program| *program != Bundled::Discord.program()) {
-            bail!("{explicit} is not a Discord instance: its program is \"{program}\"");
-        }
-        return Ok(explicit);
-    }
-    match instances(config).as_slice() {
-        [only] => Ok((*only).to_owned()),
-        [] => bail!(
-            "carillon.toml registers no provider with program = \"discord\"; `carillon setup \
-             --interface discord` adds one"
-        ),
-        several => bail!(
-            "several Discord instances are registered; choose one with --provider from: {}",
-            several.join(", ")
-        ),
-    }
+    carillon_interface::instance(config, Bundled::Discord.program(), explicit)
 }
 
 /// `carillon discord module …`: a file check needs no installation; status
