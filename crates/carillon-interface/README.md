@@ -17,8 +17,12 @@ in `carillon-protocol`.
   requests to core, with bounded waits: submit an event, read its status,
   jobs, controls, channel settings and commands. A successful control has no
   body. `Deliveries` is the claim, acknowledgement and reconciliation of
-  deliveries under one instance identity. It is not `Clone`: core hands a
-  delivery to one identity, so one owner sends it. A process opens it once.
+  deliveries under one instance identity. Its owner keeps two rules, which
+  the type does not enforce, so that each delivery is sent once. A process
+  opens one, because a reconcile under another identity turns the first
+  one's live claims uncertain. The owner claims, sends and acknowledges in
+  sequence, because until a claim's outcome is acknowledged core answers
+  every claim under that identity with the same delivery.
 - [`error`](src/error.rs): `InterfaceError`, a status and a message, which
   is also the JSON answer a provider's own routes give. `is_transient` says
   which failures are worth repeating: 5xx other than 502 and 507, and

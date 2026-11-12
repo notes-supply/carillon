@@ -208,9 +208,9 @@ impl CoreClient {
         runtime_json(request).await
     }
 
-    /// Opens delivery claims under a fresh instance identity. A provider
-    /// process opens them once and keeps them: reconciling under one
-    /// identity releases the claims held under every other.
+    /// Opens delivery claims under a fresh instance identity. Open them once
+    /// in a provider process: a reconcile under one identity turns the live
+    /// claims of every other uncertain.
     #[must_use]
     pub fn deliveries(&self) -> Deliveries {
         Deliveries {
@@ -220,10 +220,11 @@ impl CoreClient {
     }
 }
 
-/// The delivery claims of one provider instance. Core hands a delivery to
-/// one instance identity, and offers that identity the claim it holds again
-/// until its outcome is acknowledged. So the identity has one owner, which
-/// sends what it claims once: this is not `Clone`.
+/// The delivery claims of one provider instance. Sending each delivery once
+/// is its owner's work, by two rules the type does not enforce. Open one in
+/// a process, as [`CoreClient::deliveries`] says. Claim, send and
+/// acknowledge in sequence: until a claim's outcome is acknowledged, core
+/// answers every claim under this identity with that same delivery.
 pub struct Deliveries {
     core: CoreClient,
     instance_id: String,
