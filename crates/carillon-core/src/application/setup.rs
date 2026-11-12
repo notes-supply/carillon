@@ -144,7 +144,7 @@ pub(super) fn setup(
         choose_pi_models(home, &pi, agents, questions)?;
     }
     for interface in &config.value.providers {
-        if interface.role != ProviderRole::Interface {
+        if interface.role != ProviderRole::Interface || !interface.enabled {
             continue;
         }
         let finished = Command::new(provider_binary(&interface.program)?)

@@ -49,7 +49,7 @@ fn setup_asks_which_interfaces_until_one_is_chosen() -> anyhow::Result<()> {
 }
 
 #[test]
-fn each_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyhow::Result<()> {
+fn each_enabled_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
     let config_path = initialized(&home, directory.path(), Bundled::Pi)?;
@@ -59,9 +59,15 @@ fn each_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyhow::Resu
     "example".clone_into(&mut chat.program);
     "9.9.9".clone_into(&mut chat.version);
     chat.url = "http://127.0.0.1:44009".to_owned();
-    config.providers.push(chat);
+    let mut unused = config.providers[0].clone();
+    "discord-old".clone_into(&mut unused.id);
+    unused.url = "http://127.0.0.1:44008".to_owned();
+    unused.enabled = false;
+    config.providers.extend([chat, unused]);
     config.write(&config_path)?;
-    std::fs::write(home.join("credentials/chat.token"), "unused")?;
+    for id in ["chat", "discord-old"] {
+        std::fs::write(home.join(format!("credentials/{id}.token")), "unused")?;
+    }
     added_pi::fake_providers(directory.path(), &["discord", "example"])?;
 
     let output = added_pi::rerun(directory.path(), &home, None)?;
@@ -75,8 +81,13 @@ fn each_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyhow::Resu
             arguments
         );
     }
-    let chat = LoadedConfig::load(&config_path)?;
-    let chat = chat.provider("chat", ProviderRole::Interface)?;
+    let config = LoadedConfig::load(&config_path)?;
+    let chat = config.provider("chat", ProviderRole::Interface)?;
     assert_eq!(chat.version, "9.9.9");
+    assert!(
+        !config
+            .provider("discord-old", ProviderRole::Interface)?
+            .enabled
+    );
     Ok(())
 }
