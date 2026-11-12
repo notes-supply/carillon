@@ -1,11 +1,12 @@
 //! The browser API, under `/api`: what the page reads and sends. Every
 //! route but `sign_in` is behind the browser's token. Core's wire types are
-//! parsed here into the page's own view types and never forwarded.
+//! parsed here into the page's own view types. Only a runtime's own words
+//! for the page, its commands and its activity snapshots, go on as they are.
 
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::DefaultBodyLimit,
     extract::{Path, Query, State},
     http::StatusCode,
@@ -14,19 +15,37 @@ use axum::{
 use carillon_interface::InterfaceError;
 use carillon_protocol::{
     conversations::{ConversationSummary, TranscriptTurn, TurnSource},
-    model::{ActivityPhase, ConversationQuery, JOB_READ_LIMIT, TurnActivity, TurnState},
+    model::{ActivityPhase, CommandCatalog, ConversationQuery, TurnActivity, TurnState},
     turns::{ControlAction, Silence},
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
-    browser::refusal,
+    browser::{Key, refusal},
     files::{self, FileView},
     identity::{ConversationId, EventId, agent_of, canonical},
     markdown::render,
     send,
     serve::Web,
+    site::has_page,
 };
+
+/// What the page is told while Carillon cannot answer it: core is away, as
+/// it is for a moment at every restart, or the provider is stopping.
+pub(crate) const AWAY: &str = "Carillon is not answering right now. Try again in a moment.";
+
+/// What the page is told when core did not do what was asked of it. A
+/// refusal core wrote for an interface keeps its words. Anything else is
+/// one status a page tries again after, and what core said goes to the
+/// log and never to the page: it can name a file of this host.
+pub(crate) fn from_core(failure: InterfaceError) -> InterfaceError {
+    if failure.status.is_client_error() || failure.status == StatusCode::INSUFFICIENT_STORAGE {
+        return failure;
+    }
+    warn!(status = %failure.status, error = %failure.message, "core did not answer for the page");
+    refusal(StatusCode::SERVICE_UNAVAILABLE, AWAY)
+}
 
 pub(crate) fn routes() -> Router<Arc<Web>> {
     Router::new()
@@ -112,7 +131,7 @@ async fn session(State(web): State<Arc<Web>>) -> Json<Session> {
             file_bytes: attachments.max_file_bytes(),
             message_bytes: attachments.max_event_bytes(),
         },
-        custom_site: web.site.is_custom(),
+        custom_site: has_page(&web.site.custom),
     })
 }
 
@@ -168,7 +187,7 @@ async fn conversations(
     State(web): State<Arc<Web>>,
     Query(Before { before }): Query<Before<i64>>,
 ) -> Result<Json<Conversations>, InterfaceError> {
-    let page = web.core.conversations(before).await?;
+    let page = web.core.conversations(before).await.map_err(from_core)?;
     Ok(Json(Conversations {
         conversations: page
             .conversations
@@ -241,7 +260,7 @@ enum Progress {
 }
 
 impl Turn {
-    async fn of(web: &Web, turn: TranscriptTurn) -> Self {
+    async fn of(web: &Web, key: &Key, turn: TranscriptTurn) -> Self {
         let from = match turn.source {
             TurnSource::Message {
                 event_id,
@@ -251,7 +270,7 @@ impl Turn {
             } => {
                 let mut views = Vec::with_capacity(files.len());
                 for file in &files {
-                    views.push(files::view(web, &file.path, &file.name, file.size).await);
+                    views.push(files::view(web, key, &file.path, &file.name, file.size).await);
                 }
                 From::Person {
                     event_id,
@@ -276,7 +295,7 @@ impl Turn {
             (TurnState::Completed, None) => {
                 let mut views = Vec::with_capacity(files.len());
                 for file in &files {
-                    views.push(files::view(web, &file.path, &file.name, file.size).await);
+                    views.push(files::view(web, key, &file.path, &file.name, file.size).await);
                 }
                 Progress::Answered {
                     html: render(&content),
@@ -299,14 +318,17 @@ impl Turn {
 /// conversation's turns, its newest first.
 async fn turns(
     State(web): State<Arc<Web>>,
+    Extension(key): Extension<Key>,
     Path(id): Path<ConversationId>,
     Query(Before { before }): Query<Before<String>>,
 ) -> Result<Json<Turns>, InterfaceError> {
-    let agent_id = agent_of(&web, &id, None).await?;
+    let found = web.core.conversations_of(id.as_str()).await;
+    let agent_id = agent_of(&web, found.map_err(from_core)?, None)?;
     let page = web
         .core
         .transcript(&agent_id, id.as_str(), before.as_deref())
-        .await?;
+        .await
+        .map_err(from_core)?;
     let before = page
         .turns
         .first()
@@ -314,7 +336,7 @@ async fn turns(
         .map(|first| first.turn_id.clone());
     let mut turns = Vec::with_capacity(page.turns.len());
     for turn in page.turns {
-        turns.push(Turn::of(&web, turn).await);
+        turns.push(Turn::of(&web, &key, turn).await);
     }
     Ok(Json(Turns { turns, before }))
 }
@@ -363,16 +385,10 @@ async fn live(
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
         .collect();
-    if named.len() > JOB_READ_LIMIT {
-        return Err(refusal(
-            StatusCode::BAD_REQUEST,
-            &format!("A live read names at most {JOB_READ_LIMIT} turns."),
-        ));
-    }
     let jobs = if named.is_empty() {
         Vec::new()
     } else {
-        web.core.named_jobs(&named).await?
+        web.core.named_jobs(&named).await.map_err(from_core)?
     };
     let turns = jobs.into_iter().filter_map(|job| {
         let began_by_message = job.feedback_target_id.is_some();
@@ -417,7 +433,10 @@ async fn control(
     Path(event_id): Path<EventId>,
     Json(Control { action }): Json<Control>,
 ) -> Result<StatusCode, InterfaceError> {
-    web.core.control(event_id.as_str(), action).await?;
+    web.core
+        .control(event_id.as_str(), action)
+        .await
+        .map_err(from_core)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -427,46 +446,21 @@ struct Chosen {
     agent: Option<String>,
 }
 
-#[derive(Serialize)]
-struct Commands {
-    /// In the runtime's order.
-    commands: Vec<Command>,
-}
-
-/// One of the runtime's own commands. A message invokes it with its name
-/// first in the text and `command=true`.
-#[derive(Serialize)]
-struct Command {
-    name: String,
-    description: Option<String>,
-    /// The arguments it expects, when the runtime says.
-    hint: Option<String>,
-}
-
 /// `GET /api/conversations/{id}/commands[?agent=]`: the commands the
-/// conversation's runtime offers its agent.
+/// conversation's runtime offers its agent, in the runtime's order. A
+/// message invokes one with its name first in the text and `command=true`.
 async fn commands(
     State(web): State<Arc<Web>>,
     Path(id): Path<ConversationId>,
     Query(Chosen { agent }): Query<Chosen>,
-) -> Result<Json<Commands>, InterfaceError> {
+) -> Result<Json<CommandCatalog>, InterfaceError> {
+    let found = web.core.conversations_of(id.as_str()).await;
     let query = ConversationQuery {
-        agent_id: agent_of(&web, &id, agent).await?,
+        agent_id: agent_of(&web, found.map_err(from_core)?, agent)?,
         channel_id: id.as_str().to_owned(),
         audience_id: Some(id.as_str().to_owned()),
     };
-    let catalog = web.core.commands(&query).await?;
-    Ok(Json(Commands {
-        commands: catalog
-            .commands
-            .into_iter()
-            .map(|command| Command {
-                name: command.name,
-                description: command.description,
-                hint: command.hint,
-            })
-            .collect(),
-    }))
+    Ok(Json(web.core.commands(&query).await.map_err(from_core)?))
 }
 
 #[cfg(test)]

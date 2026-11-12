@@ -8,7 +8,10 @@ use axum::{
 };
 
 use super::{encoded, signed, view};
-use crate::fixture::{Answer, Fixture, operator, request};
+use crate::{
+    browser::Key,
+    fixture::{Answer, Fixture, request},
+};
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\npicture bytes";
 const SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
@@ -29,9 +32,13 @@ async fn fixture() -> Result<Fixture> {
     Ok(fixture)
 }
 
+fn key(fixture: &Fixture) -> Result<Key> {
+    Key::read(&fixture.key_file()).context("no browser key")
+}
+
 /// The link the page is given to the stored file `path`.
 async fn link(fixture: &Fixture, path: &str, name: &str) -> Result<String> {
-    let file = serde_json::to_value(view(&fixture.web, path, name, 1).await)?;
+    let file = serde_json::to_value(view(&fixture.web, &key(fixture)?, path, name, 1).await)?;
     Ok(file["url"].as_str().context("no link")?.to_owned())
 }
 
@@ -130,10 +137,7 @@ async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<(
 
     // Signed by the current key, but for a time already past.
     for past in ["1", "1700000000"] {
-        let signature = fixture
-            .web
-            .browser
-            .sign(&signed("capture/0", "chart.png", past));
+        let signature = key(&fixture)?.sign(&signed("capture/0", "chart.png", past));
         let expired = format!("/files/capture/0?name=chart.png&exp={past}&sig={signature}");
         assert_eq!(
             follow(&fixture, &expired).await?.status,
@@ -141,10 +145,8 @@ async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<(
         );
     }
 
-    let signed_out = fixture
-        .send(operator(Method::POST, "/v1/sign-out").body(Body::empty())?)
-        .await?;
-    assert_eq!(signed_out.status, StatusCode::NO_CONTENT);
+    // What `carillon web sign-out` does, and the very next request sees it.
+    Key::replace(&fixture.key_file())?;
     assert_eq!(follow(&fixture, &good).await?.status, StatusCode::FORBIDDEN);
     let renewed = link(&fixture, "capture/0", "chart.png").await?;
     assert_ne!(renewed, good);
@@ -164,7 +166,7 @@ async fn a_signed_path_that_leaves_the_store_names_nothing() -> Result<()> {
         "capture/9",
         "",
     ] {
-        let signature = fixture.web.browser.sign(&signed(path, "x", future));
+        let signature = key(&fixture)?.sign(&signed(path, "x", future));
         let link = format!(
             "/files/{}?name=x&exp={future}&sig={signature}",
             path.split('/').map(encoded).collect::<Vec<_>>().join("/")
@@ -180,7 +182,8 @@ async fn a_signed_path_that_leaves_the_store_names_nothing() -> Result<()> {
             "{path} left the store"
         );
     }
-    let outside = serde_json::to_value(view(&fixture.web, "../secret", "x", 1).await)?;
+    let outside = view(&fixture.web, &key(&fixture)?, "../secret", "x", 1).await;
+    let outside = serde_json::to_value(outside)?;
     assert_eq!(outside["type"], "application/octet-stream");
     Ok(())
 }

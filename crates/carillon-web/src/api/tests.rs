@@ -15,7 +15,10 @@ use carillon_protocol::{
 };
 use serde_json::{Value, json};
 
-use crate::fixture::{Fixture, bearer, conversation};
+use crate::{
+    api::AWAY,
+    fixture::{Fixture, bearer, conversation},
+};
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
 
@@ -95,12 +98,6 @@ async fn conversations_are_listed_as_core_orders_them_with_what_a_poll_compares(
     assert_eq!(
         below.json()?["conversations"].as_array().map(Vec::len),
         Some(1)
-    );
-    assert!(
-        fixture
-            .core()
-            .asked
-            .contains(&"/v1/conversations?before=7".to_owned())
     );
     Ok(())
 }
@@ -286,14 +283,16 @@ async fn a_turn_reads_as_who_began_it_and_how_it_stands_in_plain_terms() -> Resu
     assert_eq!(turns[6]["state"], "queued");
 
     keeps_back(&read.text(), fixture.directory.path())?;
-    let earlier = format!("/api/conversations/{CHAT}/turns?before=t1");
-    assert_eq!(fixture.get(&earlier, &token).await?.status, StatusCode::OK);
-    assert!(
-        fixture
-            .core()
-            .asked
-            .contains(&format!("/v1/conversations/second/{CHAT}?before=t1"))
-    );
+    let earlier = format!("/api/conversations/{CHAT}/turns?before=t3");
+    let earlier = fixture.get(&earlier, &token).await?.json()?;
+    let ids: Vec<&Value> = earlier["turns"]
+        .as_array()
+        .context("no turns")?
+        .iter()
+        .map(|turn| &turn["id"])
+        .collect();
+    assert_eq!(ids, ["t1", "t2"], "the turns before the one named");
+    assert_eq!(earlier["before"], Value::Null, "no older turn exists");
     Ok(())
 }
 
@@ -448,20 +447,15 @@ async fn a_live_read_says_how_each_named_turn_stands_and_what_may_be_done_with_i
 
     let none = fixture.get("/api/turns?ids=", &token).await?;
     assert_eq!(none.json()?, json!({"turns": []}));
+    // Core bounds a read, and its refusal is the page's.
     let many = vec!["t"; 33].join(",");
     let refused = fixture
         .get(&format!("/api/turns?ids={many}"), &token)
         .await?;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        fixture
-            .core()
-            .asked
-            .iter()
-            .filter(|asked| asked.starts_with("/v1/jobs"))
-            .count(),
-        1,
-        "only the read that named turns asked core"
+        refused.json()?,
+        json!({"error": "a job read names at most 32 jobs"})
     );
     Ok(())
 }
@@ -561,9 +555,87 @@ async fn commands_are_those_of_the_conversations_own_agent() -> Result<()> {
     ));
     let unavailable = fixture.get(&commands(""), &token).await?;
     assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        unavailable.json()?,
-        json!({"error": "The agent's runtime is disabled."})
-    );
+    assert_eq!(unavailable.json()?, json!({ "error": AWAY }));
+    Ok(())
+}
+
+/// Each read of the page's, and a control.
+async fn every_call(fixture: &Fixture, token: &str) -> Result<Vec<crate::fixture::Answer>> {
+    let mut answers = Vec::new();
+    for path in [
+        "/api/conversations".to_owned(),
+        format!("/api/conversations/{CHAT}/turns"),
+        format!("/api/conversations/{CHAT}/commands"),
+        "/api/turns?ids=t1".to_owned(),
+    ] {
+        answers.push(fixture.get(&path, token).await?);
+    }
+    let control = "/api/messages/m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa/control";
+    let control = bearer(Method::POST, control, token)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{\"action\":\"stop\"}"))?;
+    answers.push(fixture.send(control).await?);
+    Ok(answers)
+}
+
+#[tokio::test]
+async fn while_core_is_away_the_page_is_told_to_try_again_and_never_what_went_wrong() -> Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // Core is not there at all, as for a moment at every restart.
+    fixture.serving.abort();
+    while !fixture.serving.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    for answer in every_call(&fixture, &token).await? {
+        assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answer.json()?, json!({ "error": AWAY }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn what_core_says_of_its_own_failure_stays_in_the_log() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    fixture
+        .core()
+        .conversations
+        .push(conversation("assistant", CHAT, 1));
+    for (status, said) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "read provider credential /home/owner/.carillon/credentials/runtime-pi.token",
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            "The runtime gave an unusable answer.",
+        ),
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "The runtime did not answer in time.",
+        ),
+    ] {
+        fixture.core().refusal = Some((status, said));
+        let answers = every_call(&fixture, &token).await?;
+        // The fake refuses its command reads and controls.
+        for answer in &answers[2..] {
+            if answer.status == StatusCode::OK {
+                continue;
+            }
+            assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{status}");
+            assert_eq!(answer.json()?, json!({ "error": AWAY }), "{status}");
+        }
+        assert_eq!(answers[2].status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answers[4].status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    // Every request core answers as it does while it shuts down.
+    fixture.core().refusal = None;
+    fixture.core().away = usize::MAX;
+    for answer in every_call(&fixture, &token).await? {
+        assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answer.json()?, json!({ "error": AWAY }));
+    }
     Ok(())
 }

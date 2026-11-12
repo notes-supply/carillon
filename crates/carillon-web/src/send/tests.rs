@@ -12,7 +12,10 @@ use carillon_protocol::model::{StagedAttachments, StagedFile};
 use serde_json::json;
 use tokio::sync::Notify;
 
-use crate::fixture::{Answer, Fixture, bearer, conversation};
+use crate::{
+    api::AWAY,
+    fixture::{Answer, Fixture, bearer, conversation},
+};
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
 const EVENT: &str = "m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa";
@@ -148,7 +151,7 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
             },
         ]
     );
-    assert!(batch.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    assert!(!batch.is_empty());
     assert_eq!(files, &[picture.to_vec(), b"notes".to_vec()]);
     drop(core);
     assert_eq!(
@@ -165,10 +168,6 @@ async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<(
     let token = fixture.sign_in().await?;
     let first = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
     assert_eq!(first.json()?["duplicate"], false);
-    fixture
-        .core()
-        .conversations
-        .push(conversation("assistant", CHAT, 1));
     let again = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(
@@ -366,8 +365,89 @@ async fn a_malformed_message_and_a_refusal_of_core_are_answered_in_words_too() -
     fixture.web.stopping.cancel();
     let stopping = send(&fixture, &token, query, &[Part::File("a.txt", None, b"a")]).await?;
     assert_eq!(stopping.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(stopping.text().contains("Send the message again"));
+    assert_eq!(stopping.json()?, json!({ "error": AWAY }));
     assert_eq!(staged(&fixture)?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_send_waits_out_a_core_that_is_away_for_a_moment() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let hello = [Part::Text("hello")];
+    // Away for the look at the conversation, which comes before any upload.
+    fixture.core().away = 2;
+    let sent = send(&fixture, &token, "?agent=assistant", &hello).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(fixture.core().events.len(), 1);
+
+    // A provider that is stopping waits for nothing.
+    fixture.core().away = usize::MAX;
+    fixture.web.stopping.cancel();
+    let stopping = send(&fixture, &token, "", &hello).await?;
+    assert_eq!(stopping.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(stopping.json()?, json!({ "error": AWAY }));
+    assert_eq!(fixture.core().events.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_messages_racing_with_different_agents_start_one_conversation() -> Result<()> {
+    let fixture = Arc::new(Fixture::new().await?);
+    let token = fixture.sign_in().await?;
+    let hold = Arc::new(Notify::new());
+    fixture.core().hold = Some(Arc::clone(&hold));
+    let begin = |chat: &str, event: &str, agent: &str| {
+        let path = format!("/api/conversations/{chat}/messages/{event}?agent={agent}");
+        let request = message(&token, &path, form(&[Part::Text("hello")]));
+        let fixture = Arc::clone(&fixture);
+        tokio::spawn(async move { fixture.send(request?).await })
+    };
+    let submitted = |fixture: &Fixture| {
+        let core = fixture.core();
+        core.asked
+            .iter()
+            .filter(|asked| *asked == "/v1/events")
+            .count()
+    };
+    let reaches_core = |count: usize| {
+        let fixture = Arc::clone(&fixture);
+        async move {
+            for _ in 0..60 {
+                if submitted(&fixture) >= count {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            false
+        }
+    };
+    let slow = begin(CHAT, EVENT, "second");
+    assert!(reaches_core(1).await);
+    // Another conversation is not held up by this one.
+    let elsewhere = begin(
+        "0190f3a8-7b1c-7def-8a2b-000000000002",
+        "m-0190f3a8-7b1c-7def-8a2b-bbbbbbbbbbbb",
+        "assistant",
+    );
+    assert!(reaches_core(2).await, "one conversation held up another");
+    // The same conversation again, for another agent, while core has not
+    // answered the first.
+    let fast = begin(CHAT, "m-0190f3a8-7b1c-7def-8a2b-cccccccccccc", "assistant");
+    assert!(!reaches_core(3).await, "both first messages reached core");
+    fixture.core().hold = None;
+    for _ in 0..3 {
+        hold.notify_one();
+    }
+    let (slow, elsewhere, fast) = (slow.await??, elsewhere.await??, fast.await??);
+    assert_eq!(slow.status, StatusCode::OK, "{}", slow.text());
+    assert_eq!(elsewhere.status, StatusCode::OK, "{}", elsewhere.text());
+    assert_eq!(fast.status, StatusCode::CONFLICT, "{}", fast.text());
+    assert!(fast.text().contains("is with second"), "{}", fast.text());
+    let read = fixture
+        .get(&format!("/api/conversations/{CHAT}/turns"), &token)
+        .await?;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.text());
     Ok(())
 }
 

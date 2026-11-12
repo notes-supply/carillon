@@ -11,7 +11,6 @@
 use std::{
     path::{Component, Path as FilePath},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -35,7 +34,10 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 
-use crate::{browser::refusal, serve::Web};
+use crate::{
+    browser::{Key, now, refusal},
+    serve::Web,
+};
 
 const DAY: u64 = 24 * 60 * 60;
 const BINARY: &str = "application/octet-stream";
@@ -58,12 +60,6 @@ pub(crate) struct Link {
     name: String,
     exp: u64,
     sig: String,
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }
 
 /// `text` with every byte a URL or a header parameter could misread
@@ -114,9 +110,9 @@ async fn stored(web: &Web, path: &str) -> Option<(File, Option<&'static str>)> {
 /// The stored file `path` as the page shows it, with a link that reads it
 /// until the end of the next day. The link is the same all day, so a
 /// transcript read again does not make the browser fetch its images again.
-pub(crate) async fn view(web: &Web, path: &str, name: &str, size: u64) -> FileView {
+pub(crate) async fn view(web: &Web, key: &Key, path: &str, name: &str, size: u64) -> FileView {
     let expires = ((now() / DAY + 2) * DAY).to_string();
-    let signature = web.browser.sign(&signed(path, name, &expires));
+    let signature = key.sign(&signed(path, name, &expires));
     let segments: Vec<String> = path.split('/').map(encoded).collect();
     FileView {
         name: name.to_owned(),
@@ -141,10 +137,9 @@ pub(crate) async fn file(
     Query(link): Query<Link>,
 ) -> Result<Response, InterfaceError> {
     let expires = link.exp.to_string();
+    let signed = signed(&path, &link.name, &expires);
     if link.exp <= now()
-        || !web
-            .browser
-            .matches(&signed(&path, &link.name, &expires), &link.sig)
+        || !Key::read(&web.browser.key_file).is_some_and(|key| key.matches(&signed, &link.sig))
     {
         return Err(refusal(
             StatusCode::FORBIDDEN,

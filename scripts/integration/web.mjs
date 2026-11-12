@@ -205,8 +205,8 @@ esac
 /** Signs a browser in with the link `carillon web open` prints, which works once. */
 async function signIn() {
   const link = carillon("web", "open", "--print");
-  assert.match(link, new RegExp(`^${origin}/#sign-in=[0-9a-f]{64}$`, "u"));
-  const code = link.split("=")[1];
+  assert.match(link, new RegExp(`^${origin}/#sign-in=\\d+\\.[0-9a-f]{32}\\.[0-9a-f]{64}$`, "u"));
+  const code = link.split("#sign-in=")[1];
   const trade = () =>
     fetch(`${origin}/api/sign-in`, {
       method: "POST",
@@ -375,10 +375,7 @@ try {
 
   for (const listing of [carillon("settings"), carillon("settings", "--interface", "web")])
     assert.match(listing, /^web\n {2}no channels with settings of their own$/mu);
-  assert.match(
-    refused("settings", "--interface", "web", chat),
-    /a web chat takes its agent's\. Change them with `carillon settings --agent`/u,
-  );
+  assert.match(refused("settings", "--interface", "web", chat), /refused with 404/u);
 
   // The provider keeps nothing but its key: a restart loses no conversation
   // and signs no browser out.
@@ -401,11 +398,36 @@ try {
   assert.equal(after.status, 200, JSON.stringify(after.body));
   assert.equal((await settled(token, chat)).at(-1).state, "answered");
 
+  // While core is away the page is told to try again, and a message sent
+  // then is core's once it is back.
+  services("stop", "core");
+  const away = await api(token, "/api/conversations");
+  assert.deepEqual(
+    [away.status, away.body],
+    [503, { error: "Carillon is not answering right now. Try again in a moment." }],
+  );
+  const across = send(token, chat, `m-${randomUUID()}`, "while core was away");
+  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  services("start", "core");
+  assert.equal((await across).status, 200, "a message sent while core was away was lost");
+  assert.equal((await settled(token, chat)).at(-1).from.text, "while core was away");
+
+  // Signing out replaces the key file, which the provider reads again for
+  // the very next request.
   assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
   assert.equal((await api(token, "/api/session")).status, 401);
   assert.equal((await fetch(`${origin}${link}`)).status, 403);
+  // It needs no provider: one that starts afterwards knows no earlier browser.
+  const later = await signIn();
+  services("stop", "web");
+  assert.match(refused("web", "open", "--print"), /web chat is not running at /u);
+  assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
+  services("start", "web");
+  await healthy("web");
+  assert.equal((await api(later, "/api/session")).status, 401);
+  assert.equal((await api(await signIn(), "/api/session")).status, 200);
   process.stdout.write(
-    "web passed: sign-in, files both ways, duplicate and agent refusals, controls, an opened turn, provider restart, drained restart, sign-out\n",
+    "web passed: sign-in, files both ways, duplicate and agent refusals, controls, an opened turn, provider restart, drained restart, a send across a core stop, sign-out with the provider running and stopped\n",
   );
 } catch (error) {
   for (const log of ["core", "runtime-pi", "web"])

@@ -16,6 +16,7 @@
 
 use axum::http::StatusCode;
 use carillon_interface::InterfaceError;
+use carillon_protocol::conversations::ConversationSummary;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -75,18 +76,18 @@ impl TryFrom<String> for EventId {
     }
 }
 
-/// The agent of conversation `id`. Core keys a conversation by its agent
-/// too, so it answers an audience with one conversation for each agent.
-/// The page gives an audience one agent for good: a conversation core has
-/// keeps its agent, naming another is refused, and more than one is
-/// nothing the page made. A conversation core does not have yet takes the
-/// agent `named` with its first message, which must be configured.
-pub(crate) async fn agent_of(
+/// The agent of a conversation, from what core has `found` of its
+/// audience. Core keys a conversation by its agent too, so it answers an
+/// audience with one conversation for each agent. The page gives an
+/// audience one agent for good: a conversation core has keeps its agent,
+/// naming another is refused, and more than one is nothing the page made. A
+/// conversation core does not have yet takes the agent `named` with its
+/// first message, which must be configured.
+pub(crate) fn agent_of(
     web: &Web,
-    id: &ConversationId,
+    mut found: Vec<ConversationSummary>,
     named: Option<String>,
 ) -> Result<String, InterfaceError> {
-    let mut found = web.core.conversations_of(id.as_str()).await?;
     let existing = found.pop().map(|conversation| conversation.agent_id);
     match (existing, named) {
         (Some(_), _) if !found.is_empty() => Err(refusal(

@@ -26,20 +26,20 @@ use carillon_interface::{CoreClient, Staging};
 use carillon_protocol::{
     conversations::{ConversationPage, ConversationSummary, Transcript},
     model::{
-        CommandCatalog, EventReceipt, EventStatus, ExternalEvent, Health, Job, JobPage,
+        CommandCatalog, EventReceipt, ExternalEvent, Health, JOB_READ_LIMIT, Job, JobPage,
         RuntimeCommand, TurnState,
     },
-    settings::{RuntimeSettings, SettingsRequest},
     turns::TurnControl,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, sync::Notify};
+use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::{
-    browser::{self, Browser},
+    browser::{self, Browser, Key, now},
+    send::Sends,
     serve::{Web, router},
     site::Site,
 };
@@ -57,12 +57,14 @@ pub(crate) struct Core {
     /// Every event submitted, with the bytes of each file it staged as core
     /// would read them then.
     pub(crate) events: Vec<(ExternalEvent, Vec<Vec<u8>>)>,
-    /// What the next submissions, controls and settings calls are refused
+    /// What the next submissions, controls and command reads are refused
     /// with.
     pub(crate) refusal: Option<(StatusCode, &'static str)>,
+    /// How many requests yet, of any kind, core answers as it does while
+    /// it shuts down.
+    pub(crate) away: usize,
     pub(crate) jobs: Vec<Job>,
     pub(crate) controls: Vec<(String, TurnControl)>,
-    pub(crate) settings: Vec<SettingsRequest>,
     /// Each request's path and query.
     pub(crate) asked: Vec<String>,
     /// A submission waits here before core reads its files, as a capture
@@ -107,12 +109,19 @@ async fn list(
 async fn transcript(
     State(core): State<Fake>,
     Path((agent, audience)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Json<Transcript> {
     let found = locked(&core)
         .transcripts
         .get(&format!("{agent}/{audience}"))
         .cloned();
-    Json(found.unwrap_or_default())
+    let mut found = found.unwrap_or_default();
+    if let Some(before) = query.get("before") {
+        let earlier = found.turns.iter().position(|turn| turn.turn_id == *before);
+        found.turns.truncate(earlier.unwrap_or_default());
+        found.earlier = false;
+    }
+    Json(found)
 }
 
 async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> Response {
@@ -141,18 +150,31 @@ async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> R
         state: TurnState::Queued,
         duplicate,
     };
+    if let Some(refused) = refused(&core) {
+        return refused;
+    }
+    // A conversation is core's from its first admitted message.
+    if !core
+        .conversations
+        .iter()
+        .any(|listed| listed.agent_id == event.agent_id && listed.audience_id == event.audience_id)
+    {
+        let started = conversation(&event.agent_id, &event.audience_id, 1);
+        core.conversations.push(started);
+    }
     core.events.push((event, staged));
-    refused(&core).unwrap_or_else(|| Json(receipt).into_response())
+    Json(receipt).into_response()
 }
 
-async fn jobs(
-    State(core): State<Fake>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Json<JobPage> {
+async fn jobs(State(core): State<Fake>, Query(query): Query<HashMap<String, String>>) -> Response {
     let tracked: Vec<&str> = query
         .get("tracked")
         .map(|tracked| tracked.split(',').collect())
         .unwrap_or_default();
+    if tracked.len() > JOB_READ_LIMIT {
+        let refused = json!({ "error": "a job read names at most 32 jobs" });
+        return (StatusCode::BAD_REQUEST, Json(refused)).into_response();
+    }
     let jobs = locked(&core).jobs.clone();
     Json(JobPage {
         jobs: jobs
@@ -161,6 +183,7 @@ async fn jobs(
             .collect(),
         next: None,
     })
+    .into_response()
 }
 
 async fn control(
@@ -189,12 +212,6 @@ async fn commands(
     })
 }
 
-async fn settings(State(core): State<Fake>, Json(request): Json<SettingsRequest>) -> Response {
-    let mut core = locked(&core);
-    core.settings.push(request);
-    refused(&core).unwrap_or_else(|| Json(RuntimeSettings::default()).into_response())
-}
-
 /// Core's interface routes, noting each request's path and query.
 fn fake(core: &Fake) -> Router {
     async fn noted(
@@ -202,21 +219,24 @@ fn fake(core: &Fake) -> Router {
         request: Request<Body>,
         next: axum::middleware::Next,
     ) -> Response {
-        locked(&core).asked.push(request.uri().to_string());
+        {
+            let mut core = locked(&core);
+            core.asked.push(request.uri().to_string());
+            if core.away > 0 {
+                core.away -= 1;
+                let shutting_down = json!({ "error": "Carillon is shutting down" });
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(shutting_down)).into_response();
+            }
+        }
         next.run(request).await
     }
     Router::new()
         .route("/v1/conversations", get(list))
         .route("/v1/conversations/{agent}/{audience}", get(transcript))
         .route("/v1/events", post(submit))
-        .route(
-            "/v1/events/{event_id}",
-            get(|| async { Json(EventStatus::Unknown) }),
-        )
         .route("/v1/events/{event_id}/control", post(control))
         .route("/v1/jobs", get(jobs))
         .route("/v1/commands", get(commands))
-        .route("/v1/settings", post(settings))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(core),
             noted,
@@ -228,6 +248,8 @@ pub(crate) struct Fixture {
     pub(crate) directory: TempDir,
     pub(crate) web: Arc<Web>,
     core: Fake,
+    /// The fake of core, serving.
+    pub(crate) serving: JoinHandle<()>,
 }
 
 /// An answer, read whole.
@@ -317,7 +339,12 @@ workspace = "work"
             ..Core::default()
         }));
         let fake = fake(&core);
-        tokio::spawn(async move { axum::serve(listener, fake).await });
+        let serving = tokio::spawn(async move {
+            let _ = axum::serve(listener, fake).await;
+        });
+        let staging = Staging::open(staging)?;
+        // As `carillon web open` leaves it.
+        Key::replace(&browser::key_file(&data_dir, "web"))?;
         let web = Arc::new(Web {
             core: CoreClient::new(
                 format!("http://{address}"),
@@ -330,8 +357,13 @@ workspace = "work"
                 version: "0.0.0".to_owned(),
                 status: "ready".to_owned(),
             },
-            staging: Staging::open(staging)?,
-            browser: Browser::open(browser::key_file(&data_dir, "web"), AUTHORITY.to_owned())?,
+            staging,
+            browser: Browser {
+                key_file: browser::key_file(&data_dir, "web"),
+                authority: AUTHORITY.to_owned(),
+                used: Mutex::default(),
+            },
+            sends: Sends::default(),
             site: Site {
                 custom: data_dir.join("components/web/site"),
                 release,
@@ -344,7 +376,19 @@ workspace = "work"
             directory,
             web,
             core,
+            serving,
         })
+    }
+
+    pub(crate) fn key_file(&self) -> PathBuf {
+        browser::key_file(&self.web.registry.value.data_dir, "web")
+    }
+
+    /// A sign-in code as `carillon web open` makes one, good until
+    /// `expires`.
+    pub(crate) fn code(&self, expires: u64) -> Result<String> {
+        let key = Key::read(&self.key_file()).context("no browser key")?;
+        Ok(key.code(expires))
     }
 
     pub(crate) fn core(&self) -> MutexGuard<'_, Core> {
@@ -375,18 +419,10 @@ workspace = "work"
         })
     }
 
-    /// A token as a browser gets one: a code from the operator's route,
-    /// traded at the page's.
+    /// A token as a browser gets one: a code made with the key, traded at
+    /// the page's route.
     pub(crate) async fn sign_in(&self) -> Result<String> {
-        let issued = self
-            .send(operator(Method::POST, "/v1/sign-in").body(Body::empty())?)
-            .await?;
-        assert_eq!(issued.status, StatusCode::OK);
-        let code = issued.json()?["code"]
-            .as_str()
-            .context("no code")?
-            .to_owned();
-        let traded = self.send(trade(&code)?).await?;
+        let traded = self.send(trade(&self.code(now() + 60)?)?).await?;
         assert_eq!(traded.status, StatusCode::OK);
         Ok(traded.json()?["token"]
             .as_str()

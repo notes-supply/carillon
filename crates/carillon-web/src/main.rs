@@ -4,7 +4,6 @@
 
 mod api;
 mod browser;
-mod channels;
 mod files;
 #[cfg(test)]
 mod fixture;
@@ -15,6 +14,7 @@ mod serve;
 mod site;
 
 use std::{
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Command as Process, ExitCode},
     time::Duration,
@@ -23,13 +23,13 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole},
-    home, loopback,
+    home,
 };
 use carillon_interface::instance;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::{channels::SignInCode, serve::serve};
+use crate::{browser::Key, serve::serve};
 
 /// The `program` of a registry entry this program serves.
 const PROGRAM: &str = "web";
@@ -124,11 +124,27 @@ async fn run() -> Result<()> {
         }
         Command::Open { print, provider } => {
             let loaded = installation()?;
-            open(&loaded, &instance(&loaded, PROGRAM, provider)?, print).await
+            let link = link(&loaded, &instance(&loaded, PROGRAM, provider)?)?;
+            // The code travels in the fragment, which no server or log receives.
+            if !print
+                && Process::new("xdg-open")
+                    .arg(&link)
+                    .status()
+                    .is_ok_and(|status| status.success())
+            {
+                println!("Opened Carillon's web chat in your browser.");
+            } else {
+                println!("{link}");
+            }
+            Ok(())
         }
         Command::SignOut { provider } => {
             let loaded = installation()?;
-            sign_out(&loaded, &instance(&loaded, PROGRAM, provider)?).await
+            let provider = instance(&loaded, PROGRAM, provider)?;
+            let key_file = browser::key_file(&loaded.value.data_dir, &provider);
+            Key::replace(&key_file).with_context(|| format!("replace {}", key_file.display()))?;
+            println!("Every browser is signed out of Carillon's web chat.");
+            Ok(())
         }
     }
 }
@@ -144,50 +160,21 @@ fn release_site() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-/// Posts to the running provider's operator API with the operator's
-/// credential, and answers its URL with what it said.
-async fn operator(
-    loaded: &LoadedConfig,
-    provider: &str,
-    action: &str,
-) -> Result<(String, reqwest::Response)> {
-    let url = &loaded.provider(provider, ProviderRole::Interface)?.url;
-    let response = loopback::client()
-        .timeout(Duration::from_secs(10))
-        .build()?
-        .post(format!("{url}/v1/{action}"))
-        .bearer_auth(loaded.credential("operator")?)
-        .send()
-        .await
-        .with_context(|| format!("the web provider does not answer at {url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("the web provider refused the request ({status}): {body}");
+/// The link that signs a browser in, made from the browser key alone: no
+/// request carries a credential to whatever listens at the provider's
+/// address. The provider is only asked whether it is there.
+fn link(loaded: &LoadedConfig, provider: &str) -> Result<String> {
+    let address = loaded
+        .provider(provider, ProviderRole::Interface)?
+        .listen_address()?;
+    if TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_err() {
+        bail!(
+            "Carillon's web chat is not running at http://{address}. Start Carillon with \
+             `carillon start`."
+        );
     }
-    Ok((url.clone(), response))
-}
-
-async fn open(loaded: &LoadedConfig, provider: &str, print: bool) -> Result<()> {
-    let (url, response) = operator(loaded, provider, "sign-in").await?;
-    let SignInCode { code } = response.json().await?;
-    // The code travels in the fragment, which no server or log receives.
-    let link = format!("{url}/#sign-in={code}");
-    if !print
-        && Process::new("xdg-open")
-            .arg(&link)
-            .status()
-            .is_ok_and(|status| status.success())
-    {
-        println!("Opened Carillon's web chat at {url} in your browser.");
-    } else {
-        println!("{link}");
-    }
-    Ok(())
-}
-
-async fn sign_out(loaded: &LoadedConfig, provider: &str) -> Result<()> {
-    operator(loaded, provider, "sign-out").await?;
-    println!("Every browser is signed out of Carillon's web chat.");
-    Ok(())
+    let key_file = browser::key_file(&loaded.value.data_dir, provider);
+    let code = browser::new_code(&key_file)
+        .with_context(|| format!("read or create {}", key_file.display()))?;
+    Ok(format!("http://{address}/#sign-in={code}"))
 }

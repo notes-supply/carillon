@@ -19,8 +19,8 @@ carillon-protocol = { path = "../carillon-protocol" }
 clap.workspace = true
 hex.workspace = true
 hmac = "0.12.1"
+libc = "0.2.191"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

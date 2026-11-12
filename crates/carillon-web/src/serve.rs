@@ -2,10 +2,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -21,16 +21,17 @@ use carillon_installation::config::{LoadedConfig, attachment_staging, component_
 use carillon_interface::{
     CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
 };
-use carillon_protocol::model::Health;
+use carillon_protocol::{model::Health, settings::Page};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
     api,
-    browser::{self, Browser, refusal},
-    channels, files,
-    site::{self, INDEX, Site},
+    browser::{self, Browser, Key, refusal},
+    files,
+    send::Sends,
+    site::{self, Site},
 };
 
 /// What every handler shares. Nothing here is a conversation's: core keeps
@@ -43,6 +44,7 @@ pub(crate) struct Web {
     pub(crate) health: Health,
     pub(crate) browser: Browser,
     pub(crate) staging: Staging,
+    pub(crate) sends: Sends,
     pub(crate) site: Site,
     /// The installing user's login name, the `user_id` of every message.
     pub(crate) user: String,
@@ -67,7 +69,7 @@ pub(crate) async fn serve(
     else {
         return Ok(());
     };
-    if !site.join(INDEX).is_file() {
+    if !site::has_page(&site) {
         bail!(
             "the web page is not at {}; name its directory with --site",
             site.display()
@@ -76,16 +78,17 @@ pub(crate) async fn serve(
     let data_dir = &config.value.data_dir;
     let staging = Staging::open(attachment_staging(data_dir, &provider.id))?;
     let stopping = CancellationToken::new();
-    let authority = provider
-        .url
-        .strip_prefix("http://")
-        .context("provider URL must use http://")?
-        .to_owned();
     let web = Arc::new(Web {
         core,
         health,
-        browser: Browser::open(browser::key_file(data_dir, &provider.id), authority)?,
+        browser: Browser {
+            key_file: browser::key_file(data_dir, &provider.id),
+            // A browser names the address in one spelling whatever the registry's.
+            authority: listener.local_addr()?.to_string(),
+            used: Mutex::default(),
+        },
         staging,
+        sends: Sends::default(),
         site: Site {
             custom: component_directory(data_dir, &provider.id).join("site"),
             release: site,
@@ -98,7 +101,7 @@ pub(crate) async fn serve(
     });
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    info!(url = %provider.url, "web interface provider ready");
+    info!(url = %web.browser.origin(), "web interface provider ready");
     axum::serve(listener, router(web))
         .with_graceful_shutdown(async move {
             tokio::select! {
@@ -121,7 +124,10 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
     let api = api::routes()
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(from_fn_with_state(Arc::clone(&web), browser_only));
-    let operator = channels::routes()
+    // `carillon settings` asks every interface for its channels' pages. A
+    // web chat has none: it runs its agent's model.
+    let operator = Router::new()
+        .route("/channels", get(|| async { Json(Vec::<Page>::new()) }))
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(from_fn_with_state(Arc::clone(&web), operator_only));
     Router::new()
@@ -171,17 +177,21 @@ async fn gate(State(web): State<Arc<Web>>, request: Request, next: Next) -> Resp
     response
 }
 
+/// Lets a request with the browser's token through, with the key that
+/// token was checked against: what the answer signs, it signs with that key.
 async fn browser_only(
     State(web): State<Arc<Web>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, InterfaceError> {
-    if !web.browser.authenticates(bearer(request.headers())) {
+    let key = Key::read(&web.browser.key_file);
+    let Some(key) = key.filter(|key| key.authenticates(bearer(request.headers()))) else {
         return Err(refusal(
             StatusCode::UNAUTHORIZED,
             "This browser is not signed in. Run `carillon web open`.",
         ));
-    }
+    };
+    request.extensions_mut().insert(key);
     Ok(next.run(request).await)
 }
 

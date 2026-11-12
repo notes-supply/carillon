@@ -8,17 +8,18 @@
 //! no other origin can read and no browser attaches on its own.
 //!
 //! The root secret is the browser key, a file only the installing user
-//! reads. The token and every file link are HMACs of it, so replacing the
-//! key voids them all and the key itself never leaves this process.
+//! reads. The token, a sign-in code and every file link are HMACs of it.
+//! The provider reads the file for each request that presents one and keeps
+//! no key between requests, so whoever replaces the file voids them all at
+//! once, and the commands that sign in and out need not ask the provider.
 
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    sync::{Mutex, PoisonError},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context as _, Result};
 use axum::http::{
     HeaderMap, HeaderValue, StatusCode,
     header::{HOST, ORIGIN},
@@ -30,36 +31,24 @@ use carillon_installation::{
 use carillon_interface::InterfaceError;
 use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
-use tokio::time::Instant;
+use uuid::Uuid;
 
-/// How long `carillon web open`'s link works.
-const CODE_LIFETIME: Duration = Duration::from_mins(2);
+/// How many seconds `carillon web open`'s link works.
+const CODE_LIFETIME: u64 = 2 * 60;
 
 pub(crate) struct Browser {
-    key_file: PathBuf,
-    /// The `host:port` of the provider's registry URL, the only name a
-    /// request may give this provider.
-    authority: String,
-    state: Mutex<State>,
-}
-
-struct State {
-    key: String,
-    /// Sign-in codes not yet used, each with when it stops working.
-    codes: Vec<(String, Instant)>,
+    pub(crate) key_file: PathBuf,
+    /// The `host:port` the provider listens on, as a browser writes it: the
+    /// only name a request may give this provider.
+    pub(crate) authority: String,
+    /// The sign-in codes traded already, each by the name it carries, until
+    /// it expires.
+    pub(crate) used: Mutex<Vec<(String, u64)>>,
 }
 
 /// Where provider `provider_id` keeps its browser key.
 pub(crate) fn key_file(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("browser.key")
-}
-
-/// Writes a new browser key, which no token or link made with another
-/// matches.
-pub(crate) fn replace_key(key_file: &Path) -> io::Result<String> {
-    let key = new_token();
-    atomic_write(key_file, key.as_bytes(), 0o600)?;
-    Ok(key)
 }
 
 pub(crate) fn refusal(status: StatusCode, message: &str) -> InterfaceError {
@@ -69,34 +58,89 @@ pub(crate) fn refusal(status: StatusCode, message: &str) -> InterfaceError {
     }
 }
 
-impl Browser {
-    /// Reads the key, creating it when there is none, in a directory that
-    /// exists.
-    pub(crate) fn open(key_file: PathBuf, authority: String) -> Result<Self> {
-        let key = match std::fs::read_to_string(&key_file) {
-            Ok(key) if !key.trim().is_empty() => key.trim().to_owned(),
-            Ok(_) => replace_key(&key_file)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => replace_key(&key_file)?,
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", key_file.display()));
-            }
-        };
-        Ok(Self {
-            key_file,
-            authority,
-            state: Mutex::new(State {
-                key,
-                codes: Vec::new(),
-            }),
-        })
+/// Unix seconds.
+pub(crate) fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// The browser key as one request read it.
+#[derive(Clone)]
+pub(crate) struct Key(String);
+
+impl Key {
+    /// The key in `key_file`. A file that is missing or empty holds none,
+    /// and then nothing is signed in: an empty key would sign for anyone.
+    pub(crate) fn read(key_file: &Path) -> Option<Self> {
+        let key = std::fs::read_to_string(key_file).ok()?;
+        Some(key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .map(Self)
     }
 
+    /// Writes a new key, which no token, code or link made with another
+    /// matches, in the provider's directory, which its first start made.
+    pub(crate) fn replace(key_file: &Path) -> io::Result<Self> {
+        let key = new_token();
+        atomic_write(key_file, key.as_bytes(), 0o600)?;
+        Ok(Self(key))
+    }
+
+    /// The signature of `parts`. Each part is preceded by its length, so no
+    /// two lists of parts sign alike, and the first says what is signed.
+    pub(crate) fn sign(&self, parts: &[&str]) -> String {
+        hex::encode(self.mac(parts).finalize().into_bytes())
+    }
+
+    pub(crate) fn matches(&self, parts: &[&str], signature: &str) -> bool {
+        hex::decode(signature)
+            .is_ok_and(|signature| self.mac(parts).verify_slice(&signature).is_ok())
+    }
+
+    fn mac(&self, parts: &[&str]) -> Hmac<Sha256> {
+        let mut mac = match Hmac::<Sha256>::new_from_slice(self.0.as_bytes()) {
+            Ok(mac) => mac,
+            Err(error) => unreachable!("HMAC takes a key of any length: {error}"),
+        };
+        for part in parts {
+            mac.update(&(part.len() as u64).to_be_bytes());
+            mac.update(part.as_bytes());
+        }
+        mac
+    }
+
+    /// The token a signed-in browser sends.
+    pub(crate) fn token(&self) -> String {
+        self.sign(&["token"])
+    }
+
+    pub(crate) fn authenticates(&self, token: &str) -> bool {
+        self.matches(&["token"], token)
+    }
+
+    /// A code that signs one browser in, once, until `expires`: that time,
+    /// a name of its own, and this key's signature of both.
+    pub(crate) fn code(&self, expires: u64) -> String {
+        let (expires, name) = (expires.to_string(), Uuid::now_v7().simple().to_string());
+        let signature = self.sign(&["code", &expires, &name]);
+        format!("{expires}.{name}.{signature}")
+    }
+}
+
+/// The code of `carillon web open`'s link, made with the key in `key_file`,
+/// which gets one when it has none.
+pub(crate) fn new_code(key_file: &Path) -> io::Result<String> {
+    let key = match Key::read(key_file) {
+        Some(key) => key,
+        None => Key::replace(key_file)?,
+    };
+    Ok(key.code(now() + CODE_LIFETIME))
+}
+
+impl Browser {
     pub(crate) fn origin(&self) -> String {
         format!("http://{}", self.authority)
-    }
-
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What every request passes before anything reads it. `Host` must name
@@ -127,71 +171,26 @@ impl Browser {
         Ok(())
     }
 
-    /// A code `carillon web open` puts in its link: it signs one browser
-    /// in, once, within [`CODE_LIFETIME`].
-    pub(crate) fn issue_code(&self) -> String {
-        let code = new_token();
-        let now = Instant::now();
-        let mut state = self.state();
-        state.codes.retain(|(_, until)| *until > now);
-        state.codes.push((code.clone(), now + CODE_LIFETIME));
-        code
-    }
-
-    /// The browser's token for a code still good, which the code then no
-    /// longer is.
+    /// The browser's token for `code`, when the key as it is now signed the
+    /// code, it has not expired and no request traded it before.
     pub(crate) fn redeem(&self, code: &str) -> Option<String> {
-        let now = Instant::now();
-        let mut state = self.state();
-        state.codes.retain(|(_, until)| *until > now);
-        let index = state.codes.iter().position(|(issued, _)| issued == code)?;
-        state.codes.swap_remove(index);
-        Some(hex::encode(
-            mac(&state.key, &["token"]).finalize().into_bytes(),
-        ))
+        let key = Key::read(&self.key_file)?;
+        let [expires, name, signature] = code.split('.').collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let now = now();
+        let until = expires.parse().ok().filter(|until: &u64| *until > now)?;
+        if !key.matches(&["code", expires, name], signature) {
+            return None;
+        }
+        // The signature covers the name letter for letter, so one code has
+        // one name however the rest of it is respelled.
+        let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+        used.retain(|(_, until)| *until > now);
+        if used.iter().any(|(spent, _)| spent == name) {
+            return None;
+        }
+        used.push((name.to_owned(), until));
+        Some(key.token())
     }
-
-    /// Whether `token` is the one the current key gives.
-    pub(crate) fn authenticates(&self, token: &str) -> bool {
-        self.matches(&["token"], token)
-    }
-
-    /// Replaces the key: every browser is signed out, every file link is
-    /// void and no code waits.
-    pub(crate) fn sign_out(&self) -> Result<()> {
-        // Held across the write, so no request is answered with the old key
-        // once this returns.
-        let mut state = self.state();
-        state.key = replace_key(&self.key_file)
-            .with_context(|| format!("replace {}", self.key_file.display()))?;
-        state.codes.clear();
-        Ok(())
-    }
-
-    /// The signature that lets a link read what `parts` name.
-    pub(crate) fn sign(&self, parts: &[&str]) -> String {
-        hex::encode(mac(&self.state().key, parts).finalize().into_bytes())
-    }
-
-    /// Whether `signature` is the current key's for `parts`.
-    pub(crate) fn matches(&self, parts: &[&str], signature: &str) -> bool {
-        hex::decode(signature).is_ok_and(|signature| {
-            mac(&self.state().key, parts)
-                .verify_slice(&signature)
-                .is_ok()
-        })
-    }
-}
-
-/// Each part is preceded by its length, so no two lists of parts sign alike.
-fn mac(key: &str, parts: &[&str]) -> Hmac<Sha256> {
-    let mut mac = match Hmac::<Sha256>::new_from_slice(key.as_bytes()) {
-        Ok(mac) => mac,
-        Err(error) => unreachable!("HMAC takes a key of any length: {error}"),
-    };
-    for part in parts {
-        mac.update(&(part.len() as u64).to_be_bytes());
-        mac.update(part.as_bytes());
-    }
-    mac
 }
