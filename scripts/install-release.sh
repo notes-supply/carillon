@@ -2,19 +2,20 @@
 set -eu
 umask 077
 
+# Setup without `--interface web` or the Discord options asks for everything
+# at the terminal (`carillon setup`); with either it writes the registry, and
+# Discord's settings from its options, and asks nothing. An update publishes
+# the application and service definitions, expects the providers it bundles
+# in carillon.toml and creates the core database an installation lacks; it
+# rewrites no other configuration, credentials or state.
 usage() {
   echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
-  echo "       install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
+  echo "       install.sh --interface web [--base-port PORT] [--workspace PATH]    (the web chat alone; asks nothing)" >&2
+  echo "       install.sh [--interface web] --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
   echo "       install.sh --update [--check]    (run by 'carillon update'; checks the installation first, and --check changes nothing)" >&2
   exit 2
 }
 
-# Setup without the Discord options asks for everything at the terminal
-# (`carillon setup`); with them it writes the registry and Discord settings
-# from these arguments and asks nothing. An update publishes the application
-# and service definitions, expects the providers it bundles in carillon.toml
-# and creates the core database an installation lacks; it rewrites no other
-# configuration, credentials or state.
 MODE=setup
 CHECK=0
 case "$#:$*" in
@@ -28,6 +29,7 @@ ROUTES=
 BASE_PORT=43800
 WORKSPACE=
 RUNTIME=
+WEB=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --guild-id) [ "$#" -ge 2 ] || usage; GUILD_ID=$2; shift 2 ;;
@@ -36,6 +38,7 @@ while [ "$#" -gt 0 ]; do
     --route) [ "$#" -ge 2 ] || usage; ROUTES="$ROUTES --route $2"; shift 2 ;;
     --base-port) [ "$#" -ge 2 ] || usage; BASE_PORT=$2; shift 2 ;;
     --workspace) [ "$#" -ge 2 ] || usage; WORKSPACE=$2; shift 2 ;;
+    --interface) [ "${2:-}" = web ] || usage; WEB=1; shift 2 ;;
     --runtime)
       [ "$#" -ge 2 ] || usage
       case "$2" in pi | t3) RUNTIME=$2 ;; *) usage ;; esac
@@ -44,14 +47,17 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 GUIDED=0
+DISCORD=$GUILD_ID$BOT_USER_ID$USER_IDS$ROUTES
 if [ "$MODE" = setup ]; then
-  if [ -z "$GUILD_ID$BOT_USER_ID$USER_IDS$ROUTES" ]; then
+  if [ -z "$DISCORD$WEB" ]; then
     GUIDED=1
   else
-    [ -n "$GUILD_ID" ] || usage
-    [ -n "$BOT_USER_ID" ] || usage
-    [ -n "$USER_IDS" ] || usage
-    [ -n "$ROUTES" ] || usage
+    if [ -n "$DISCORD" ]; then
+      [ -n "$GUILD_ID" ] || usage
+      [ -n "$BOT_USER_ID" ] || usage
+      [ -n "$USER_IDS" ] || usage
+      [ -n "$ROUTES" ] || usage
+    fi
     # Without questions, Carillon's assistant runs on Pi; T3 is set up guided.
     [ -z "$RUNTIME" ] || usage
     WORKSPACE=${WORKSPACE:-${HOME:-}}
@@ -156,9 +162,8 @@ if [ "$MODE" = setup ] && [ -f "$UNIT_DIR/carillon-core.service" ] &&
   grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" \
     "$UNIT_DIR/carillon-core.service"
 then
-  states=$(systemctl --user show --property=ActiveState --value carillon.target \
-    carillon-core.service carillon-discord.service carillon-runtime-pi.service \
-    carillon-runtime-t3.service) || {
+  # Every unit this release ships, by its file's name.
+  states=$(cd "$SOURCE/systemd" && systemctl --user show --property=ActiveState --value -- *) || {
     echo "cannot tell whether Carillon at $CARILLON_HOME is running; nothing was changed" >&2
     exit 1
   }
@@ -202,11 +207,13 @@ if [ "$GUIDED" -eq 1 ]; then
 fi
 # Unattended setup keeps an installation's registry, credentials and durable
 # state: init creates a new installation, or starts one carried without state
-# fresh on this release. Its options name Discord, so Discord is the
-# interface it registers. Only the Discord provider's own settings file is
+# fresh on this release. Only the Discord provider's own settings file is
 # (re)written from the arguments.
 if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
-  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --interface discord \
+  set --
+  [ -z "$WEB" ] || set -- "$@" --interface web
+  [ -z "$DISCORD" ] || set -- "$@" --interface discord
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init "$@" \
     --workspace "$WORKSPACE" --base-port "$BASE_PORT"
 fi
 # Serialize maintenance with `carillon update`, which holds this lock itself
@@ -218,7 +225,7 @@ if [ "${CARILLON_MAINTENANCE_LOCK:-}" != "$CARILLON_HOME" ]; then
   CARILLON_MAINTENANCE_LOCK=$CARILLON_HOME
   export CARILLON_MAINTENANCE_LOCK
 fi
-if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
+if [ "$MODE" = setup ] && [ -n "$DISCORD" ]; then
   # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
   # shellcheck disable=SC2086
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord setup --provider discord-private \
@@ -276,13 +283,13 @@ sync -f -- "$CARILLON_HOME"
 # application expects it.
 [ "$MODE" = setup ] || "$APP/bin/carillon" --home "$CARILLON_HOME" init >/dev/null
 if [ "$MODE" = setup ]; then
-  # Guided setup names its own token file; otherwise the token goes here by hand.
-  [ "$GUIDED" -eq 1 ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
+  # Discord's unattended options name no token, which goes here by hand.
+  [ -z "$DISCORD" ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
     install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
   chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
     "$CARILLON_HOME/logs"
-  chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \
-    "$CARILLON_HOME/credentials"/*.token
+  find "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers" "$CARILLON_HOME/credentials" \
+    -maxdepth 1 -type f \( -name '*.toml' -o -name '*.token' \) -exec chmod 0600 {} +
 fi
 
 # Retain the previous application until registration succeeds. On any failure,
@@ -340,16 +347,25 @@ Carillon is installed at $CARILLON_HOME and running as $OWNER's user services.
 Everyday commands: $CARILLON status, $CARILLON logs, $CARILLON restart.
 To start it at boot without logging in, an administrator can run: loginctl enable-linger $OWNER
 EOF
+  ! grep -Fqx 'program = "web"' "$CARILLON_HOME/carillon.toml" ||
+    echo "Open the web chat in your browser with: $CARILLON web open"
   exit 0
 fi
+echo "Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager."
+steps=0
+step() {
+  steps=$((steps + 1))
+  printf '%d. %s\n' "$steps" "$1"
+}
+[ -z "$DISCORD" ] ||
+  step "Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600)."
+step "Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve"
+echo "   In Pi, run /login, then leave with Ctrl+D."
+step "Start deliberately with: $CARILLON start"
+echo "   Then choose the assistant's model: $CARILLON settings --agent assistant model=PROVIDER/MODEL"
+[ -z "$WEB" ] || step "Open the web chat in your browser with: $CARILLON web open"
+step "Inspect with: $CARILLON status   and   $CARILLON logs"
 cat <<EOF
-Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
-1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
-2. Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
-   In Pi, run /login, then leave with Ctrl+D.
-3. Start deliberately with: $CARILLON start
-   Then choose the assistant's model: $CARILLON settings --agent assistant model=PROVIDER/MODEL
-4. Inspect with: $CARILLON status   and   $CARILLON logs
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER
 EOF

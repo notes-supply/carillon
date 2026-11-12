@@ -85,7 +85,9 @@ done
 # rendered definitions, modes and recovery copies before the first rename.
 sync -f -- "$UNIT_STAGE"
 PUBLICATION_STARTED=1
-for template in "$SOURCE"/systemd/*; do
+# The target last, in any locale's order of names: it never wants a service
+# whose definition a failed publication left unpublished.
+for template in "$SOURCE"/systemd/*.service "$SOURCE"/systemd/carillon.target; do
   name=$(basename "$template")
   mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name"
 done

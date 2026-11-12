@@ -328,7 +328,8 @@ mod tests {
              under id = \"discord-private\": program = \"discord\"\n     \
              under id = \"runtime-t3\": program = \"runtime-t3\"\n     \
              under id = \"chat\": name the program that serves it. Those this release bundles: \
-             program = \"discord\", program = \"runtime-pi\", program = \"runtime-t3\"\n  \
+             program = \"web\", program = \"discord\", program = \"runtime-pi\", \
+             program = \"runtime-t3\"\n  \
              4. Set core's database and the files it kept aside, in a new folder nothing \
              reads:\n     \
              mkdir -m 700 {quoted}/core-before-{RELEASE_VERSION}' && \

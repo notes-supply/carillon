@@ -30,6 +30,8 @@ TEST_ROOT_T3_OUT=$(mktemp)
 for artifact in \
   bin/carillon \
   bin/carillon-discord \
+  bin/carillon-web \
+  lib/web/index.html \
   lib/carillon_discord_module.wasm \
   lib/examples/card-colours.wasm \
   lib/carillon-discord-SKILL.md \
@@ -47,19 +49,23 @@ for artifact in \
   systemd/carillon-core.service \
   systemd/carillon-discord.service \
   systemd/carillon-runtime-pi.service \
-  systemd/carillon-runtime-t3.service
+  systemd/carillon-runtime-t3.service \
+  systemd/carillon-web.service
 do
   [ -e "$RELEASE/$artifact" ] || { printf 'release artifact missing: %s\n' "$artifact" >&2; exit 1; }
 done
 # Pi's command line is a mode of the runtime executable; nothing else is Pi.
 [ ! -e "$RELEASE/bin/pi" ] || { printf '%s\n' "the release ships a second Pi executable" >&2; exit 1; }
-[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 5 ] || {
-  printf '%s\n' "release must contain exactly the target and four service units" >&2
+[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 6 ] || {
+  printf '%s\n' "release must contain exactly the target and five service units" >&2
   exit 1
 }
-# The target wants both bundled runtimes; the one an installation did not
-# choose finds itself absent from the registry and ends at once.
-grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service' "$RELEASE/systemd/carillon.target" >/dev/null
+grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service' \
+  "$RELEASE/systemd/carillon.target" >/dev/null
+diff -r "$ROOT/crates/carillon-web/site" "$RELEASE/lib/web"
+find "$ROOT/crates/carillon-web/site" -maxdepth 1 -name '*-OFL.txt' | while read -r notice; do
+  cmp "$notice" "$RELEASE/licenses/${notice##*/}"
+done
 # The T3 executable is standalone: it starts without a source checkout and
 # fails closed on its arguments before touching anything.
 if "$RELEASE/bin/carillon-runtime-t3" --provider runtime-t3 >"$TEST_ROOT_T3_OUT" 2>&1; then
@@ -177,8 +183,8 @@ install_release() {
 
 verify_units() {
   verify_dir=$1
-  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 5 ] || {
-    printf '%s\n' "installation must contain exactly the target and four service units" >&2
+  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 6 ] || {
+    printf '%s\n' "installation must contain exactly the target and five service units" >&2
     exit 1
   }
   systemd-analyze verify "$verify_dir"/carillon.target "$verify_dir"/carillon-*.service
@@ -217,6 +223,7 @@ done
 
 sh "$ROOT/scripts/test-maintenance.sh" "$RELEASE"
 sh "$ROOT/scripts/test-operations.sh" "$RELEASE"
+sh "$ROOT/scripts/test-web.sh" "$RELEASE"
 
 UNRELATED_HOME=$TEST_ROOT/unrelated-home
 UNRELATED_WORKSPACE=$UNRELATED_HOME/workspace
@@ -428,6 +435,8 @@ env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" settings --agent assistant mo
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
+grep -F -- "\"$CARILLON_HOME/app/bin/carillon-web\" serve" \
+  "$XDG_CONFIG_HOME/systemd/user/carillon-web.service" >/dev/null
 grep -F -- "--module \"$CARILLON_HOME/app/lib/carillon_discord_module.wasm\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
 # The bot token is the one the provider's settings name, not the unit's.

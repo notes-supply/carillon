@@ -34,7 +34,7 @@ use super::{
     http::{Applied, CoreDatabase, RegistryStatus, check, serve},
     operations::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
-        operator_url, print_health, registry_status, status, wait_until_healthy,
+        operator_url, print_health, registry_status, status, status_if_running, wait_until_healthy,
     },
     settings::{Named, settings},
     setup::{Options as SetupOptions, init, setup},
@@ -106,15 +106,22 @@ enum Command {
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// An interface to register: `discord`. A new installation needs
-        /// one; repeat it for more.
+        /// An interface to register: `web` or `discord`. A new installation
+        /// needs one; repeat it for both.
         #[arg(long, value_parser = interface)]
         interface: Vec<Bundled>,
     },
     /// Set up an installation at the terminal: the runtimes, Pi for
     /// Carillon's assistant and T3 for T3 Code channels, then each
-    /// interface. A rerun keeps what is already set up when asked to.
-    Setup(SetupOptions),
+    /// interface. A rerun keeps what is already set up when asked to. Told
+    /// only `--interface`, a rerun adds that interface, asks about nothing
+    /// else, and restarts a running Carillon once core has drained.
+    Setup {
+        #[command(flatten)]
+        options: SetupOptions,
+        #[command(flatten)]
+        wait: Wait,
+    },
     /// Run the core service with an explicit registry.
     Core {
         #[arg(long)]
@@ -281,7 +288,7 @@ pub(crate) async fn run() -> Result<()> {
             "{}",
             init(&home()?, workspace.as_deref(), base_port, &interface)?.display()
         ),
-        Command::Setup(options) => setup(&home()?, options, &mut Terminal)?,
+        Command::Setup { options, wait } => set_up(&home()?, options, &wait).await?,
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
@@ -446,6 +453,74 @@ async fn restart(home: &Path, config: &LoadedConfig, timeout: Duration, force: b
         stop(&services, hold).await?;
     }
     services.control(Action::Start).await
+}
+
+/// Runs setup, then has a running Carillon serve the interfaces it was told
+/// to add to an installation that existed. Core takes a new provider only
+/// when it starts.
+async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
+    let added = if home.join("carillon.toml").exists() {
+        options.interfaces.clone()
+    } else {
+        Vec::new()
+    };
+    setup(home, options, &mut Terminal)?;
+    if added.is_empty() {
+        return Ok(());
+    }
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let enabled = |interface: &Bundled| {
+        let mut entries = config.value.providers.iter();
+        entries.any(|entry| entry.id == interface.id() && entry.enabled)
+    };
+    let (added, disabled): (Vec<Bundled>, Vec<Bundled>) = added.into_iter().partition(enabled);
+    for id in disabled.iter().map(|interface| interface.id()) {
+        println!(
+            "{id} is disabled in carillon.toml, so Carillon does not serve it and was not \
+             restarted. `carillon provider {id} enable` enables it, and `carillon restart` then \
+             starts it."
+        );
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = added.iter().map(|interface| interface.id()).collect();
+    let ids = ids.join(", ");
+    let report = status_if_running(&config).await.with_context(|| {
+        format!(
+            "{ids} is in carillon.toml, but core at {} did not say what it serves; `carillon \
+             restart` applies it",
+            config.value.core.listen
+        )
+    })?;
+    let Some(report) = report else {
+        println!("Carillon is not running. `carillon start` starts it with {ids}.");
+        return Ok(());
+    };
+    // Core reports an entry its own registry has disabled, and does not serve it.
+    let serves = |interface: &Bundled| {
+        let mut reported = report.providers.iter();
+        reported.any(|health| health.id == interface.id() && health.status != "disabled")
+    };
+    if added.iter().all(serves) {
+        println!("Carillon already serves {ids}, so it was not restarted.");
+        return Ok(());
+    }
+    println!(
+        "Carillon is running and takes a new interface only when it starts, so it restarts now. \
+         It stops once nothing would be lost, as `carillon restart` does, and work that is \
+         running carries on afterwards."
+    );
+    restart(home, &config, wait.timeout(), false)
+        .await
+        .with_context(|| {
+            format!("{ids} is in carillon.toml and starts at the next `carillon restart`")
+        })?;
+    report_running(&config, wait).await?;
+    if added.contains(&Bundled::Web) {
+        println!("`carillon web open` opens the web chat in your browser.");
+    }
+    Ok(())
 }
 
 async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {

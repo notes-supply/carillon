@@ -16,7 +16,10 @@ cp "$ROOT/scripts/carillon-pi.sh" "$ROOT/scripts/register-services.sh" \
   "$ROOT/scripts/install-release.sh" "$ROOT/scripts/uninstall-release.sh" \
   "$ROOT/scripts/npm-notices.mjs" "$FIXTURE/scripts/"
 mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discord-pi/skill" \
-  "$FIXTURE/packages/runtime-pi"
+  "$FIXTURE/packages/runtime-pi" "$FIXTURE/crates/carillon-web/site"
+printf page >"$FIXTURE/crates/carillon-web/site/index.html"
+printf 'typeface licence' >"$FIXTURE/crates/carillon-web/site/typeface-OFL.txt"
+printf 'not a licence' >"$FIXTURE/crates/carillon-web/site/robots.txt"
 cp "$ROOT/LICENSE" "$FIXTURE/"
 cp "$ROOT/licenses/MIT.txt" "$ROOT/licenses/bun.md" "$FIXTURE/licenses/"
 # One npm dependency with a licence file, one without, as pnpm lists them.
@@ -79,7 +82,7 @@ case "${0##*/}" in
     else
       [ "$target" = "$TEST_TARGET" ]
       mkdir -p "target/$target/release"
-      for binary in carillon carillon-discord; do
+      for binary in carillon carillon-discord carillon-web; do
         printf '%s\n' "$target" >"target/$target/release/$binary"
       done
     fi
@@ -112,7 +115,7 @@ for arch in x86_64 aarch64; do
     TEST_BUN_TARGET="bun-linux-$bun_arch" TRACE="$TEST_ROOT/$arch" \
     CARGO_BUILD_TARGET=conflicting-target "$FIXTURE/scripts/package-release.sh")
   [ "$archive" = "$FIXTURE/dist/carillon-1.2.3-linux-$arch.tar.gz" ]
-  for binary in carillon carillon-discord; do
+  for binary in carillon carillon-discord carillon-web; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "$target" ]
   done
   for binary in carillon-runtime-pi carillon-runtime-t3; do
@@ -133,9 +136,16 @@ for arch in x86_64 aarch64; do
   grep -F 'without-file 2.0.0 (MIT)' "$TEST_ROOT/$arch.npm" >/dev/null
   grep -F 'declares MIT, by Someone; the standard text is licenses/MIT.txt' "$TEST_ROOT/$arch.npm" >/dev/null
   [ "$(tar -xOf "$archive" carillon-1.2.3/bin/photon_rs_bg.wasm)" = photon ]
+  if tar -tzf "$archive" carillon-1.2.3/licenses/robots.txt >/dev/null 2>&1; then
+    echo 'a text file of the page that is no licence is among the notices' >&2
+    exit 1
+  fi
+  tar -tzf "$archive" carillon-1.2.3/lib/web/robots.txt >/dev/null
   # The manifest lists exactly the shipped files, marking what must be executable.
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
-  for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
+  for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-web' \
+    'r lib/web/index.html' 'r lib/web/typeface-OFL.txt' 'r licenses/typeface-OFL.txt' \
+    'x bin/carillon-register-services' \
     'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
     'r lib/carillon-discord-SKILL.md' 'r lib/pi-skills/conversation-history/SKILL.md' \
     'r lib/pi-skills/conversation-history/views.sql' 'r lib/pi-skills/carillon-hooks/SKILL.md' \

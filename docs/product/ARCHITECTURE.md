@@ -98,7 +98,8 @@ an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 seconds meanwhile. Any other answer interrupts the turn; nothing ran, so its
 notice is the runtime's explanation alone. The runtime later settles the turn with
 its own credential: answered, failed with an explanation it judged safe to
-show, steered into the turn running before it, or stopped. Steered and
+show, steered into an answer that another message carries, on Pi the newest
+of those that joined it, or stopped. Steered and
 stopped deliver a silence the interface shows on the message instead of a
 reply. The outcome and its delivery commit together, once; the same outcome
 again is recorded, another is refused. A turn still queued is settled too,
@@ -207,8 +208,10 @@ session so the next start can resume it and have Discord replay what it
 missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 
 The web provider (`carillon-web`) serves a chat page to the installing
-user's own browser on the same machine. No release registers it yet: a
-registry entry with `program = "web"` and `delivery = "retained"` runs it.
+user's own browser on the same machine. Setup registers it as `web`, with
+`delivery = "retained"` and `max_upload_mib = 1024`. It refuses to serve an
+entry with any other delivery, whose answers would wait for a claim it
+never makes.
 It keeps no conversation. The page is plain files with no build step, read
 from disk on each request. It lists conversations and reads turns
 through the provider from core's history, polls the list while it is
@@ -432,11 +435,13 @@ and every entry has one. A file without it is refused with the lines to
 add, and nothing migrates it. `Crossing` in `carillon-installation` owns
 that refusal's text and the one for a core database in another format: the
 steps that cross to this release in place. `Bundled` in `carillon-installation` is the
-one list of the programs a release ships: `discord`, `runtime-pi` and
+one list of the programs a release ships: `web`, `discord`, `runtime-pi` and
 `runtime-t3`. It owns each one's standard ID, role, version and port above
-core's (Discord +1, Pi +2, T3 +3, with +4 kept for the web interface).
-Initialization, setup, version stamping on update and Discord's choice of
-its instance all read it. Pi chooses its Discord provider by the `program`
+core's (Discord +1, Pi +2, T3 +3, web +4), and what an interface's entry
+says of delivery and of the largest file it takes. Initialization, setup,
+version stamping on update and each interface program's choice of its
+instance all read it. Setup offers the interfaces in its order, the first
+one preselected. Pi chooses its Discord provider by the `program`
 the registry gives each entry. Registering a
 program never changes an address the file already has, and it refuses when
 another provider holds the program's port. An entry whose program the
@@ -449,9 +454,17 @@ sets up its part, and setup runs `carillon-<program> setup --provider <id>`
 for every interface entry: Pi signs in through its own interface, and
 setup then asks the model of each Pi agent that has none; the T3
 runtime makes an agent for each T3 project T3 Code channels work in, and
-their settings; and the Discord provider learns the bot from its token and
+their settings; the Discord provider learns the bot from its token and
 offers servers, channels and people by name, asking who answers in each
-channel. Setup reruns retain a plain T3 agent's ID by its saved T3 project
+channel; and the web provider asks nothing, checks its entry and says how
+to open the page. Told only `--interface` on an existing installation,
+setup registers that interface, runs its program and nothing else, and
+restarts a running Carillon once core has drained, because core takes a
+new provider only when it starts. It writes nothing but the new entry, and
+refuses a port another program of the machine listens on before it writes
+that. When the interface's program ends without finishing, setup takes the
+entry out again. Carillon counts as stopped only when core's address
+refuses the connection: any other failure to reach core fails the command. Setup reruns retain a plain T3 agent's ID by its saved T3 project
 ID. New projects receive IDs that avoid both existing agents and saved
 project bindings, so keeping a Discord route cannot silently move it to a
 different project. Adding Pi explicitly to plain T3 Code channels plans its
@@ -494,14 +507,21 @@ authority.
 ## Packaging
 
 `scripts/package-release.sh` builds one archive per Linux host architecture:
-the Rust programs for the host target, the Discord module and the
+the Rust programs for the host target, the web chat's page as the files it
+is written in (`lib/web`), the Discord module and the
 card-colours example module for `wasm32-unknown-unknown`, the runtimes
 compiled with Bun, the systemd units,
 and `licenses/` with Carillon's licence and notices for the Rust crates, npm
-packages and Bun built into the programs. Every component reports the
+packages and Bun built into the programs, and the licence of the page's
+typeface. Every component reports the
 workspace version. A `MANIFEST` lists every file and which must be
 executable; the installer refuses anything else. It is a completeness check,
-not a signature.
+not a signature. Registration publishes every unit the archive ships, the
+services first and the target last. The uninstaller keeps no list of units:
+when core's unit names its installation, it removes the target and each
+service that names that installation too. It looks at the units only while
+the application directory is there. Once that is gone it reports so and
+leaves the units as they are.
 
 ## Trust and authority
 

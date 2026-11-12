@@ -10,6 +10,7 @@
 use std::{
     collections::BTreeMap,
     io::Write as _,
+    net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -43,7 +44,7 @@ pub(super) struct Options {
     #[arg(long = "runtime", value_name = "RUNTIME", value_parser = cli::runtime)]
     pub runtimes: Vec<Bundled>,
     /// An interface to set up, instead of asking, or to add to an
-    /// installation: `discord`; repeat it for more.
+    /// installation: `web` or `discord`; repeat it for both.
     #[arg(long = "interface", value_name = "INTERFACE", value_parser = cli::interface)]
     pub interfaces: Vec<Bundled>,
 }
@@ -96,6 +97,22 @@ pub(super) fn setup(
 ) -> Result<()> {
     let config_path = home.join("carillon.toml");
     let existing = config_path.exists();
+    let only_interfaces = options.runtimes.is_empty() && options.workspace.is_none();
+    if existing && only_interfaces && !options.interfaces.is_empty() {
+        for &interface in &options.interfaces {
+            let id = interface.id();
+            let added = add(home, &config_path, interface)?;
+            let set_up = set_up_interface(home, interface.program(), id);
+            if set_up.is_err() && added {
+                remove(home, &config_path, id)?;
+                return set_up.with_context(|| {
+                    format!("{id} was not added, and carillon.toml is as it was")
+                });
+            }
+            set_up?;
+        }
+        return Ok(());
+    }
     let runtimes = runtimes(home, &options)?;
     let runtimes = if runtimes.is_empty() {
         ask(ProviderRole::Runtime, questions)?
@@ -144,20 +161,62 @@ pub(super) fn setup(
         choose_pi_models(home, &pi, agents, questions)?;
     }
     for interface in &config.value.providers {
-        if interface.role != ProviderRole::Interface || !interface.enabled {
-            continue;
+        if interface.role == ProviderRole::Interface && interface.enabled {
+            set_up_interface(home, &interface.program, &interface.id)?;
         }
-        let finished = Command::new(provider_binary(&interface.program)?)
-            .args(["setup", "--provider", &interface.id])
-            .env("CARILLON_HOME", home)
-            .status()
-            .with_context(|| format!("run the setup of {}", interface.id))?;
-        if !finished.success() {
-            bail!(
-                "the setup of {} did not finish; run setup again to finish it",
-                interface.id
-            );
-        }
+    }
+    Ok(())
+}
+
+/// Registers `interface` in an existing installation and says whether it was
+/// missing. A port that another program of this machine listens on is
+/// refused before anything is written: the interface could not start there.
+/// A program that takes the port later is met at the next start.
+fn add(home: &Path, config_path: &Path, interface: Bundled) -> Result<bool> {
+    let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    let config = Config::read(config_path)?;
+    let id = interface.id();
+    if config.providers.iter().any(|entry| entry.id == id) {
+        return Ok(false);
+    }
+    // Registration names what is wrong with a port no entry may have, or
+    // one another entry has.
+    let address = interface
+        .port(config.core.listen.port())
+        .map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .filter(|address| {
+            let url = format!("http://{address}");
+            config.providers.iter().all(|entry| entry.url != url)
+        });
+    if let Some(address) = address {
+        TcpListener::bind(address).with_context(|| {
+            format!(
+                "{id} registers at {address}, which another program on this machine holds; \
+                 stop that program, then run this again"
+            )
+        })?;
+    }
+    register(config_path, interface)?;
+    Ok(true)
+}
+
+/// Takes the entry `id`, which [`add`] registered, out of the registry
+/// again. Its credential and directory stay for the next attempt.
+fn remove(home: &Path, config_path: &Path, id: &str) -> Result<()> {
+    let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    let mut config = Config::read(config_path)?;
+    config.providers.retain(|entry| entry.id != id);
+    config.write(config_path)
+}
+
+fn set_up_interface(home: &Path, program: &str, id: &str) -> Result<()> {
+    let finished = Command::new(provider_binary(program)?)
+        .args(["setup", "--provider", id])
+        .env("CARILLON_HOME", home)
+        .status()
+        .with_context(|| format!("run the setup of {id}"))?;
+    if !finished.success() {
+        bail!("the setup of {id} did not finish; run setup again to finish it");
     }
     Ok(())
 }
@@ -181,6 +240,7 @@ fn ask(role: ProviderRole, questions: &mut impl Questions) -> Result<Vec<Bundled
     let choices: Vec<String> = offered
         .iter()
         .map(|program| match program {
+            Bundled::Web => "A web chat, in your browser on this machine",
             Bundled::Discord => "Discord, as a bot in a server of yours",
             Bundled::Pi => "Pi, signed in to a model provider such as Anthropic or OpenAI",
             Bundled::T3 => "T3 Code, using a T3 Code server already running on this machine",

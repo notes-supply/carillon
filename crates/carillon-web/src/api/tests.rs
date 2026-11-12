@@ -494,17 +494,19 @@ async fn a_control_reaches_core_for_the_message_it_names_and_a_refusal_comes_bac
             (event.to_owned(), ControlAction::Stop),
         ]
     );
-    for (event, body) in [
-        (event, "{\"action\":\"resume\"}"),
-        (event, "{}"),
-        ("runtime:schedule-1", "{\"action\":\"stop\"}"),
+    let (shape, id) = (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::BAD_REQUEST);
+    for (event, body, refused) in [
+        (event, "{\"action\":\"resume\"}", shape),
+        (event, "{}", shape),
+        ("runtime:schedule-1", "{\"action\":\"stop\"}", id),
         (
             "0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa",
             "{\"action\":\"stop\"}",
+            id,
         ),
     ] {
         let answer = fixture.send(control(event, body)?).await?;
-        assert!(answer.status.is_client_error(), "{event} {body}");
+        assert_eq!(answer.status, refused, "{event} {body}");
     }
     assert_eq!(
         fixture.core().controls.len(),
