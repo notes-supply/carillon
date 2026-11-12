@@ -84,7 +84,7 @@ export class DiscordClient {
     if (!Check(Context, context))
       throw new DiscordFailure(
         "unavailable",
-        "This session has no configured interface connection. Use an installed Discord conversation or supply explicit extension context.",
+        "Discord is not connected here: this is not a Discord conversation, and the installation has no single Discord provider to use instead.",
       );
     const url = operationsEndpoint(context.connection.url);
     if (url === undefined)
