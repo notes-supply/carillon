@@ -33,8 +33,9 @@ configured model badges, and their custom IDs.
   [`sent`](src/conversations/sent.rs) records, with participation, which
   agent had the bot send its latest messages and what agents sent each
   person directly, which their next direct message quotes.
-- [`client`](src/client.rs): authenticated requests to core, with bounded
-  waits.
+- The [shared interface boundary](../carillon-interface/README.md) starts
+  the provider and holds its client of core, submission, staging and the
+  operator check.
 - [`channels`](src/channels.rs): a routed channel's settings page. It joins
   the route's own lines, read-only for now, with the runtime's lines read
   and changed through core for a channel subject the provider builds from
