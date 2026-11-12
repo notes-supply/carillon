@@ -10,6 +10,7 @@
 use std::{
     collections::BTreeMap,
     io::Write as _,
+    net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -98,9 +99,17 @@ pub(super) fn setup(
     let existing = config_path.exists();
     let only_interfaces = options.runtimes.is_empty() && options.workspace.is_none();
     if existing && only_interfaces && !options.interfaces.is_empty() {
-        init(home, None, options.base_port, &options.interfaces)?;
-        for interface in &options.interfaces {
-            set_up_interface(home, interface.program(), interface.id())?;
+        for &interface in &options.interfaces {
+            let id = interface.id();
+            let added = add(home, &config_path, interface)?;
+            let set_up = set_up_interface(home, interface.program(), id);
+            if set_up.is_err() && added {
+                remove(home, &config_path, id)?;
+                return set_up.with_context(|| {
+                    format!("{id} was not added, and carillon.toml is as it was")
+                });
+            }
+            set_up?;
         }
         return Ok(());
     }
@@ -157,6 +166,47 @@ pub(super) fn setup(
         }
     }
     Ok(())
+}
+
+/// Registers `interface` in an existing installation and says whether it was
+/// missing. A port that another program of this machine listens on is
+/// refused before anything is written: the interface could not start there.
+/// A program that takes the port later is met at the next start.
+fn add(home: &Path, config_path: &Path, interface: Bundled) -> Result<bool> {
+    let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    let config = Config::read(config_path)?;
+    let id = interface.id();
+    if config.providers.iter().any(|entry| entry.id == id) {
+        return Ok(false);
+    }
+    // Registration names what is wrong with a port no entry may have, or
+    // one another entry has.
+    let address = interface
+        .port(config.core.listen.port())
+        .map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .filter(|address| {
+            let url = format!("http://{address}");
+            config.providers.iter().all(|entry| entry.url != url)
+        });
+    if let Some(address) = address {
+        TcpListener::bind(address).with_context(|| {
+            format!(
+                "{id} registers at {address}, which another program on this machine holds; \
+                 stop that program, then run this again"
+            )
+        })?;
+    }
+    register(config_path, interface)?;
+    Ok(true)
+}
+
+/// Takes the entry `id`, which [`add`] registered, out of the registry
+/// again. Its credential and directory stay for the next attempt.
+fn remove(home: &Path, config_path: &Path, id: &str) -> Result<()> {
+    let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+    let mut config = Config::read(config_path)?;
+    config.providers.retain(|entry| entry.id != id);
+    config.write(config_path)
 }
 
 fn set_up_interface(home: &Path, program: &str, id: &str) -> Result<()> {

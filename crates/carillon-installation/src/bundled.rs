@@ -82,6 +82,13 @@ impl Bundled {
         }
     }
 
+    /// Its port where core listens on `core`, or `None` when no port is
+    /// that far above it.
+    #[must_use]
+    pub const fn port(self, core: u16) -> Option<u16> {
+        core.checked_add(self.port_offset())
+    }
+
     /// The version of the program this release bundles: the workspace's for
     /// a Rust program, its package's for a runtime.
     ///

@@ -202,10 +202,8 @@ pub(super) fn set_agents(config_path: &Path, mut agents: Vec<AgentConfig>) -> Re
 }
 
 fn provider(program: Bundled, core: SocketAddr, token: &str) -> Result<Provider> {
-    let port = core
-        .port()
-        .checked_add(program.port_offset())
-        .context("base port does not leave room for all services")?;
+    let port = program.port(core.port());
+    let port = port.context("base port does not leave room for all services")?;
     Ok(Provider {
         id: program.id().to_owned(),
         role: program.role(),

@@ -138,7 +138,12 @@ fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> 
         let config_path = initialize(&home, 44_000, &[has, Bundled::Pi], agents)?;
         let refused_by_a_full_walk = "runtime-pi";
         set_provider(&config_path, refused_by_a_full_walk, false)?;
-        let before = std::fs::read_to_string(&config_path)?;
+        let expected_by_its_owner = "version = \"0.0.7\"";
+        let written = std::fs::read_to_string(&config_path)?;
+        let version = format!("version = \"{}\"", has.version()?);
+        let before = written.replacen(&version, expected_by_its_owner, 1);
+        assert_ne!(before, written);
+        std::fs::write(&config_path, &before)?;
         added_pi::fake_providers(directory.path(), &["discord", "web"])?;
 
         let named = ("CARILLON_TEST_SETUP_INTERFACE", adds.name().as_ref());
@@ -167,5 +172,78 @@ fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> 
         assert!(!home.join(format!("{}-calls", has.program())).exists());
         assert!(!home.join("pi-calls").exists());
     }
+    Ok(())
+}
+
+fn web_only(directory: &Path, base_port: u16) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let home = directory.join("home");
+    let agents = vec![assistant(directory)];
+    let config_path = initialize(&home, base_port, &[Bundled::Web, Bundled::Pi], agents)?;
+    Ok((home, config_path))
+}
+
+fn program_ending(directory: &Path, name: &str, status: u8) -> anyhow::Result<()> {
+    let program = directory.join(format!("carillon-{name}"));
+    std::fs::write(&program, format!("#!/bin/sh\nexit {status}\n"))?;
+    Ok(std::fs::set_permissions(
+        program,
+        std::fs::Permissions::from_mode(0o700),
+    )?)
+}
+
+#[test]
+fn an_interface_whose_setup_does_not_finish_is_not_added_and_a_retry_adds_it() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let (home, config_path) = web_only(directory.path(), 44_000)?;
+    let before = std::fs::read(&config_path)?;
+    let add = || {
+        let named = ("CARILLON_TEST_SETUP_INTERFACE", "discord".as_ref());
+        added_pi::run_child(ADD, directory.path(), &home, &[named])
+    };
+
+    program_ending(directory.path(), "discord", 1)?;
+    let cancelled = add()?;
+    assert!(!cancelled.status.success(), "{cancelled:?}");
+    let said = String::from_utf8_lossy(&cancelled.stderr);
+    assert!(said.contains("discord-private was not added"), "{said}");
+    assert_eq!(std::fs::read(&config_path)?, before);
+
+    program_ending(directory.path(), "discord", 0)?;
+    assert!(add()?.status.success());
+    let added = std::fs::read(&config_path)?;
+    assert_eq!(ids(&config_path)?, ["web", "runtime-pi", "discord-private"]);
+
+    program_ending(directory.path(), "discord", 1)?;
+    assert!(!add()?.status.success());
+    assert_eq!(std::fs::read(&config_path)?, added);
+    Ok(())
+}
+
+#[test]
+fn an_interface_is_not_added_at_a_port_another_program_holds() -> anyhow::Result<()> {
+    let held = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = held.local_addr()?.port();
+    let directory = tempfile::tempdir()?;
+    let (home, config_path) = web_only(directory.path(), port - Bundled::Discord.port_offset())?;
+    let before = std::fs::read(&config_path)?;
+    added_pi::fake_providers(directory.path(), &["discord"])?;
+
+    let named = ("CARILLON_TEST_SETUP_INTERFACE", "discord".as_ref());
+    let refused = added_pi::run_child(ADD, directory.path(), &home, &[named])?;
+    assert!(!refused.status.success(), "{refused:?}");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    let expected = format!(
+        "discord-private registers at 127.0.0.1:{port}, which another program on this machine \
+         holds; stop that program, then run this again"
+    );
+    assert!(said.contains(&expected), "{said}");
+    assert_eq!(std::fs::read(&config_path)?, before);
+    assert!(!home.join("credentials/discord-private.token").exists());
+    assert!(!home.join("discord-calls").exists());
+
+    drop(held);
+    let added = added_pi::run_child(ADD, directory.path(), &home, &[named])?;
+    assert!(added.status.success(), "{added:?}");
     Ok(())
 }
