@@ -88,7 +88,11 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
         let home = directory.path().join(runtime.id());
         let config = initialized(&home, directory.path(), runtime)?;
         set_provider(&config, runtime.id(), false)?;
-        let refusal = setup(&home, options(), &mut Unasked)
+        let rerun = Options {
+            interfaces: Vec::new(),
+            ..options()
+        };
+        let refusal = setup(&home, rerun, &mut Unasked)
             .err()
             .map(|error| format!("{error:#}"))
             .unwrap_or_default();
@@ -167,10 +171,14 @@ impl carillon_installation::prompt::Questions for Shown {
         &mut self,
         question: &str,
         options: &[String],
-        _: &[usize],
+        chosen: &[usize],
     ) -> anyhow::Result<Vec<usize>> {
         self.transcript.extend(options.iter().cloned());
-        self.next(question)?
+        let answer = self.next(question)?;
+        if answer == "preselected" {
+            return Ok(chosen.to_vec());
+        }
+        answer
             .split(',')
             .filter(|index| !index.is_empty())
             .map(|index| Ok(index.parse()?))

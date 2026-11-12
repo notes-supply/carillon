@@ -2,7 +2,7 @@ use anyhow::Context as _;
 
 use super::*;
 
-const CHILD: &str = "application::setup::tests::added_pi::setup_added_pi_child";
+pub(super) const CHILD: &str = "application::setup::tests::added_pi::setup_added_pi_child";
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -53,7 +53,7 @@ impl Fixture {
 
     fn run(&self, workspace: bool) -> anyhow::Result<std::process::Output> {
         let workspace = workspace.then_some(self.workspace.as_path());
-        rerun(self.directory.path(), &self.home, workspace)
+        rerun(CHILD, self.directory.path(), &self.home, workspace)
     }
 }
 
@@ -75,6 +75,7 @@ pub(super) fn fake_providers(directory: &Path, interfaces: &[&str]) -> anyhow::R
 }
 
 pub(super) fn rerun(
+    test: &str,
     directory: &Path,
     home: &Path,
     workspace: Option<&Path>,
@@ -84,7 +85,7 @@ pub(super) fn rerun(
     ))?;
     let mut child = std::process::Command::new(std::env::current_exe()?);
     child
-        .args(["--exact", CHILD, "--ignored", "--nocapture"])
+        .args(["--exact", test, "--ignored", "--nocapture"])
         .env("PATH", path)
         .env("CARILLON_HOME", home)
         .env("CARILLON_TEST_SETUP_HOME", home);

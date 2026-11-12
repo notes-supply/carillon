@@ -22,7 +22,8 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{LoadedConfig, ProviderRole},
+    bundled::Bundled,
+    config::{DeliveryMode, LoadedConfig, ProviderRole, token_matches},
     home,
 };
 use carillon_interface::instance;
@@ -32,7 +33,7 @@ use tracing_subscriber::EnvFilter;
 use crate::{browser::Key, serve::serve};
 
 /// The `program` of a registry entry this program serves.
-const PROGRAM: &str = "web";
+const PROGRAM: &str = Bundled::Web.program();
 
 #[derive(Debug, Parser)]
 #[command(
@@ -67,6 +68,13 @@ enum Command {
         /// this program's `bin`, where a release has it.
         #[arg(long)]
         site: Option<PathBuf>,
+    },
+    /// Check the web chat's registry entry and say how to open it (run by
+    /// `carillon setup`). It asks nothing.
+    Setup {
+        /// Registry ID of the web instance; inferred when only one is registered.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Sign a browser of this machine in and open the chat in it. The link
     /// works once, within two minutes.
@@ -121,6 +129,26 @@ async fn run() -> Result<()> {
                 None => release_site()?,
             };
             serve(LoadedConfig::load(&config)?, &provider, &token_file, site).await
+        }
+        Command::Setup { provider } => {
+            let loaded = installation()?;
+            let provider = instance(&loaded, PROGRAM, provider)?;
+            let entry = loaded.provider(&provider, ProviderRole::Interface)?;
+            let address = entry.listen_address()?;
+            if !token_matches(&entry.token_hash, &loaded.credential(&provider)?) {
+                bail!("the credential of {provider} does not match its entry in carillon.toml");
+            }
+            if entry.delivery != DeliveryMode::Retained {
+                bail!(
+                    "{provider} needs `delivery = \"retained\"` in its entry in carillon.toml: \
+                     a web chat's answers are read from core, and nothing else delivers them"
+                );
+            }
+            println!(
+                "The web chat is set up at http://{address}. While Carillon runs, `carillon web \
+                 open` signs this machine's browser in and opens it."
+            );
+            Ok(())
         }
         Command::Open { print, provider } => {
             let loaded = installation()?;

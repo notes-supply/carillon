@@ -19,9 +19,8 @@ use uuid::Uuid;
 use carillon_installation::bundled::Bundled;
 pub(super) use carillon_installation::config::ASSISTANT;
 use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, DEFAULT_UPLOAD_MIB, DeliveryMode,
-    LoadedConfig, Provider, ProviderRole, attachment_staging, hash_token, new_token,
-    validate_provider_identity,
+    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
+    attachment_staging, hash_token, new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 use carillon_installation::maintenance::ServiceLock;
@@ -207,7 +206,6 @@ fn provider(program: Bundled, core: SocketAddr, token: &str) -> Result<Provider>
         .port()
         .checked_add(program.port_offset())
         .context("base port does not leave room for all services")?;
-    let interface = program.role() == ProviderRole::Interface;
     Ok(Provider {
         id: program.id().to_owned(),
         role: program.role(),
@@ -216,8 +214,8 @@ fn provider(program: Bundled, core: SocketAddr, token: &str) -> Result<Provider>
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
-        max_upload_mib: interface.then_some(DEFAULT_UPLOAD_MIB),
-        delivery: DeliveryMode::External,
+        max_upload_mib: program.max_upload_mib(),
+        delivery: program.delivery(),
     })
 }
 

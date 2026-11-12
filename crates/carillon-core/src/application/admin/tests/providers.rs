@@ -1,4 +1,5 @@
 use super::*;
+use carillon_installation::config::DeliveryMode;
 
 #[test]
 fn provider_command_rejects_unsafe_identity_before_mutation() -> Result<()> {
@@ -118,6 +119,7 @@ fn registration_gives_a_program_its_own_port_once_and_keeps_its_credential() -> 
     fs::write(&credential, "kept\n")?;
     let register = super::super::register;
     register(&config_path, Bundled::T3)?;
+    register(&config_path, Bundled::Web)?;
     let entry = |id: &str, program: &str, port: u16| {
         (
             id.to_owned(),
@@ -129,6 +131,7 @@ fn registration_gives_a_program_its_own_port_once_and_keeps_its_credential() -> 
         entry("discord-private", "discord", 44_001),
         entry("runtime-pi", "runtime-pi", 44_002),
         entry("runtime-t3", "runtime-t3", 44_003),
+        entry("web", "web", 44_004),
     ];
     assert_eq!(registered(&config_path)?, expected);
     assert_eq!(fs::read_to_string(&credential)?, "kept\n");
@@ -160,5 +163,30 @@ fn registration_never_moves_a_provider_that_holds_its_port() -> Result<()> {
     )?;
     assert_eq!(fs::read_to_string(&config_path)?, moved);
     assert!(!root.join("credentials/runtime-t3.token").exists());
+    Ok(())
+}
+
+#[test]
+fn registration_writes_what_the_catalogue_says_of_each_interface() -> Result<()> {
+    let directory = tempdir()?;
+    let root = directory.path().join("installation");
+    let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
+    super::super::register(&config_path, Bundled::Web)?;
+    let written = fs::read_to_string(&config_path)?;
+    assert_eq!(written.matches("delivery = \"retained\"").count(), 1);
+    assert_eq!(written.matches("max_upload_mib = 1024").count(), 1);
+    assert_eq!(written.matches("max_upload_mib = 20").count(), 1);
+    let config = LoadedConfig::load(&config_path)?;
+    let facts = |id: &str| -> Result<(Option<u64>, DeliveryMode)> {
+        let entry = config.provider(id, ProviderRole::Interface)?;
+        Ok((entry.max_upload_mib, entry.delivery))
+    };
+    assert_eq!(facts("web")?, (Some(1024), DeliveryMode::Retained));
+    assert_eq!(
+        facts("discord-private")?,
+        (Some(20), DeliveryMode::External)
+    );
+    assert!(root.join("state/components/web").is_dir());
+    assert!(root.join("credentials/web.token").is_file());
     Ok(())
 }

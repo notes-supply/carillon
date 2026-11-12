@@ -5,7 +5,8 @@
 //! as Discord's asks for the bot and who answers in which channel. Each
 //! provider's program owns its part; setup only asks the questions that
 //! choose between them and runs them in order. A rerun keeps what is
-//! already set up when asked to.
+//! already set up when asked to. Told only `--interface`, a rerun adds that
+//! interface and asks about nothing else.
 
 use std::{
     collections::BTreeMap,
@@ -43,7 +44,7 @@ pub(super) struct Options {
     #[arg(long = "runtime", value_name = "RUNTIME", value_parser = cli::runtime)]
     pub runtimes: Vec<Bundled>,
     /// An interface to set up, instead of asking, or to add to an
-    /// installation: `discord`; repeat it for more.
+    /// installation: `web` or `discord`; repeat it for both.
     #[arg(long = "interface", value_name = "INTERFACE", value_parser = cli::interface)]
     pub interfaces: Vec<Bundled>,
 }
@@ -85,6 +86,9 @@ struct Project {
     workspace: PathBuf,
 }
 
+/// Returns the interfaces it added to an existing installation, which a
+/// running Carillon serves only once it restarts.
+///
 /// # Errors
 ///
 /// Returns an error when a question goes unanswered, a provider's program
@@ -93,9 +97,17 @@ pub(super) fn setup(
     home: &Path,
     mut options: Options,
     questions: &mut impl Questions,
-) -> Result<()> {
+) -> Result<Vec<Bundled>> {
     let config_path = home.join("carillon.toml");
     let existing = config_path.exists();
+    let only_interfaces = options.runtimes.is_empty() && options.workspace.is_none();
+    if existing && only_interfaces && !options.interfaces.is_empty() {
+        init(home, None, options.base_port, &options.interfaces)?;
+        for interface in &options.interfaces {
+            set_up_interface(home, interface.program(), interface.id())?;
+        }
+        return Ok(options.interfaces);
+    }
     let runtimes = runtimes(home, &options)?;
     let runtimes = if runtimes.is_empty() {
         ask(ProviderRole::Runtime, questions)?
@@ -144,20 +156,26 @@ pub(super) fn setup(
         choose_pi_models(home, &pi, agents, questions)?;
     }
     for interface in &config.value.providers {
-        if interface.role != ProviderRole::Interface || !interface.enabled {
-            continue;
+        if interface.role == ProviderRole::Interface && interface.enabled {
+            set_up_interface(home, &interface.program, &interface.id)?;
         }
-        let finished = Command::new(provider_binary(&interface.program)?)
-            .args(["setup", "--provider", &interface.id])
-            .env("CARILLON_HOME", home)
-            .status()
-            .with_context(|| format!("run the setup of {}", interface.id))?;
-        if !finished.success() {
-            bail!(
-                "the setup of {} did not finish; run setup again to finish it",
-                interface.id
-            );
-        }
+    }
+    Ok(if existing {
+        options.interfaces.clone()
+    } else {
+        Vec::new()
+    })
+}
+
+/// Has `program` set up the interface entry `id`, asking what it needs.
+fn set_up_interface(home: &Path, program: &str, id: &str) -> Result<()> {
+    let finished = Command::new(provider_binary(program)?)
+        .args(["setup", "--provider", id])
+        .env("CARILLON_HOME", home)
+        .status()
+        .with_context(|| format!("run the setup of {id}"))?;
+    if !finished.success() {
+        bail!("the setup of {id} did not finish; run setup again to finish it");
     }
     Ok(())
 }
@@ -181,6 +199,7 @@ fn ask(role: ProviderRole, questions: &mut impl Questions) -> Result<Vec<Bundled
     let choices: Vec<String> = offered
         .iter()
         .map(|program| match program {
+            Bundled::Web => "A web chat, in your browser on this machine",
             Bundled::Discord => "Discord, as a bot in a server of yours",
             Bundled::Pi => "Pi, signed in to a model provider such as Anthropic or OpenAI",
             Bundled::T3 => "T3 Code, using a T3 Code server already running on this machine",

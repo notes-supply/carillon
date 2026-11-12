@@ -106,8 +106,8 @@ enum Command {
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// An interface to register: `discord`. A new installation needs
-        /// one; repeat it for more.
+        /// An interface to register: `web` or `discord`. A new installation
+        /// needs one; repeat it for both.
         #[arg(long, value_parser = interface)]
         interface: Vec<Bundled>,
     },
@@ -281,7 +281,11 @@ pub(crate) async fn run() -> Result<()> {
             "{}",
             init(&home()?, workspace.as_deref(), base_port, &interface)?.display()
         ),
-        Command::Setup(options) => setup(&home()?, options, &mut Terminal)?,
+        Command::Setup(options) => {
+            let home = home()?;
+            let added = setup(&home, options, &mut Terminal)?;
+            serve_added(&home, &added).await?;
+        }
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
@@ -446,6 +450,33 @@ async fn restart(home: &Path, config: &LoadedConfig, timeout: Duration, force: b
         stop(&services, hold).await?;
     }
     services.control(Action::Start).await
+}
+
+/// Has a running Carillon serve the interfaces setup `added`. Core takes a
+/// new provider only when it starts, so the services restart, drained as
+/// `carillon restart` drains them. A stopped Carillon stays stopped.
+async fn serve_added(home: &Path, added: &[Bundled]) -> Result<()> {
+    if added.is_empty() {
+        return Ok(());
+    }
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let Ok(report) = status(&config).await else {
+        println!("Carillon is not running. `carillon start` starts it with what setup added.");
+        return Ok(());
+    };
+    let serves = |interface: &Bundled| {
+        report
+            .providers
+            .iter()
+            .any(|health| health.id == interface.id())
+    };
+    if added.iter().all(serves) {
+        return Ok(());
+    }
+    println!("Restarting Carillon, which serves a new interface once it starts again.");
+    let wait = Wait { timeout: 60 };
+    restart(home, &config, wait.timeout(), false).await?;
+    report_running(&config, &wait).await
 }
 
 async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {
