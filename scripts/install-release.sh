@@ -5,15 +5,16 @@ umask 077
 usage() {
   echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
   echo "       install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
-  echo "       install.sh --update [--check]    (run by 'carillon update'; --check changes nothing)" >&2
+  echo "       install.sh --update [--check]    (run by 'carillon update'; checks the installation first, and --check changes nothing)" >&2
   exit 2
 }
 
 # Setup without the Discord options asks for everything at the terminal
 # (`carillon setup`); with them it writes the registry and Discord settings
 # from these arguments and asks nothing. An update publishes the application
-# and service definitions and expects the providers it bundles in
-# carillon.toml; it rewrites no other configuration, credentials or state.
+# and service definitions, expects the providers it bundles in carillon.toml
+# and creates the core database an installation lacks; it rewrites no other
+# configuration, credentials or state.
 MODE=setup
 CHECK=0
 case "$#:$*" in
@@ -167,7 +168,9 @@ then
   fi
 fi
 
-if [ "$CHECK" -eq 1 ]; then
+# An update publishes only a release that will start here, so it is checked
+# before anything changes, whether `carillon update` or the owner runs it.
+if [ "$MODE" = update ]; then
   # Application replacement needs an atomic directory exchange here.
   probe=$(mktemp -d "$CARILLON_HOME/.update-probe.XXXXXX")
   mkdir "$probe/a" "$probe/b"
@@ -184,7 +187,7 @@ if [ "$CHECK" -eq 1 ]; then
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" check
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" runtime-t3 check
-  exit 0
+  [ "$CHECK" -eq 0 ] || exit 0
 fi
 
 # Guided setup creates the installation for the chosen runtime and has each
@@ -224,6 +227,9 @@ fi
 
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
   "$CARILLON_HOME/logs"
+# A killed or failed installer leaves its staging tree, or the application it
+# replaced. Under the maintenance lock no other installer has one.
+find "$CARILLON_HOME" -maxdepth 1 -name '.app-new.*' -exec rm -rf -- {} +
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 CLEANUP_APP_NEW=1
 cleanup_staging() {
@@ -321,7 +327,7 @@ if install_entry_point; then
 fi
 
 if [ "$MODE" = update ]; then
-  printf '%s\n' "Published this release at $APP and registered its user units; carillon.toml expects the providers it bundles, and other configuration and state were not changed."
+  printf '%s\n' "Published this release at $APP and registered its user units; carillon.toml expects the providers it bundles, an installation that had no core database has a new one, and other configuration and state were not changed."
   exit 0
 fi
 if [ "$GUIDED" -eq 1 ]; then
