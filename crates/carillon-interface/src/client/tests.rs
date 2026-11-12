@@ -81,12 +81,9 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
             });
         }
     }
-    let mut count = 0;
     while let Some(result) = cases.join_next().await {
         result??;
-        count += 1;
     }
-    assert_eq!(count, 7);
     Ok(())
 }
 

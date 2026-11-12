@@ -8,9 +8,7 @@ use std::path::Path;
 use tokio::net::TcpListener;
 use tracing::info;
 
-/// An interface provider that may serve.
 pub struct Started {
-    /// Its registry entry.
     pub provider: Provider,
     /// Bound to the entry's address, which makes this process the entry's
     /// only instance. `carillon start` waits for `/health` on it.

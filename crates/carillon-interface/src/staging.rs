@@ -1,10 +1,5 @@
 use anyhow::{Context as _, Result};
-use std::{
-    fs::DirBuilder,
-    io,
-    os::unix::fs::DirBuilderExt as _,
-    path::{Path, PathBuf},
-};
+use std::{fs::DirBuilder, io, os::unix::fs::DirBuilderExt as _, path::PathBuf};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -72,15 +67,10 @@ impl Batch {
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        if let Err(error) = remove(&self.directory) {
+        if let Err(error) = std::fs::remove_dir_all(&self.directory)
+            && error.kind() != io::ErrorKind::NotFound
+        {
             warn!(%error, "staged attachments could not be removed; the provider removes them at startup");
         }
-    }
-}
-
-fn remove(directory: &Path) -> io::Result<()> {
-    match std::fs::remove_dir_all(directory) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
     }
 }
