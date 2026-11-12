@@ -668,9 +668,12 @@ fn missing_programs(text: &str) -> Option<String> {
             let id = id.unwrap_or_default();
             match Bundled::ALL.into_iter().find(|bundled| bundled.id() == id) {
                 Some(bundled) => format!("     {id}: program = \"{}\"", bundled.program()),
-                None => {
-                    format!("     {id}: program = \"NAME\", for the carillon-NAME that serves it")
-                }
+                None => format!(
+                    "     {id}: name the program that serves it. Those this release bundles: {}",
+                    Bundled::ALL
+                        .map(|bundled| format!("program = \"{}\"", bundled.program()))
+                        .join(", ")
+                ),
             }
         })
         .collect();
@@ -678,17 +681,23 @@ fn missing_programs(text: &str) -> Option<String> {
 }
 
 fn without_programs(path: &Path, lines: &str) -> String {
-    let home = path.parent().unwrap_or(path).display();
+    // One word of a shell command, whatever the path holds.
+    let home = path.parent().unwrap_or(path).display().to_string();
+    let home = format!("'{}'", home.replace('\'', r"'\''"));
     format!(
         "{path} does not say which program serves each provider, which Carillon \
          {RELEASE_VERSION} requires. To update the installation:\n\
-         \x20 1. Stop it with the release it has: carillon stop\n\
+         \x20 1. Stop it with the release it has:\n\
+         \x20    carillon --home {home} stop\n\
          \x20 2. Add a line to each of these providers in {path}:\n{lines}\n\
          \x20 3. Unpack this release and run its installer. The release installed now \
-         cannot, because it rejects the lines:\n\
-         \x20    tar -xzf carillon-{RELEASE_VERSION}-linux-x86_64.tar.gz\n\
+         cannot, because it rejects the lines. ARCHIVE stands for the path of this \
+         release's archive, which a refused `carillon update` names on the line after \
+         these steps:\n\
+         \x20    tar -xzf ARCHIVE\n\
          \x20    CARILLON_HOME={home} carillon-{RELEASE_VERSION}/install.sh --update\n\
-         \x20 4. Start it: carillon start",
+         \x20 4. Start it:\n\
+         \x20    carillon --home {home} start",
         path = path.display(),
     )
 }
@@ -702,7 +711,9 @@ fn valid_token_hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DeliveryMode, validate_provider_identity};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::{Config, DeliveryMode, RELEASE_VERSION, validate_provider_identity};
 
     fn registry(interface: &str, runtime: &str) -> Result<Config, toml::de::Error> {
         let hash = "0".repeat(64);
@@ -787,7 +798,9 @@ enabled = true
             )
         };
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("carillon.toml");
+        let home = directory.path().join("owner's installation");
+        let path = home.join("carillon.toml");
+        std::fs::create_dir(&home)?;
         std::fs::write(&path, registry(["", "program = \"runtime-pi\"\n", "", ""]))?;
         let refusal = Config::read(&path).err().map(|error| format!("{error:#}"));
         let refusal = refusal.unwrap_or_default();
@@ -795,21 +808,44 @@ enabled = true
             "  2. Add a line to each of these providers in {}:\n     \
              discord-private: program = \"discord\"\n     \
              runtime-t3: program = \"runtime-t3\"\n     \
-             chat: program = \"NAME\", for the carillon-NAME that serves it\n  3. Unpack",
+             chat: name the program that serves it. Those this release bundles: \
+             program = \"discord\", program = \"runtime-pi\", program = \"runtime-t3\"\n  \
+             3. Unpack",
             path.display()
         );
         assert!(refusal.contains(&expected), "{refusal}");
-        let steps: Vec<usize> = [
-            "carillon stop",
-            "program =",
-            "install.sh --update",
-            "carillon start",
-        ]
-        .iter()
-        .filter_map(|step| refusal.find(step))
-        .collect();
-        assert_eq!(steps.len(), 4, "{refusal}");
-        assert!(steps.is_sorted(), "{refusal}");
+
+        let record = "printf '%s\\n' \"${CARILLON_HOME:-} $*\" >>\"$RECORD\"\n";
+        let release = directory.path().join(format!("carillon-{RELEASE_VERSION}"));
+        std::fs::create_dir(&release)?;
+        for program in [
+            directory.path().join("carillon"),
+            release.join("install.sh"),
+        ] {
+            std::fs::write(&program, format!("#!/bin/sh\n{record}"))?;
+            std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let search = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))?;
+        let printed = refusal.lines().map(str::trim);
+        for command in printed.filter(|line| {
+            line.starts_with("carillon --home ") || line.starts_with("CARILLON_HOME=")
+        }) {
+            let ran = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(directory.path())
+                .env("PATH", &search)
+                .env_remove("CARILLON_HOME")
+                .env("RECORD", directory.path().join("record"))
+                .status()?;
+            assert!(ran.success(), "{command}");
+        }
+        let home = home.display();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("record"))?,
+            format!(" --home {home} stop\n{home} --update\n --home {home} start\n")
+        );
         let programs = ["discord", "runtime-pi", "runtime-t3", "example"]
             .map(|program| format!("program = \"{program}\"\n"));
         std::fs::write(&path, registry(programs.each_ref().map(String::as_str)))?;
