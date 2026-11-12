@@ -23,6 +23,7 @@ use axum::{
 };
 use carillon_installation::{
     config::{DeliveryMode, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    crossing::Crossing,
     loopback,
 };
 use carillon_protocol::{
@@ -40,7 +41,7 @@ use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{AgentOptions, Core, CoreError, CoreOptions};
+use crate::{AgentOptions, Core, CoreError, CoreOptions, db::OtherFormat};
 pub(super) use maintenance::{Drain, Lease};
 pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
 use registry::{Refusal, Registry, runtime_facts};
@@ -155,11 +156,29 @@ fn body<T: DeserializeOwned>(bytes: &Bytes, what: &str) -> Result<T, ApiError> {
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid {what}: {error}")))
 }
 
-/// Open the installation's core exactly as [`serve`] does, without listening,
-/// recovering turns or writing: the registry and the current core schema.
-pub(super) fn check(config: &LoadedConfig) -> Result<()> {
-    Core::open(core_options(config))?;
-    Ok(())
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CoreDatabase {
+    Current,
+    Absent,
+}
+
+/// Whether this release can serve the installation. Its core database, when
+/// there is one, opens as [`serve`] opens it, without listening, recovering
+/// turns or writing. One another release wrote is refused with the way
+/// across.
+pub(super) fn check(config: &LoadedConfig) -> Result<CoreDatabase> {
+    let data = &config.value.data_dir;
+    let found = std::fs::symlink_metadata(data.join("carillon.sqlite3"));
+    if found.is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(CoreDatabase::Absent);
+    }
+    match Core::open(core_options(config)) {
+        Ok(_) => Ok(CoreDatabase::Current),
+        Err(error) if error.is::<OtherFormat>() => {
+            Err(Crossing::of_database(&config.root, data).into())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Serves the installation whose registry `config` was loaded from `path`,

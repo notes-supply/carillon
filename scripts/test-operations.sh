@@ -138,11 +138,12 @@ install_release() {
   env "$@" "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
     --route 300:always:channel:assistant --workspace "$HOME/workspace" --base-port "$port"
 }
+# simulate EVENT_ID [CONTENT]
 simulate() {
   printf 'Authorization: Bearer %s\n' "$(cat "$INSTALLATION/credentials/discord-private.token")" \
     >"$TEST_ROOT/headers"
   curl --fail --silent -X POST -H 'content-type: application/json' -H "@$TEST_ROOT/headers" \
-    --data "{\"event_id\":\"$1\",\"guild_id\":\"100\",\"user_id\":\"200\",\"channel_id\":\"300\",\"content\":\"$1\"}" \
+    --data "{\"event_id\":\"$1\",\"guild_id\":\"100\",\"user_id\":\"200\",\"channel_id\":\"300\",\"content\":\"${2:-$1}\"}" \
     "http://127.0.0.1:$((BASE_PORT + 1))/v1/simulate"
 }
 release_archive() {
@@ -360,8 +361,8 @@ printf 'update refusals passed: links, traversal, relabelled, unrunnable and inc
 DATABASE=$INSTALLATION/state/carillon.sqlite3
 DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
-for state in schema:'database schema is not the current Carillon format' \
-  previous:'database schema is not the current Carillon format' \
+for state in schema:"is not in the format of Carillon $VERSION. To cross to this release" \
+  previous:"is not in the format of Carillon $VERSION. To cross to this release" \
   discord:'cannot use the settings of discord-private' \
   module:'enable a custom Discord module this release cannot serve'; do
   case "${state%%:*}" in
@@ -541,6 +542,7 @@ assert_preserved
 # The previous application is retained for inspection, not adopted by the rerun.
 [ -n "$(find "$INSTALLATION" -maxdepth 1 -name '.app-new.*')" ]
 carillon update "$TEST_ROOT/next.tar.gz" | grep -F 'services remain stopped as before' >/dev/null
+[ -z "$(find "$INSTALLATION" -maxdepth 1 -name '.app-new.*')" ] || fail 'a rerun left the retained tree'
 # Start and health failures leave the new release in place with recovery advice.
 carillon start >/dev/null
 rm -f "$TRACE"
@@ -561,11 +563,101 @@ carillon stop >/dev/null
 rm -f "$TRACE"
 printf 'update failures passed: registration, start and health report state and recovery\n'
 
-# A release that changes the database format is installed fresh with the
-# previous installation's configuration, credentials and custom Discord
-# module, as OPERATIONS.md's Update section says. Without questions, it
-# starts ready from new state, with carillon.toml as its owner wrote it but
-# for the bundled providers' versions.
+# A format change is crossed in place by following what the refusal prints.
+# This one release stands in for both sides, so the installation is put into
+# formats it refuses: a registry without `program` lines and a core database
+# whose schema is not its own.
+carillon start >/dev/null
+printf '%s\n' 'kept by the agent' >"$HOME/workspace/kept.txt"
+simulate crossing-1 "attach $HOME/workspace/kept.txt" >/dev/null
+[ -n "$(find "$INSTALLATION/state/attachments" -type f)" ] || fail 'core kept no file to carry across'
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+other_schema() {
+  node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE other_release (id INTEGER)")' \
+    "$DATABASE"
+}
+sed -i '/^program = /d' "$INSTALLATION/carillon.toml"
+other_schema
+snapshot
+app_inode=$(stat -c %i "$INSTALLATION/app")
+entries() { find "$INSTALLATION" -mindepth 1 -maxdepth 1 | LC_ALL=C sort; }
+entries >"$TEST_ROOT/entries"
+rm -f "$TRACE"
+refuse crossing-refused env CARILLON_HOME="$INSTALLATION" "$FINAL/install.sh" --update
+grep -F 'the release that wrote it keeps core'"'"'s database in another format' \
+  "$TEST_ROOT/crossing-refused.log" >/dev/null
+[ ! -e "$TRACE" ] || fail 'a refused crossing reached the service manager'
+running
+[ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+entries | cmp "$TEST_ROOT/entries" -
+assert_preserved
+# The printed commands, in order: stop, back up, set the database and the
+# kept files aside, unpack, install, start.
+sed -n 's/^     //p' "$TEST_ROOT/crossing-refused.log" | grep -v ': ' >"$TEST_ROOT/crossing-steps"
+[ "$(wc -l <"$TEST_ROOT/crossing-steps")" -eq 6 ] || fail 'the refusal did not print six commands'
+mkdir "$TEST_ROOT/crossing"
+follow() {
+  step=$(sed -n "${1}p" "$TEST_ROOT/crossing-steps" | sed "s|ARCHIVE|$TEST_ROOT/final.tar.gz|")
+  (cd "$TEST_ROOT/crossing" && sh -c "$step") || fail "printed step failed: $step"
+}
+kept_state() {
+  (cd "$INSTALLATION" && find pi state/components state/resource-snapshots -type f -print0 |
+    LC_ALL=C sort -z | xargs -0 sha256sum)
+}
+set_aside() {
+  (cd "$1" && find carillon.sqlite3 attachments -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+}
+follow 1
+stopped
+kept_state >"$TEST_ROOT/kept-state"
+# The backup is the installed release's to make, which reads these formats as
+# its own. Afterwards the registry keeps its lines, as the step that adds
+# them by hand leaves it.
+cp -p "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
+node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE other_release")' "$DATABASE"
+follow 2
+[ -s "$INSTALLATION-before-$VERSION.tar.gz" ]
+other_schema
+# Skipping the step that sets the database aside is refused before anything
+# is published, with the procedure again.
+refuse crossing-skipped env CARILLON_HOME="$INSTALLATION" "$FINAL/install.sh" --update
+grep -F "core's database in $INSTALLATION/state is not in the format of Carillon $VERSION" \
+  "$TEST_ROOT/crossing-skipped.log" >/dev/null
+! grep -F 'add one line' "$TEST_ROOT/crossing-skipped.log" >/dev/null || fail 'a registry with its lines was told to add them'
+[ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+[ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = next ]
+entries | cmp "$TEST_ROOT/entries" -
+set_aside "$INSTALLATION/state" >"$TEST_ROOT/core-state"
+for step in 3 4 5; do follow "$step"; done
+set_aside "$INSTALLATION/core-before-$VERSION" | cmp "$TEST_ROOT/core-state" -
+[ ! -e "$INSTALLATION/state/attachments" ]
+kept_state | cmp "$TEST_ROOT/kept-state" -
+[ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = final ]
+follow 6 >"$TEST_ROOT/crossing-start.log"
+grep -Fx "  discord-private: ready ($VERSION)" "$TEST_ROOT/crossing-start.log" >/dev/null
+grep -Fx "  runtime-pi: ready ($VERSION)" "$TEST_ROOT/crossing-start.log" >/dev/null
+[ "$(carillon recent)" = '[]' ]
+case "$(simulate crossing-2)" in *'Local provider response 5'*) ;; *) fail 'the conversation did not continue across the format change' ;; esac
+carillon stop >/dev/null
+# A start with no core database, which only an installer creates, names the
+# log that says so, and the check says what is missing.
+mv "$DATABASE" "$TEST_ROOT/database"
+refuse no-database carillon start --timeout 3
+grep -F "did not answer; its log, $INSTALLATION/logs/core.log, says why" "$TEST_ROOT/no-database.log" >/dev/null
+tail -n 1 "$INSTALLATION/logs/core.log" | grep -F "unable to open database file: $DATABASE" >/dev/null
+carillon check | grep -F 'There is no core database yet' >/dev/null
+carillon stop >/dev/null
+mv "$TEST_ROOT/database" "$DATABASE"
+rm -rf "$INSTALLATION/core-before-$VERSION" "$INSTALLATION-before-$VERSION.tar.gz"
+rm -f "$TRACE"
+snapshot
+printf 'format crossing passed: refused before publishing, crossed as printed, Pi state kept, core state set aside\n'
+
+# A configuration carried into a new directory without its state, with its
+# credentials and custom Discord module, gets a new database, as
+# OPERATIONS.md's Install section says. Without questions, it starts ready,
+# with carillon.toml as its owner wrote it but for the bundled providers'
+# versions.
 mkdir -m 0700 "$INSTALLATION/modules"
 cp "$EXAMPLE" "$INSTALLATION/modules/card-colours.wasm"
 carillon discord module enable "$INSTALLATION/modules/card-colours.wasm" >/dev/null

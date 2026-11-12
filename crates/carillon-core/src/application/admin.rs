@@ -424,7 +424,7 @@ pub(super) fn unpack_regular(archive_path: &Path, target: &Path) -> Result<()> {
 fn validate_portable_paths(root: &Path) -> Result<()> {
     // LoadedConfig resolves paths for services; check the stored spelling before
     // allowing it into an archive that must work under a different root.
-    let config: Config = toml::from_str(&fs::read_to_string(root.join("carillon.toml"))?)?;
+    let config = Config::read(&root.join("carillon.toml"))?;
     for (field, path) in installation_paths(&config) {
         if path.is_empty()
             || path.is_absolute()

@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use toml::Table;
 use uuid::Uuid;
 
-use crate::{bundled::Bundled, edit::edited, filesystem::atomic_write};
+use crate::{crossing::Crossing, edit::edited, filesystem::atomic_write};
 
 /// The workspace release version shared by every bundled Rust component.
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -386,11 +386,11 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error when the file does not read or parse. One whose
-    /// providers name no program is refused with how to update it.
+    /// providers name no program is refused as a [`Crossing`].
     pub fn read(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        toml::from_str(&text).map_err(|error| match missing_programs(&text) {
-            Some(lines) => anyhow!(without_programs(path, &lines)),
+        toml::from_str(&text).map_err(|error| match Crossing::of_registry(path, &text) {
+            Some(crossing) => crossing.into(),
             None => anyhow!(error).context(format!("parse {}", path.display())),
         })
     }
@@ -655,53 +655,6 @@ pub fn absolutize(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn missing_programs(text: &str) -> Option<String> {
-    let registry: Table = toml::from_str(text).ok()?;
-    let lines: Vec<String> = registry
-        .get("providers")?
-        .as_array()?
-        .iter()
-        .filter_map(toml::Value::as_table)
-        .filter(|provider| !provider.contains_key("program"))
-        .map(|provider| {
-            let id = provider.get("id").and_then(toml::Value::as_str);
-            let id = id.unwrap_or_default();
-            match Bundled::ALL.into_iter().find(|bundled| bundled.id() == id) {
-                Some(bundled) => format!("     {id}: program = \"{}\"", bundled.program()),
-                None => format!(
-                    "     {id}: name the program that serves it. Those this release bundles: {}",
-                    Bundled::ALL
-                        .map(|bundled| format!("program = \"{}\"", bundled.program()))
-                        .join(", ")
-                ),
-            }
-        })
-        .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
-}
-
-fn without_programs(path: &Path, lines: &str) -> String {
-    // One word of a shell command, whatever the path holds.
-    let home = path.parent().unwrap_or(path).display().to_string();
-    let home = format!("'{}'", home.replace('\'', r"'\''"));
-    format!(
-        "{path} does not say which program serves each provider, which Carillon \
-         {RELEASE_VERSION} requires. To update the installation:\n\
-         \x20 1. Stop it with the release it has:\n\
-         \x20    carillon --home {home} stop\n\
-         \x20 2. Add a line to each of these providers in {path}:\n{lines}\n\
-         \x20 3. Unpack this release and run its installer. The release installed now \
-         cannot, because it rejects the lines. ARCHIVE stands for the path of this \
-         release's archive, which a refused `carillon update` names on the line after \
-         these steps:\n\
-         \x20    tar -xzf ARCHIVE\n\
-         \x20    CARILLON_HOME={home} carillon-{RELEASE_VERSION}/install.sh --update\n\
-         \x20 4. Start it:\n\
-         \x20    carillon --home {home} start",
-        path = path.display(),
-    )
-}
-
 fn valid_token_hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -711,9 +664,7 @@ fn valid_token_hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    use super::{Config, DeliveryMode, RELEASE_VERSION, validate_provider_identity};
+    use super::{Config, DeliveryMode, validate_provider_identity};
 
     fn registry(interface: &str, runtime: &str) -> Result<Config, toml::de::Error> {
         let hash = "0".repeat(64);
@@ -776,80 +727,6 @@ enabled = true
             )
         );
         Ok(())
-    }
-
-    #[test]
-    fn a_registry_that_names_no_program_is_refused_with_how_to_update_it() -> anyhow::Result<()> {
-        let hash = "0".repeat(64);
-        let provider = |id: &str, role: &str, port: u16, program: &str| {
-            format!(
-                "[[providers]]\nid = \"{id}\"\nrole = \"{role}\"\n{program}version = \"1\"\n\
-                 url = \"http://127.0.0.1:{port}\"\ntoken_hash = \"{hash}\"\nenabled = true\n"
-            )
-        };
-        let registry = |programs: [&str; 4]| {
-            format!(
-                "data_dir = \"state\"\n[core]\nlisten = \"127.0.0.1:44000\"\n\
-                 operator_token_hash = \"{hash}\"\n{}{}{}{}",
-                provider("discord-private", "interface", 44_001, programs[0]),
-                provider("runtime-pi", "runtime", 44_002, programs[1]),
-                provider("runtime-t3", "runtime", 44_003, programs[2]),
-                provider("chat", "interface", 44_009, programs[3]),
-            )
-        };
-        let directory = tempfile::tempdir()?;
-        let home = directory.path().join("owner's installation");
-        let path = home.join("carillon.toml");
-        std::fs::create_dir(&home)?;
-        std::fs::write(&path, registry(["", "program = \"runtime-pi\"\n", "", ""]))?;
-        let refusal = Config::read(&path).err().map(|error| format!("{error:#}"));
-        let refusal = refusal.unwrap_or_default();
-        let expected = format!(
-            "  2. Add a line to each of these providers in {}:\n     \
-             discord-private: program = \"discord\"\n     \
-             runtime-t3: program = \"runtime-t3\"\n     \
-             chat: name the program that serves it. Those this release bundles: \
-             program = \"discord\", program = \"runtime-pi\", program = \"runtime-t3\"\n  \
-             3. Unpack",
-            path.display()
-        );
-        assert!(refusal.contains(&expected), "{refusal}");
-
-        let record = "printf '%s\\n' \"${CARILLON_HOME:-} $*\" >>\"$RECORD\"\n";
-        let release = directory.path().join(format!("carillon-{RELEASE_VERSION}"));
-        std::fs::create_dir(&release)?;
-        for program in [
-            directory.path().join("carillon"),
-            release.join("install.sh"),
-        ] {
-            std::fs::write(&program, format!("#!/bin/sh\n{record}"))?;
-            std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let search = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-        ))?;
-        let printed = refusal.lines().map(str::trim);
-        for command in printed.filter(|line| {
-            line.starts_with("carillon --home ") || line.starts_with("CARILLON_HOME=")
-        }) {
-            let ran = std::process::Command::new("sh")
-                .args(["-c", command])
-                .current_dir(directory.path())
-                .env("PATH", &search)
-                .env_remove("CARILLON_HOME")
-                .env("RECORD", directory.path().join("record"))
-                .status()?;
-            assert!(ran.success(), "{command}");
-        }
-        let home = home.display();
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("record"))?,
-            format!(" --home {home} stop\n{home} --update\n --home {home} start\n")
-        );
-        let programs = ["discord", "runtime-pi", "runtime-t3", "example"]
-            .map(|program| format!("program = \"{program}\"\n"));
-        std::fs::write(&path, registry(programs.each_ref().map(String::as_str)))?;
-        Config::read(&path)?.validate()
     }
 
     #[test]

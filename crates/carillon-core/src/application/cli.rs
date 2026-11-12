@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result};
 use carillon_installation::{
     bundled::Bundled,
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
+    crossing::Crossing,
     home,
     maintenance::MaintenanceLock,
     prompt::Terminal,
@@ -25,10 +26,12 @@ use tracing_subscriber::EnvFilter;
 
 use carillon_installation::maintenance::ServiceLock;
 
+use crate::db::OtherFormat;
+
 use super::{
     admin::{backup, restore, set_provider},
     drain::{Pace, drain, stop},
-    http::{Applied, RegistryStatus, check, serve},
+    http::{Applied, CoreDatabase, RegistryStatus, check, serve},
     operations::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
         operator_url, print_health, registry_status, status, wait_until_healthy,
@@ -268,7 +271,7 @@ pub(crate) async fn run() -> Result<()> {
             serve(config.canonicalize()?, loaded).await?;
         }
         Command::Restore { input, target } => {
-            println!("{}", restore(&input, &target)?.display());
+            println!("{}", restore_backup(&input, &target)?.display());
         }
         Command::Init {
             workspace,
@@ -283,18 +286,23 @@ pub(crate) async fn run() -> Result<()> {
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
             let home = home()?;
-            check(&load(&home)?).with_context(|| {
+            let stored = check(&load(&home)?).with_context(|| {
                 format!(
                     "Carillon {} cannot use the installation at {}",
                     RELEASE_VERSION,
                     home.display()
                 )
             })?;
-            println!(
-                "registry and core database at {} are compatible with Carillon {}",
-                home.display(),
-                RELEASE_VERSION
-            );
+            let (checked, absent) = match stored {
+                CoreDatabase::Current => ("registry and core database", ""),
+                CoreDatabase::Absent => (
+                    "registry",
+                    ". There is no core database yet: this release's `install.sh --update` \
+                     creates it, and Carillon does not start before that",
+                ),
+            };
+            let home = home.display();
+            println!("Carillon {RELEASE_VERSION} can use the {checked} at {home}{absent}");
         }
         Command::Start(wait) => {
             let home = home()?;
@@ -344,6 +352,23 @@ pub(crate) async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn restore_backup(input: &Path, target: &Path) -> Result<PathBuf> {
+    restore(input, target).map_err(|error| {
+        let reason = if error.is::<Crossing>() {
+            "its carillon.toml names no program for a provider".to_owned()
+        } else if error.is::<OtherFormat>() {
+            format!("{error:#}")
+        } else {
+            return error;
+        };
+        anyhow::anyhow!(
+            "{} is not in a format Carillon {RELEASE_VERSION} restores: {reason}. If another \
+             release made it, that release restores it",
+            input.display()
+        )
+    })
 }
 
 /// Enables or disables a provider in `carillon.toml`, then has a running
@@ -609,6 +634,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use anyhow::{Context, Result};
+    use carillon_installation::config::RELEASE_VERSION;
 
     #[test]
     fn a_locked_provider_command_runs_only_under_the_maintenance_lock() -> Result<()> {
@@ -679,6 +705,72 @@ mod tests {
             std::path::Path::new(&home),
         )?;
         anyhow::ensure!(status.success(), "{status}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_backup_another_release_made_is_refused_as_that_releases_to_restore() -> Result<()> {
+        use flate2::{Compression, write::GzEncoder};
+
+        let directory = tempfile::tempdir()?;
+        let hash = "0".repeat(64);
+        let registry = format!(
+            "data_dir = \"state\"\n[core]\nlisten = \"127.0.0.1:44000\"\n\
+             operator_token_hash = \"{hash}\"\n[[providers]]\nid = \"runtime-pi\"\n\
+             role = \"runtime\"\nversion = \"1\"\nurl = \"http://127.0.0.1:44002\"\n\
+             token_hash = \"{hash}\"\nenabled = true\n"
+        );
+        let archive = directory.path().join("backup.tar.gz");
+        let file = std::fs::File::create(&archive)?;
+        let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::fast()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(registry.len() as u64);
+        header.set_mode(0o600);
+        builder.append_data(&mut header, "carillon.toml", registry.as_bytes())?;
+        builder.into_inner()?.finish()?;
+
+        let target = directory.path().join("restored");
+        let refusal = format!(
+            "{} is not in a format Carillon {RELEASE_VERSION} restores: its carillon.toml names \
+             no program for a provider. If another release made it, that release restores it",
+            archive.display(),
+        );
+        let refused = super::restore_backup(&archive, &target).err();
+        let refused = refused.map(|error| format!("{error:#}"));
+        assert_eq!(refused, Some(refusal));
+        assert!(!target.exists(), "a refused backup was published");
+        Ok(())
+    }
+
+    #[test]
+    fn a_damaged_backup_of_this_release_is_refused_with_what_is_wrong() -> Result<()> {
+        use carillon_installation::bundled::Bundled;
+        use flate2::{Compression, write::GzEncoder};
+
+        let directory = tempfile::tempdir()?;
+        let home = directory.path().join("home");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace)?;
+        crate::application::setup::init(&home, Some(&workspace), 44_100, &[Bundled::Discord])?;
+        rusqlite::Connection::open(home.join("state/carillon.sqlite3"))?
+            .execute_batch("DROP INDEX turns_queued")?;
+        let archive = directory.path().join("backup.tar.gz");
+        let file = std::fs::File::create(&archive)?;
+        let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::fast()));
+        builder.append_dir_all(".", &home)?;
+        builder.into_inner()?.finish()?;
+
+        let target = directory.path().join("restored");
+        let refusal = format!(
+            "{} is not in a format Carillon {RELEASE_VERSION} restores: backup does not contain \
+             a valid current core database: database schema is not the current Carillon \
+             format. If another release made it, that release restores it",
+            archive.display(),
+        );
+        let refused = super::restore_backup(&archive, &target).err();
+        let refused = refused.map(|error| format!("{error:#}"));
+        assert_eq!(refused, Some(refusal));
+        assert!(!target.exists(), "a refused backup was published");
         Ok(())
     }
 

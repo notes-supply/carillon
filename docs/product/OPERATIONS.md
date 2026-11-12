@@ -21,8 +21,8 @@ agent can do what you can.
 
 Carillon is a public beta. Each release reads only its own state and
 configuration format. When a format changes, `carillon update` refuses before
-stopping anything and the release notes say how to move forward. There are no
-migrations.
+stopping anything and prints how to cross
+([When a format changes](#when-a-format-changes)). There are no migrations.
 
 ## Install
 
@@ -130,8 +130,8 @@ the models Pi offers.
 
 Rerunning the installer with options keeps the registry, credentials and
 state, and writes the guild, bot and people from them. A `carillon.toml`
-copied from another installation, without its state, gets a new database
-(see [Update](#update)). `--route` only creates the first routes: a rerun
+copied from another installation, without its state, gets a new database.
+`--route` only creates the first routes: a rerun
 must name the routes the settings already have, and changes a route only
 through [Settings](#settings). Use `carillon update` for new releases.
 
@@ -941,8 +941,10 @@ carillon restore --input carillon.tar.gz --target /new/carillon
 /new/carillon/app/bin/carillon start
 ```
 
-Restore only accepts a backup of the current format, and doesn't check
-provider credentials: check `carillon status` afterwards.
+Restore only accepts a backup in its own release's formats, and says what
+it found when it refuses one. If another release made the backup, that
+release restores it. Restore doesn't check provider credentials: check
+`carillon status` afterwards.
 
 ## Update
 
@@ -963,75 +965,123 @@ whatever its ID, and leaves the rest of the file as it was. A provider you
 installed separately keeps its version. Update keeps credentials, provider settings, state, sessions and
 logs. A refusal changes nothing. If a later step fails, the message says what
 changed; rerun the same update until it succeeds before starting services.
-There's no downgrade: restore a backup made before the update instead.
+There's no downgrade: restore a backup made before the update, with the
+release that made it.
 
 Maintenance commands take a lock per installation (`.maintenance.lock`) and
 one on the owner's user units, and refuse while another holds them.
 
-### Updating from 0.1.0-beta.9
+### When a format changes
 
-Releases after 0.1.0-beta.9 need `program` on every provider in
-`carillon.toml`, and 0.1.0-beta.9 rejects a file that has it. So this one
-update can't finish through `carillon update`. Run it first anyway: it
-changes nothing, stops nothing, and prints these steps with your
-installation's path in each command and the line for each provider whose ID
-is a standard one.
+A release reads `carillon.toml` and core's database only in its own format,
+and nothing migrates them. When another release wrote either one, `carillon
+update` refuses before it stops anything and prints the steps below, with
+your installation's path in every command and only the steps your
+installation needs. When they are printed again after you began, leave out
+what you have done. The new release's `install.sh --update` makes the same
+check before it publishes, so the release you have stays installed until the
+steps are done.
 
-1. Stop Carillon with the release it has: `carillon stop`. Stop before you
-   edit, because 0.1.0-beta.9's services don't restart on the edited file.
-2. Add a line to each provider in `carillon.toml`. A standard installation
-   needs `program = "discord"` under `id = "discord-private"`,
-   `program = "runtime-pi"` under `id = "runtime-pi"`, and
-   `program = "runtime-t3"` under `id = "runtime-t3"` when it has T3. A
-   provider with any other ID needs the program that serves it, which only
-   you can name.
-3. Unpack the new release's archive, the file you gave `carillon update`,
-   and run its installer:
+You cross in place. Core's records start over and everything else stays
+where it is.
+
+1. Wait until `carillon status` shows no turn and no delivery pending or
+   active, then stop Carillon with the release it has: `carillon stop`. An
+   answer still running or not yet delivered at the stop is lost.
+2. Back up with that release. The backup is the way back:
+
+   ```sh
+   carillon backup --output ~/.carillon-before-VERSION.tar.gz
+   ```
+
+3. If the refusal lists `program` lines, add each one to `carillon.toml`
+   under the `id` line it names, and change nothing else there. The
+   installer sets the versions.
+   [Updating from 0.1.0-beta.9](#updating-from-010-beta9) lists the lines.
+4. Set core's database and the files it kept aside, in a folder nothing
+   reads:
+
+   ```sh
+   mkdir -m 700 ~/.carillon/core-before-VERSION &&
+     mv ~/.carillon/state/carillon.sqlite3* ~/.carillon/core-before-VERSION &&
+     { [ ! -e ~/.carillon/state/attachments ] || mv ~/.carillon/state/attachments ~/.carillon/core-before-VERSION; }
+   ```
+
+   The terminal prints this as one line. It stops at `mkdir` when the
+   folder is there from an earlier crossing: move that folder away first.
+
+   Leave the rest of `state/` alone. `state/components` holds each
+   provider's own state, Pi's conversations, schedules and model choices
+   among it, and `state/resource-snapshots` holds the agent resources those
+   conversations run with.
+
+   To give up here, before step 5, remove the lines you added in step 3 and
+   move the folder's contents back into `state/`. The release you have then
+   starts as before.
+5. From one folder, unpack the new release's archive, the file you gave
+   `carillon update`, and run its installer. The second command is relative
+   to that folder, which you can delete afterwards. The installer checks
+   the installation again and creates a new core database. If step 4 was
+   skipped it refuses, prints the steps again and publishes nothing.
 
    ```sh
    tar -xzf carillon-VERSION-linux-x86_64.tar.gz
    CARILLON_HOME=~/.carillon carillon-VERSION/install.sh --update
    ```
 
-4. Start Carillon: `carillon start`.
+6. Start Carillon: `carillon start`.
+
+What starts over is core's own: its record of past turns, which `carillon
+recent` and `carillon inspect` show, and the files it kept, which are
+people's uploads and the files the assistant attached. The assistant's
+history still mentions those files, but it can no longer open them.
+
+Everything else stays, because the steps move nothing else: the assistant's
+conversations with their history, its schedules, the model and settings Pi
+keeps for each agent and channel, the Discord settings, credentials,
+sign-ins and logs. T3's settings and the state of its runtime are not
+touched either, and T3 keeps its own threads.
+
+Each schedule resumes after the next message in its conversation. Until
+then the new core doesn't know the conversation, so a run that falls due is
+skipped, not postponed. Each skipped run leaves a few lines in `carillon
+logs runtime-pi`: `opening schedule:…: Error: core opened no turn`, a stack
+trace, and `giving it up`. They are expected. Write once in each
+conversation that has a schedule.
+
+Nothing reads `core-before-VERSION`. Delete it when you no longer want it;
+until then every backup includes it.
+
+To go back, restore the backup with the release that made it. The new
+release refuses a backup in another format. Stop Carillon, move
+`~/.carillon` aside, unpack the earlier release's archive and run:
+
+```sh
+carillon-EARLIER/bin/carillon restore --input ~/.carillon-before-VERSION.tar.gz --target ~/.carillon
+~/.carillon/app/bin/carillon-register-services
+carillon start
+```
+
+The backup holds the installation as it was at step 2, so what the
+assistant heard after it is not there.
+
+### Updating from 0.1.0-beta.9
+
+Releases after 0.1.0-beta.9 changed both formats. They need `program` on
+every provider in `carillon.toml`, which 0.1.0-beta.9 rejects, and core's
+database gained columns. So this update can't finish through `carillon
+update`. Run it first anyway: it changes nothing, stops nothing, and prints
+all six steps of [When a format changes](#when-a-format-changes), with the
+line for each provider whose ID is a standard one.
+
+Stop before you edit, because 0.1.0-beta.9's services don't restart on the
+edited file. A standard installation needs `program = "discord"` under
+`id = "discord-private"`, `program = "runtime-pi"` under
+`id = "runtime-pi"`, and `program = "runtime-t3"` under `id = "runtime-t3"`
+when it has T3. A provider with any other ID needs the program that serves
+it, which only you can name.
 
 Later updates use `carillon update` again.
-
-### When update refuses the database format
-
-A release with another database format is installed fresh: `carillon update`
-says the database schema is not the current Carillon format and changes
-nothing. To move to it:
-
-1. Run `carillon stop`, then move `~/.carillon` aside.
-2. Create a new `~/.carillon` with mode 700. Copy these from the old one,
-   keeping their modes: `carillon.toml`, `providers/*.toml`, `credentials/`,
-   `pi/auth.json`, `pi/models.json`, `pi/settings.json`, `pi/mcp.json` if
-   you have one, and `agents/`. If the `[module]` table of
-   `providers/discord-private.toml` enables a module of your own kept
-   inside `~/.carillon`, outside `app/`, copy that file to the same path. A
-   relative `path` there starts at `~/.carillon`.
-3. Run the new release's `install.sh` the way you installed before.
-   - **Guided**, without options. Setup asks no runtime question: it uses
-     the runtimes `carillon.toml` registers. With T3, it asks "Keep the T3
-     settings and agents?". Yes keeps T3's address, token and projects and
-     asks the model of each T3 agent. No asks the address, token, projects
-     and models again. With Pi, it says Pi is signed in, then asks the
-     model of each Pi agent. Discord checks the saved bot token and asks
-     "Keep the saved Discord bot and settings?". Then Carillon starts.
-   - **Without questions**, with the Discord options you used before,
-     every route included. The bot token and the Pi sign-in are already
-     in place, so skip the first two steps it prints. Run `carillon
-     start`, then give each agent its model with `carillon settings
-     --agent AGENT model=PROVIDER/MODEL`.
-
-   Either way, the installer creates a new database and sets the versions
-   in `carillon.toml` as an update does.
-
-`state/` starts empty, so turn history, conversations, Pi's conversations
-and scheduled runs do not carry over. T3 per-thread model choices do not
-carry over either. Each channel runs its agent's model until someone picks
-one with `/settings`.
 
 Earlier releases ran Carillon's assistant on T3 through T3 instances of its
 own, `carillon_claude` and `carillon_codex`. Nothing uses them now, and T3

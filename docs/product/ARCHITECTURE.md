@@ -401,7 +401,9 @@ endings stay.
 
 `program` names the program that serves a provider, `carillon-<program>`,
 and every entry has one. A file without it is refused with the lines to
-add, and nothing migrates it. `Bundled` in `carillon-installation` is the
+add, and nothing migrates it. `Crossing` in `carillon-installation` owns
+that refusal's text and the one for a core database in another format: the
+steps that cross to this release in place. `Bundled` in `carillon-installation` is the
 one list of the programs a release ships: `discord`, `runtime-pi` and
 `runtime-t3`. It owns each one's standard ID, role, version and port above
 core's (Discord +1, Pi +2, T3 +3, with +4 kept for the web interface).

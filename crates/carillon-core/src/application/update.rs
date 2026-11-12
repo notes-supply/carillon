@@ -6,11 +6,11 @@
 //! `install.sh --update --check` verifies its payload against the packager's
 //! manifest and lets the release's programs validate the installed registry,
 //! core database and Discord settings read-only. Only then are services
-//! stopped and `install.sh --update` performs the existing application
-//! exchange, has the new release expect the providers it bundles in
-//! `carillon.toml`, and registers the services. Application files, user units
-//! and systemd are not one transaction, so failures report what may have
-//! changed and how to finish, instead of rolling back.
+//! stopped and `install.sh --update`, after the same checks, performs the
+//! existing application exchange, has the new release expect the providers
+//! it bundles in `carillon.toml`, and registers the services. Application
+//! files, user units and systemd are not one transaction, so failures report
+//! what may have changed and how to finish, instead of rolling back.
 
 use std::{
     fs,
