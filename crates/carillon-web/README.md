@@ -65,7 +65,7 @@ trusts nothing a browser attaches on its own.
 - An `Origin` other than the provider's own is 403, a preflight's included.
   No answer has a CORS header.
 - The page runs under a content security policy that allows only its own
-  scripts, styles and images.
+  scripts, styles, images and fonts.
 - The token, a sign-in code and every file link are HMACs of the browser
   key. `carillon web sign-out` replaces the key, which voids them all.
 
@@ -77,6 +77,10 @@ here, as its other providers do. `carillon web sign-out` voids what such a
 page could have taken. `carillon web open` refuses to make a link when
 nothing listens, but it cannot tell another listener from the provider.
 
+`carillon web open` hands the sign-in link, with its two-minute code, to the
+browser opener as a process argument. Other users of the machine can read
+a process's arguments while it runs.
+
 ## The page's files
 
 The page is plain files, read from disk on each request, so an edit shows
@@ -87,7 +91,8 @@ In a checkout, name the directory: `--site crates/carillon-web/site`.
 A complete copy in `state/components/<id>/site/` is served instead of the
 release's. A copy is complete when it has an `index.html`. No file comes
 from the release while the copy is served. The directory is flat, and the
-provider serves `.html`, `.js`, `.css`, `.svg` and `.png` files from it.
+provider serves `.html`, `.js`, `.css`, `.svg`, `.png` and `.woff2` files
+from it.
 
 Only a regular file in the folder is served. A symbolic link inside the
 folder is answered with 404, because the page's files need no token and such
@@ -97,7 +102,38 @@ page. So a `site` that is a link to a folder with an `index.html` counts as
 the custom page, and everything servable in that folder is public to this
 machine.
 
-The files in [`site/`](site) only prove sign-in, reading and sending.
+### What the page is made of
+
+The files in [`site/`](site) are the source. Nothing builds them, so an
+edit there, or in your own copy, is the whole change.
+
+- [`index.html`](site/index.html) has every element the script looks up by
+  ID. [`style.css`](site/style.css) has both colour schemes as one named
+  palette at its top, and the phone layout at its end.
+- [`model.js`](site/model.js) decides, and touches no document: what a poll
+  compares, how turns merge, how a message waits for its receipt, what a
+  turn shows for each state and which controls to offer. Its tests are in
+  [`test/`](test), outside the folder that ships.
+- [`view.js`](site/view.js) builds elements from what the model decides.
+  Every string goes in as text. The one exception is `prose`, which
+  inserts the HTML the provider rendered for an answer.
+- [`api.js`](site/api.js) makes the requests. [`app.js`](site/app.js) holds
+  what is on screen and wires the page together.
+
+The modules are JavaScript with JSDoc types. `mise run check:ts` formats,
+lints and type-checks them against the DOM, and runs the model's tests.
+
+In the browser the page keeps the token and, for each conversation, the
+text not yet received by Carillon: what is in the composer and, until its
+receipt, the message on its way. It keeps no event ID and no file, so a
+reload sends nothing by itself.
+
+Answers are set in Literata, by the Literata Project Authors, under the SIL
+Open Font License 1.1. [`literata.woff2`](site/literata.woff2) and
+[`literata-italic.woff2`](site/literata-italic.woff2) are subsets of it for
+Latin text, and [`literata-OFL.txt`](site/literata-OFL.txt) is its license.
+A copy of the page without the font files reads in the faces `style.css`
+names after it.
 
 ## Browser API
 
@@ -281,7 +317,9 @@ neutrally.
 `html` is the answer's Markdown, rendered by the provider. Insert it as it
 is. Raw HTML in an answer is shown as text. A link stays a link only to
 `http`, `https` or `mailto`, and opens in a new tab. An image becomes a link
-to it.
+to it. A table's cell that is aligned has the class `align-left`,
+`align-center` or `align-right`, because the page's policy allows no inline
+style.
 
 `report` is an ended turn's final [activity snapshot](#the-activity-snapshot),
 or null. Its `phase` is the last phase the turn was in while it ran. Draw an
@@ -471,8 +509,9 @@ GET /api/conversations/<conversation>/commands?agent=assistant
 The list is what the conversation's runtime offers its agent, in the
 runtime's order. `description` and `hint`, the arguments a command expects,
 are optional. Pass `agent` for a conversation that has no message yet. To
-invoke a command, send a message whose text starts with the command's name,
-with `command=true`.
+invoke a command, send a message whose text is `/`, the command's name and
+then any arguments, with `command=true`: `/skill:carillon-status` for the
+command above.
 
 The refusals are those of a send's `agent`: 404 for a new conversation with
 no agent named, 422 for an agent Carillon does not have, and 409 for another
@@ -504,4 +543,5 @@ its agent's model. Change that with `carillon settings --agent`.
   its files.
 - [`files.rs`](src/files.rs): signed file links. [`markdown.rs`](src/markdown.rs):
   answers as HTML.
-- [`site.rs`](src/site.rs): the page's files.
+- [`site.rs`](src/site.rs): how the page's files are served.
+  [`site/`](site): the page.

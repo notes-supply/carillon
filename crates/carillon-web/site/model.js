@@ -257,7 +257,7 @@ export function sendingLine({ stage, sent, total, files }) {
  * @param {Command[]} commands
  */
 export function offered(text, commands) {
-  if (!/^\/\S*$/u.test(text)) return [];
+  if (!text.startsWith("/")) return [];
   return commands.filter((command) => command.name.startsWith(text.slice(1)));
 }
 
