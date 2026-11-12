@@ -113,9 +113,18 @@ install -m 0644 "$PHOTON/photon_rs_bg.wasm" "$STAGE/bin/"
 # at bun-v1.4.4), Pi's, and notices for the Rust crates and npm packages.
 install -m 0644 LICENSE "$STAGE/licenses/Apache-2.0.txt"
 install -m 0644 licenses/pi-coding-agent.txt licenses/bun.md licenses/MIT.txt "$STAGE/licenses/"
-find crates/carillon-web/site -maxdepth 1 -name '*.txt' -exec install -m 0644 {} "$STAGE/licenses/" \;
 cargo about generate --locked --fail -c licenses/about.toml licenses/rust.hbs -o "$STAGE/licenses/rust.txt"
 node scripts/npm-notices.mjs "$STAGE" >"$STAGE/licenses/npm.txt"
+# A typeface the page ships has its SIL Open Font License beside it, as
+# NAME-OFL.txt. It joins the notices, and replaces none of them.
+for notice in crates/carillon-web/site/*-OFL.txt; do
+  [ -f "$notice" ] || continue
+  if [ -e "$STAGE/licenses/${notice##*/}" ]; then
+    echo "the page's ${notice##*/} has the name of another notice in licenses/" >&2
+    exit 1
+  fi
+  install -m 0644 "$notice" "$STAGE/licenses/"
+done
 
 # Installation checks the payload against this list before changing anything:
 # every shipped file, marked `x` when the installer must be able to execute it.

@@ -19,6 +19,7 @@ mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discor
   "$FIXTURE/packages/runtime-pi" "$FIXTURE/crates/carillon-web/site"
 printf page >"$FIXTURE/crates/carillon-web/site/index.html"
 printf 'typeface licence' >"$FIXTURE/crates/carillon-web/site/typeface-OFL.txt"
+printf 'not a licence' >"$FIXTURE/crates/carillon-web/site/robots.txt"
 cp "$ROOT/LICENSE" "$FIXTURE/"
 cp "$ROOT/licenses/MIT.txt" "$ROOT/licenses/bun.md" "$FIXTURE/licenses/"
 # One npm dependency with a licence file, one without, as pnpm lists them.
@@ -135,6 +136,11 @@ for arch in x86_64 aarch64; do
   grep -F 'without-file 2.0.0 (MIT)' "$TEST_ROOT/$arch.npm" >/dev/null
   grep -F 'declares MIT, by Someone; the standard text is licenses/MIT.txt' "$TEST_ROOT/$arch.npm" >/dev/null
   [ "$(tar -xOf "$archive" carillon-1.2.3/bin/photon_rs_bg.wasm)" = photon ]
+  if tar -tzf "$archive" carillon-1.2.3/licenses/robots.txt >/dev/null 2>&1; then
+    echo 'a text file of the page that is no licence is among the notices' >&2
+    exit 1
+  fi
+  tar -tzf "$archive" carillon-1.2.3/lib/web/robots.txt >/dev/null
   # The manifest lists exactly the shipped files, marking what must be executable.
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-web' \
