@@ -278,7 +278,8 @@ out while only one interface is enabled. With more, the command refuses
 and lists them. Only the named interface is asked, so another interface
 that is down doesn't block a change. The listing prints each interface's ID
 with its channels under it. An interface that doesn't answer says so in
-place of its channels, and the listing fails only when none answers.
+place of its channels, and the listing fails only when none answers. One
+with no channel pages says so too.
 `carillon settings --interface ID` lists one interface's channels.
 
 A key names a line, such as `model`, `thinking` or `agent`. A value is a
@@ -286,6 +287,9 @@ choice's ID or name: `listens=mention` or `listens=always`, `replies=thread`
 or `replies=channel`. A value that matches no choice lists the choices. Each change uses
 the page the one before it returned, and the command stops at the first
 change that is refused, naming its key and the keys already applied.
+
+A web chat has no page of its own. It takes its agent's model, which
+`carillon settings --agent` changes.
 
 The agent's value is its channels' only default. An agent without one fails
 every message with an explanation that names `carillon settings --agent`.

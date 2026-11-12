@@ -206,6 +206,24 @@ a reaction instead. A graceful stop records the gateway
 session so the next start can resume it and have Discord replay what it
 missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 
+The web provider (`carillon-web`) serves a chat page to the installing
+user's own browser on the same machine. No release registers it yet: a
+registry entry with `program = "web"` and `delivery = "retained"` runs it.
+It keeps no conversation. The page lists conversations and reads turns
+through the provider from core's history, polls the list, and asks for
+the live state of the unfinished turns on screen. A conversation is one UUID
+the page mints, which is its audience, its channel and its delivery target
+in core, and its agent is chosen with its first message and never changes.
+A message's event ID is the page's too, so a retry is the first message
+again. Uploads stream into a staging batch of the request's own. Answers
+are rendered to HTML by the provider, and files are read by signed links
+that expire. A browser signs in with a single-use code that
+`carillon web open` gets with the operator's credential, then sends a
+bearer token. Every request must name the provider in `Host` and come from
+its own origin. The provider's only durable file is the key that the token
+and the file links are made from, which `carillon web sign-out` replaces.
+See the [web guide](../../crates/carillon-web/README.md).
+
 ### Replaceable Discord module
 
 Slash commands, their controls and the cards come from one WebAssembly
@@ -381,6 +399,9 @@ channel of the guild with no route, the page has only the Agent line and no
 subject; choosing an agent creates the route, and no runtime is asked
 before it exists. Direct messages' page, for the operator only, works the
 same way under the channel `dm`.
+
+A web chat has no page: it is its own channel in core, sets nothing there
+and so runs its agent's model.
 
 A turn takes its channel's unit, else its agent's, when the runtime admits
 it. Core records each conversation's channel with its first admitted

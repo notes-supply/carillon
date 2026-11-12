@@ -128,3 +128,25 @@ async fn channels_are_listed_under_their_interface_and_a_silent_one_says_so() ->
     served.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn an_interface_with_no_channel_pages_says_so_under_its_name() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (mut config, _stub, served) = installation(directory.path()).await?;
+    let web = TcpListener::bind("127.0.0.1:0").await?;
+    with_web(&mut config, &web)?;
+    let pages = Router::new().route("/v1/channels", get(|| async { Json(Vec::<Page>::new()) }));
+    let web = tokio::spawn(async move { axum::serve(web, pages).await });
+    assert_eq!(
+        named(&config, "web", &[]).await?,
+        "web\n  no channels with settings of their own\n"
+    );
+    assert!(
+        run(&config, None, &[])
+            .await?
+            .ends_with("Sol, Medium\nweb\n  no channels with settings of their own\n")
+    );
+    web.abort();
+    served.abort();
+    Ok(())
+}

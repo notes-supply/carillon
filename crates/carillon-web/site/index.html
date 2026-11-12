@@ -1,5 +1,21 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>Carillon</title>
-<main id="main">Carillon</main>
-<script type="module" src="app.js"></script>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Carillon</title>
+  </head>
+  <body>
+    <h1>Carillon</h1>
+    <p id="status"></p>
+    <ul id="conversations"></ul>
+    <form id="send">
+      <select name="agent" aria-label="Agent"></select>
+      <input name="text" aria-label="Message" autocomplete="off" />
+      <input name="file" type="file" multiple aria-label="Files" />
+      <button>Send</button>
+    </form>
+    <ol id="turns"></ol>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
