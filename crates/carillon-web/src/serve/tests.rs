@@ -18,13 +18,22 @@ use crate::fixture::{
 };
 
 /// One route of each class the provider serves.
-const ROUTES: [(Method, &str); 8] = [
+const ROUTES: [(Method, &str); 11] = [
     (Method::GET, "/"),
     (Method::GET, "/app.js"),
     (Method::GET, "/health"),
     (Method::POST, "/api/sign-in"),
     (Method::GET, "/api/session"),
     (Method::GET, "/api/conversations"),
+    (
+        Method::PUT,
+        "/api/conversations/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b",
+    ),
+    (Method::GET, "/api/turns?ids=a"),
+    (
+        Method::POST,
+        "/api/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/control",
+    ),
     (Method::POST, "/v1/sign-in"),
     (Method::GET, "/files/capture/0?name=a&exp=1&sig=00"),
 ];

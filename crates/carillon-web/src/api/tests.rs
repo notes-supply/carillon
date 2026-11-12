@@ -1,15 +1,21 @@
 //! What the page reads: core's wire types as the page's own.
 
 use anyhow::{Context as _, Result};
-use axum::http::StatusCode;
+use axum::{
+    body::Body,
+    http::{Method, StatusCode, header::CONTENT_TYPE},
+};
 use carillon_protocol::{
     conversations::{Transcript, TranscriptAnswer, TranscriptTurn, TurnSource},
-    model::{ActivityPhase, AnswerFile, DeliveryState, TurnActivity, TurnAttachment, TurnState},
-    turns::Silence,
+    model::{
+        ActivityPhase, AnswerFile, DeliveryState, Job, JobTurn, Origin, TurnActivity,
+        TurnAttachment, TurnState,
+    },
+    turns::{ControlAction, Silence},
 };
 use serde_json::{Value, json};
 
-use crate::fixture::{Fixture, conversation};
+use crate::fixture::{Fixture, bearer, conversation};
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
 
@@ -335,5 +341,232 @@ async fn a_conversation_is_named_by_one_lowercase_uuid_that_core_knows() -> Resu
         .push(conversation("second", CHAT, 2));
     let answer = fixture.get(&turns(CHAT), &token).await?;
     assert_eq!(answer.status, StatusCode::CONFLICT);
+    Ok(())
+}
+
+fn job(
+    turn: &str,
+    feedback: Option<&str>,
+    state: TurnState,
+    activity: Option<TurnActivity>,
+) -> Job {
+    Job {
+        origin: Origin {
+            turn_id: turn.to_owned(),
+            accepted_at: 10,
+        },
+        target_id: CHAT.to_owned(),
+        feedback_target_id: feedback.map(str::to_owned),
+        turns: vec![JobTurn {
+            turn_id: turn.to_owned(),
+            state,
+            accepted_at: 10,
+            finished_at: None,
+            activity,
+            delivery: None,
+        }],
+        earlier: false,
+    }
+}
+
+#[tokio::test]
+async fn a_live_read_says_how_each_named_turn_stands_and_what_may_be_done_with_it() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let offering = |phase, controls: &[ControlAction]| TurnActivity {
+        phase,
+        controls: controls.to_vec(),
+        ..report()
+    };
+    let waiting = offering(
+        ActivityPhase::Queued,
+        &[ControlAction::Steer, ControlAction::Stop],
+    );
+    fixture.core().jobs = vec![
+        job("queued", Some("m-1"), TurnState::Queued, None),
+        job(
+            "held",
+            Some("m-2"),
+            TurnState::Running,
+            Some(waiting.clone()),
+        ),
+        job(
+            "working",
+            Some("m-3"),
+            TurnState::Running,
+            Some(offering(ActivityPhase::Tools, &[])),
+        ),
+        job(
+            "opened",
+            None,
+            TurnState::Running,
+            Some(offering(ActivityPhase::Model, &[ControlAction::Stop])),
+        ),
+        job("done", Some("m-5"), TurnState::Completed, Some(report())),
+        job("failed", Some("m-6"), TurnState::Interrupted, None),
+        job("unasked", Some("m-7"), TurnState::Running, None),
+    ];
+    let read = fixture
+        .get(
+            "/api/turns?ids=queued,held,working,opened,done,failed,unknown",
+            &token,
+        )
+        .await?;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.text());
+    let body = read.json()?;
+    let stands: Vec<(&str, &str, Vec<&str>)> = body["turns"]
+        .as_array()
+        .context("no turns")?
+        .iter()
+        .map(|turn| {
+            (
+                turn["id"].as_str().unwrap_or_default(),
+                turn["state"].as_str().unwrap_or_default(),
+                turn["activity"]["controls"]
+                    .as_array()
+                    .map(|controls| controls.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stands,
+        [
+            ("queued", "queued", vec![]),
+            // The runtime holds it behind another turn: still waiting, to a person.
+            ("held", "queued", vec!["steer", "stop"]),
+            ("working", "running", vec![]),
+            // No message began it, so no control could name it.
+            ("opened", "running", vec![]),
+            ("done", "ended", vec![]),
+            ("failed", "ended", vec![]),
+        ]
+    );
+    // The snapshot is the runtime's, as given.
+    let mut held = serde_json::to_value(&waiting)?;
+    assert_eq!(body["turns"][1]["activity"], held.take());
+    assert_eq!(body["turns"][0]["activity"], Value::Null);
+    assert!(!read.text().contains("target_id") && !read.text().contains("m-2"));
+
+    let none = fixture.get("/api/turns?ids=", &token).await?;
+    assert_eq!(none.json()?, json!({"turns": []}));
+    let many = vec!["t"; 33].join(",");
+    let refused = fixture
+        .get(&format!("/api/turns?ids={many}"), &token)
+        .await?;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        fixture
+            .core()
+            .asked
+            .iter()
+            .filter(|asked| asked.starts_with("/v1/jobs"))
+            .count(),
+        1,
+        "only the read that named turns asked core"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_control_reaches_core_for_the_message_it_names_and_a_refusal_comes_back() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let event = "m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa";
+    let control = |event: &str, body: &str| {
+        bearer(
+            Method::POST,
+            &format!("/api/messages/{event}/control"),
+            &token,
+        )
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+    };
+    for action in ["steer", "interrupt", "stop"] {
+        let answer = fixture
+            .send(control(event, &json!({ "action": action }).to_string())?)
+            .await?;
+        assert_eq!(answer.status, StatusCode::NO_CONTENT, "{action}");
+        assert!(answer.body.is_empty());
+    }
+    let relayed: Vec<(String, ControlAction)> = fixture
+        .core()
+        .controls
+        .iter()
+        .map(|(event, control)| (event.clone(), control.action))
+        .collect();
+    assert_eq!(
+        relayed,
+        [
+            (event.to_owned(), ControlAction::Steer),
+            (event.to_owned(), ControlAction::Interrupt),
+            (event.to_owned(), ControlAction::Stop),
+        ]
+    );
+    for (event, body) in [
+        (event, "{\"action\":\"resume\"}"),
+        (event, "{}"),
+        ("runtime:schedule-1", "{\"action\":\"stop\"}"),
+        (
+            "0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa",
+            "{\"action\":\"stop\"}",
+        ),
+    ] {
+        let answer = fixture.send(control(event, body)?).await?;
+        assert!(answer.status.is_client_error(), "{event} {body}");
+    }
+    assert_eq!(
+        fixture.core().controls.len(),
+        3,
+        "a malformed control reached core"
+    );
+
+    fixture.core().refusal = Some((StatusCode::CONFLICT, "That turn no longer waits."));
+    let late = fixture
+        .send(control(event, "{\"action\":\"stop\"}")?)
+        .await?;
+    assert_eq!(late.status, StatusCode::CONFLICT);
+    assert_eq!(late.json()?, json!({"error": "That turn no longer waits."}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn commands_are_those_of_the_conversations_own_agent() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let commands = |query: &str| format!("/api/conversations/{CHAT}/commands{query}");
+    // Before its first message, a conversation has the agent the page names.
+    let new = fixture.get(&commands("?agent=assistant"), &token).await?;
+    assert_eq!(new.status, StatusCode::OK, "{}", new.text());
+    assert_eq!(
+        new.json()?,
+        json!({"commands": [{
+            "name": "skill:assistant",
+            "description": format!("in {CHAT}"),
+            "hint": CHAT,
+        }]})
+    );
+    let unnamed = fixture.get(&commands(""), &token).await?;
+    assert_eq!(unnamed.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    fixture
+        .core()
+        .conversations
+        .push(conversation("second", CHAT, 1));
+    let own = fixture.get(&commands(""), &token).await?;
+    assert_eq!(own.json()?["commands"][0]["name"], "skill:second");
+    let other = fixture.get(&commands("?agent=assistant"), &token).await?;
+    assert_eq!(other.status, StatusCode::CONFLICT);
+
+    fixture.core().refusal = Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The agent's runtime is disabled.",
+    ));
+    let unavailable = fixture.get(&commands(""), &token).await?;
+    assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unavailable.json()?,
+        json!({"error": "The agent's runtime is disabled."})
+    );
     Ok(())
 }

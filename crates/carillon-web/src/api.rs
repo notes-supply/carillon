@@ -9,20 +9,20 @@ use axum::{
     extract::DefaultBodyLimit,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use carillon_interface::InterfaceError;
 use carillon_protocol::{
     conversations::{ConversationSummary, TranscriptTurn, TurnSource},
-    model::{TurnActivity, TurnState},
-    turns::Silence,
+    model::{ActivityPhase, ConversationQuery, JOB_READ_LIMIT, TurnActivity, TurnState},
+    turns::{ControlAction, Silence},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     browser::refusal,
     files::{self, FileView},
-    identity::{ConversationId, known},
+    identity::{ConversationId, EventId, agent_of, known},
     markdown::render,
     send,
     serve::Web,
@@ -38,6 +38,9 @@ pub(crate) fn routes() -> Router<Arc<Web>> {
             "/conversations/{id}/messages/{event_id}",
             put(send::send).layer(DefaultBodyLimit::disable()),
         )
+        .route("/conversations/{id}/commands", get(commands))
+        .route("/turns", get(live))
+        .route("/messages/{event_id}/control", post(control))
 }
 
 #[derive(Deserialize)]
@@ -318,6 +321,156 @@ async fn turns(
         turns.push(Turn::of(&web, turn).await);
     }
     Ok(Json(Turns { turns, before }))
+}
+
+/// The turns a live read names, by ID, with commas between.
+#[derive(Deserialize)]
+struct Named {
+    ids: String,
+}
+
+#[derive(Serialize)]
+struct Live {
+    /// The named turns core has of this interface, in no order.
+    turns: Vec<LiveTurn>,
+}
+
+#[derive(Serialize)]
+struct LiveTurn {
+    id: String,
+    state: LiveState,
+    /// The runtime's latest snapshot, drawn as it is given. Its `controls`
+    /// are what a person may do with the turn now.
+    activity: Option<TurnActivity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveState {
+    /// It waits: for its runtime, or in it behind another turn.
+    Queued,
+    Running,
+    /// It has ended, and the conversation's turns say how.
+    Ended,
+}
+
+/// `GET /api/turns?ids=`: how the named unfinished turns stand now. A turn
+/// going from queued to running, and its progress, change nothing a
+/// conversation's summary shows, so the page asks here for the unfinished
+/// turns on screen.
+async fn live(
+    State(web): State<Arc<Web>>,
+    Query(Named { ids }): Query<Named>,
+) -> Result<Json<Live>, InterfaceError> {
+    let named: Vec<String> = ids
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if named.len() > JOB_READ_LIMIT {
+        return Err(refusal(
+            StatusCode::BAD_REQUEST,
+            &format!("A live read names at most {JOB_READ_LIMIT} turns."),
+        ));
+    }
+    let jobs = if named.is_empty() {
+        Vec::new()
+    } else {
+        web.core.named_jobs(&named).await?
+    };
+    let turns = jobs.into_iter().filter_map(|job| {
+        let began_by_message = job.feedback_target_id.is_some();
+        let turn = job.turns.into_iter().next_back()?;
+        let mut activity = turn.activity;
+        if let Some(activity) = &mut activity
+            && !began_by_message
+        {
+            // A control names its turn by the message that began it, and a
+            // turn the runtime opened has none.
+            activity.controls.clear();
+        }
+        let waits = activity
+            .as_ref()
+            .is_some_and(|activity| activity.phase == ActivityPhase::Queued);
+        Some(LiveTurn {
+            id: turn.turn_id,
+            state: match turn.state {
+                TurnState::Queued => LiveState::Queued,
+                TurnState::Running if waits => LiveState::Queued,
+                TurnState::Running => LiveState::Running,
+                TurnState::Completed | TurnState::Interrupted => LiveState::Ended,
+            },
+            activity,
+        })
+    });
+    Ok(Json(Live {
+        turns: turns.collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct Control {
+    action: ControlAction,
+}
+
+/// `POST /api/messages/{event_id}/control`: what a person does with the
+/// turn of a message while its snapshot offers that control. Core relays
+/// it to the runtime and keeps nothing of it.
+async fn control(
+    State(web): State<Arc<Web>>,
+    Path(event_id): Path<EventId>,
+    Json(Control { action }): Json<Control>,
+) -> Result<StatusCode, InterfaceError> {
+    web.core.control(event_id.as_str(), action).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The agent of a conversation core does not have yet.
+#[derive(Deserialize)]
+struct Chosen {
+    agent: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Commands {
+    /// In the runtime's order.
+    commands: Vec<Command>,
+}
+
+/// One of the runtime's own commands. A message invokes it with its name
+/// first in the text and `command=true`.
+#[derive(Serialize)]
+struct Command {
+    name: String,
+    description: Option<String>,
+    /// The arguments it expects, when the runtime says.
+    hint: Option<String>,
+}
+
+/// `GET /api/conversations/{id}/commands[?agent=]`: the commands the
+/// conversation's runtime offers its agent.
+async fn commands(
+    State(web): State<Arc<Web>>,
+    Path(id): Path<ConversationId>,
+    Query(Chosen { agent }): Query<Chosen>,
+) -> Result<Json<Commands>, InterfaceError> {
+    let query = ConversationQuery {
+        agent_id: agent_of(&web, id, agent).await?,
+        channel_id: id.to_string(),
+        audience_id: Some(id.to_string()),
+    };
+    let catalog = web.core.commands(&query).await?;
+    Ok(Json(Commands {
+        commands: catalog
+            .commands
+            .into_iter()
+            .map(|command| Command {
+                name: command.name,
+                description: command.description,
+                hint: command.hint,
+            })
+            .collect(),
+    }))
 }
 
 #[cfg(test)]
