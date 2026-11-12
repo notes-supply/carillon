@@ -35,8 +35,9 @@ Without Discord options, the installer asks at the terminal:
    assistant, the agent with Discord's context and Carillon's resources. T3
    runs T3 Code channels.
 2. **The interfaces.** Where people talk to Carillon. This release bundles
-   Discord (`--interface discord` answers it). An installation needs at
-   least one.
+   Discord. An installation needs at least one. `carillon setup` and
+   `carillon init` take `--interface discord` as the answer; the installer
+   has no such option.
 3. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), and the projects T3 Code channels
    work in: each becomes an agent that is plain T3 Code through Discord.
@@ -45,7 +46,8 @@ Without Discord options, the installer asks at the terminal:
    leave with Ctrl+D. Setup checks that Pi is signed in and offers to open
    it again until it is. Then it asks the model of each Pi agent that has
    none yet.
-5. **Each interface** is set up by its own program. Discord asks for the
+5. **Each interface** is set up by its own program; a rerun skips one that
+   is disabled. Discord asks for the
    bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
@@ -63,7 +65,9 @@ token). Kept T3 settings ask the model of each T3 agent that has none, and
 reach T3 only for those agents. The installer refuses while Carillon runs:
 stop it with `carillon stop` first, or update it with `carillon update
 ARCHIVE`. On an installed release, `carillon setup` asks the same
-questions, and `carillon discord setup` asks only Discord's. A rerun that
+questions, except that a rerun keeps the interfaces already registered
+without asking (`--interface discord` adds one), and `carillon discord
+setup` asks only Discord's. A rerun that
 changes the T3 settings or the bot token takes effect in a running Carillon
 at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
@@ -967,16 +971,20 @@ one on the owner's user units, and refuse while another holds them.
 Releases after 0.1.0-beta.9 need `program` on every provider in
 `carillon.toml`, and 0.1.0-beta.9 rejects a file that has it. So this one
 update can't finish through `carillon update`. Run it first anyway: it
-changes nothing, stops nothing, and prints these steps with the lines for
-your providers.
+changes nothing, stops nothing, and prints these steps with your
+installation's path in each command and the line for each provider whose ID
+is a standard one.
 
 1. Stop Carillon with the release it has: `carillon stop`. Stop before you
    edit, because 0.1.0-beta.9's services don't restart on the edited file.
 2. Add a line to each provider in `carillon.toml`. A standard installation
    needs `program = "discord"` under `id = "discord-private"`,
    `program = "runtime-pi"` under `id = "runtime-pi"`, and
-   `program = "runtime-t3"` under `id = "runtime-t3"` when it has T3.
-3. Unpack the new release and run its installer:
+   `program = "runtime-t3"` under `id = "runtime-t3"` when it has T3. A
+   provider with any other ID needs the program that serves it, which only
+   you can name.
+3. Unpack the new release's archive, the file you gave `carillon update`,
+   and run its installer:
 
    ```sh
    tar -xzf carillon-VERSION-linux-x86_64.tar.gz

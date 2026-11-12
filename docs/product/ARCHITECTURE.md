@@ -405,8 +405,9 @@ add, and nothing migrates it. `Bundled` in `carillon-installation` is the
 one list of the programs a release ships: `discord`, `runtime-pi` and
 `runtime-t3`. It owns each one's standard ID, role, version and port above
 core's (Discord +1, Pi +2, T3 +3, with +4 kept for the web interface).
-Initialization, setup, version stamping on update, Discord's choice of its
-instance and Pi's choice of Discord provider all read it. Registering a
+Initialization, setup, version stamping on update and Discord's choice of
+its instance all read it. Pi chooses its Discord provider by the `program`
+the registry gives each entry. Registering a
 program never changes an address the file already has, and it refuses when
 another provider holds the program's port. An entry whose program the
 release doesn't bundle keeps the version its owner wrote.
