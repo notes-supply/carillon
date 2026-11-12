@@ -80,6 +80,10 @@ use serde_json::Value;
 
 use crate::attachments::{Capture, CapturedFile};
 
+#[derive(Debug, thiserror::Error)]
+#[error("database schema is not the current Carillon format")]
+pub(crate) struct OtherFormat;
+
 #[derive(Clone)]
 pub(crate) struct Database {
     path: PathBuf,
@@ -197,7 +201,7 @@ impl Database {
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         };
         if schema(&connection)? != schema(&current)? {
-            bail!("database schema is not the current Carillon format");
+            return Err(OtherFormat.into());
         }
         Ok(())
     }

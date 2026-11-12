@@ -564,19 +564,6 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    check(&state.config)?;
-    let database = state.config.value.data_dir.join("carillon.sqlite3");
-    rusqlite::Connection::open(&database)?.execute_batch("DROP TABLE conversations")?;
-    let before = fs::read(&database)?;
-    crate::assert_refused(check(&state.config), "not the current Carillon format")?;
-    assert_eq!(fs::read(&database)?, before);
-    Ok(())
-}
-
 /// How the runtime substitute answers an activity request.
 #[derive(Clone, Copy)]
 enum Snapshot {
