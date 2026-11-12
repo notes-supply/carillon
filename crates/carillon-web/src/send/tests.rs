@@ -1,7 +1,10 @@
 //! Sending: the identities a message gets, what a retry does, and what the
 //! page is told when a message cannot be taken.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use axum::{
@@ -504,7 +507,9 @@ async fn a_browser_that_leaves_after_its_upload_does_not_take_the_files_from_cor
             .iter()
             .any(|asked| asked == "/v1/events")
     };
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !reached(&fixture) {
+        assert!(Instant::now() < deadline, "the message never reached core");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     browser.abort();
@@ -512,6 +517,7 @@ async fn a_browser_that_leaves_after_its_upload_does_not_take_the_files_from_cor
     assert_eq!(staged(&fixture)?, 1, "the files left with the browser");
     hold.notify_one();
     while fixture.core().events.is_empty() || staged(&fixture)? > 0 {
+        assert!(Instant::now() < deadline, "core never took the files");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(fixture.core().events[0].1, [b"still here".to_vec()]);
