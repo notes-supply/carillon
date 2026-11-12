@@ -266,7 +266,6 @@ async function testFiles(token) {
   assert.match(download.headers.get("content-disposition"), /^attachment;/u);
   assert.equal(await download.text(), "notes");
 
-  // A retry under the same event ID is the first message again.
   const again = await send(token, chat, event, message, { agent: "assistant", files });
   assert.deepEqual(again.body, { turn_id: turn.id, duplicate: true });
   assert.equal((await turns(token, chat)).length, 1);
@@ -374,7 +373,6 @@ try {
   await testControls(token);
   await testOpenedTurn(token, chat);
 
-  // A web chat has no settings page: it takes its agent's.
   for (const listing of [carillon("settings"), carillon("settings", "--interface", "web")])
     assert.match(listing, /^web\n {2}no channels with settings of their own$/mu);
   assert.match(

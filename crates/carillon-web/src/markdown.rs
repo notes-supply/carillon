@@ -12,8 +12,7 @@ use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html};
 pub(crate) fn render(markdown: &str) -> String {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    // Whether each link or image now open became an anchor.
-    let mut open = Vec::new();
+    let mut became_anchor = Vec::new();
     let events = Parser::new_ext(markdown, options).filter_map(|event| match event {
         Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
         Event::Start(
@@ -30,9 +29,9 @@ pub(crate) fn render(markdown: &str) -> String {
                 id,
             },
         ) => {
-            let kept =
-                !open.contains(&true) && (link_type == LinkType::Email || allowed(&dest_url));
-            open.push(kept);
+            let kept = !became_anchor.contains(&true)
+                && (link_type == LinkType::Email || allowed(&dest_url));
+            became_anchor.push(kept);
             kept.then_some(Event::Start(Tag::Link {
                 link_type,
                 dest_url,
@@ -40,7 +39,7 @@ pub(crate) fn render(markdown: &str) -> String {
                 id,
             }))
         }
-        Event::End(TagEnd::Link | TagEnd::Image) => open
+        Event::End(TagEnd::Link | TagEnd::Image) => became_anchor
             .pop()
             .unwrap_or_default()
             .then_some(Event::End(TagEnd::Link)),
@@ -149,7 +148,6 @@ mod tests {
             list.contains("<table>") && list.contains("<td>2</td>"),
             "{list}"
         );
-        // What looks like an anchor in code is text.
         assert_eq!(
             render("`<a href=x>`"),
             "<p><code>&lt;a href=x&gt;</code></p>\n"

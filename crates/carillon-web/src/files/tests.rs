@@ -94,7 +94,6 @@ async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<(
     let fixture = fixture().await?;
     let good = link(&fixture, "capture/0", "chart.png").await?;
     assert_eq!(follow(&fixture, &good).await?.status, StatusCode::OK);
-    // The same link all day, so the browser keeps what it fetched.
     assert_eq!(link(&fixture, "capture/0", "chart.png").await?, good);
 
     let (path, query) = good.split_once('?').context("no query")?;
@@ -181,7 +180,6 @@ async fn a_signed_path_that_leaves_the_store_names_nothing() -> Result<()> {
             "{path} left the store"
         );
     }
-    // A link's view of a path outside the store has no type of its own.
     let outside = serde_json::to_value(view(&fixture.web, "../secret", "x", 1).await)?;
     assert_eq!(outside["type"], "application/octet-stream");
     Ok(())

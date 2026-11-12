@@ -74,8 +74,6 @@ pub(crate) async fn serve(
         );
     }
     let data_dir = &config.value.data_dir;
-    // This instance owns the provider's state: staging left by an earlier
-    // one is abandoned and removed.
     let staging = Staging::open(attachment_staging(data_dir, &provider.id))?;
     let stopping = CancellationToken::new();
     let authority = provider
@@ -101,8 +99,6 @@ pub(crate) async fn serve(
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     info!(url = %provider.url, "web interface provider ready");
-    // A stop ends the wait for core of any message being submitted, then the
-    // server answers the requests it has and closes.
     axum::serve(listener, router(web))
         .with_graceful_shutdown(async move {
             tokio::select! {

@@ -64,7 +64,6 @@ async fn conversations_are_listed_as_core_orders_them_with_what_a_poll_compares(
         let mut working = conversation("second", CHAT, 7);
         working.at_work = 2;
         core.conversations.push(working);
-        // An audience the page could not have minted is not a conversation of it.
         core.conversations
             .push(conversation("assistant", "not-a-uuid", 5));
         core.conversations.push(conversation(
@@ -442,7 +441,6 @@ async fn a_live_read_says_how_each_named_turn_stands_and_what_may_be_done_with_i
             ("failed", "ended", vec![]),
         ]
     );
-    // The snapshot is the runtime's, as given.
     let mut held = serde_json::to_value(&waiting)?;
     assert_eq!(body["turns"][1]["activity"], held.take());
     assert_eq!(body["turns"][0]["activity"], Value::Null);
@@ -535,7 +533,6 @@ async fn commands_are_those_of_the_conversations_own_agent() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let commands = |query: &str| format!("/api/conversations/{CHAT}/commands{query}");
-    // Before its first message, a conversation has the agent the page names.
     let new = fixture.get(&commands("?agent=assistant"), &token).await?;
     assert_eq!(new.status, StatusCode::OK, "{}", new.text());
     assert_eq!(

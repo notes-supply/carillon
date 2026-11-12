@@ -18,9 +18,7 @@ carillon-interface = { path = "../carillon-interface" }
 carillon-protocol = { path = "../carillon-protocol" }
 clap.workspace = true
 hex.workspace = true
-# Signs the browser's token and file links with the browser key.
 hmac = "0.12.1"
-# Renders answers; the page inserts its HTML as given.
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
 reqwest.workspace = true
 serde.workspace = true

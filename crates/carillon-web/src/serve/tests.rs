@@ -226,7 +226,6 @@ async fn a_sign_in_code_works_once_and_for_two_minutes() -> Result<()> {
         StatusCode::UNAUTHORIZED
     );
 
-    // Signing out voids a code not yet used.
     let waiting = issue().await?;
     fixture
         .send(operator(Method::POST, "/v1/sign-out").body(Body::empty())?)

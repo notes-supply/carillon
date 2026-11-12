@@ -1,6 +1,3 @@
-// A bare page that proves sign-in, reading and sending. The real page
-// replaces these files. The routes are in ../README.md.
-
 const status = document.querySelector("#status");
 const form = document.querySelector("#send");
 /** The conversation shown, and whether core has it yet. */

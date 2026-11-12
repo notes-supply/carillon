@@ -141,7 +141,6 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
                 size: picture.len() as u64,
                 content_type: Some("image/png".to_owned()),
             },
-            // A part with no name gets one.
             StagedFile {
                 name: "file".to_owned(),
                 size: 5,
@@ -176,7 +175,6 @@ async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<(
         again.json()?,
         json!({"turn_id": format!("turn-{EVENT}"), "duplicate": true})
     );
-    // A plain message says nothing of intent.
     assert_eq!(fixture.core().events[0].0.native, json!({}));
     Ok(())
 }
@@ -355,7 +353,6 @@ async fn a_malformed_message_and_a_refusal_of_core_are_answered_in_words_too() -
         "a refused message reached core"
     );
 
-    // Core's own refusal reaches the page in core's words.
     fixture.core().refusal = Some((
         StatusCode::INSUFFICIENT_STORAGE,
         "attachment storage is full",
