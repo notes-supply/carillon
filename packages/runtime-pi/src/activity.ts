@@ -154,22 +154,12 @@ export function trackActivity(workspace: string): ActivityTracker {
 /** A message waiting behind a running answer: a follow-up waits for it to end, a steer for its next tool round. */
 type Waiting = "followUp" | "steer";
 
+const WAITING: TurnActivity = { phase: "queued", running: [], recent: [], tool_calls: 0 };
+
 /** What a person may do with a waiting message; a steer already joins the running answer. */
 const QUEUED: Record<Waiting, TurnActivity> = {
-  followUp: {
-    phase: "queued",
-    running: [],
-    recent: [],
-    tool_calls: 0,
-    controls: ["steer", "interrupt", "stop"],
-  },
-  steer: {
-    phase: "queued",
-    running: [],
-    recent: [],
-    tool_calls: 0,
-    controls: ["interrupt", "stop"],
-  },
+  followUp: { ...WAITING, controls: ["steer", "interrupt", "stop"] },
+  steer: { ...WAITING, controls: ["interrupt", "stop"] },
 };
 
 /** The waiting messages of an inbox, without its writes. */
@@ -179,8 +169,12 @@ function waiting(items: readonly InboxItem[]): Map<SubmissionId, Waiting> {
 
 /** The activity of the messages a conversation holds, kept current from its view. */
 export interface ConversationActivity {
-  /** A held message's activity: waiting in the inbox, or what its run does. */
-  of(submission: SubmissionId): TurnActivity | undefined;
+  /**
+   * A held message's activity: waiting in the inbox, or what its run does.
+   * It lists the controls `offer` allows: none, a waiting message's, or
+   * also `stop` on a message in the run under way.
+   */
+  of(submission: SubmissionId, offer?: "none" | "waiting" | "all"): TurnActivity | undefined;
   /** The message is settled with core and needs no more watching. */
   forget(submission: SubmissionId): void;
   /** Whether a tool call runs now. */
@@ -267,11 +261,14 @@ export async function watchActivity(
     return Promise.resolve();
   });
   return {
-    of(submission) {
+    of(submission, offer = "none") {
       const mode = queued.get(submission);
-      if (mode !== undefined) return QUEUED[mode];
-      if (inputs.includes(submission)) return run?.snapshot();
-      return ended.get(submission)?.snapshot();
+      if (mode !== undefined) return offer === "none" ? WAITING : QUEUED[mode];
+      if (!inputs.includes(submission)) return ended.get(submission)?.snapshot();
+      const running = run?.snapshot();
+      return running !== undefined && offer === "all"
+        ? { ...running, controls: ["stop"] }
+        : running;
     },
     forget(submission) {
       ended.delete(submission);

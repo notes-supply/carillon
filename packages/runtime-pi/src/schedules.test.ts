@@ -11,7 +11,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { DELIVERY } from "./delivery.ts";
-import { fakeClock, startFixture, textsOf, type Fixture } from "./fixture.ts";
+import { fakeClock, pauseTool, startFixture, textsOf, type Fixture } from "./fixture.ts";
 
 const fixtures: Fixture[] = [];
 afterEach(async () => {
@@ -105,6 +105,50 @@ it("runs a schedule when it is due, in a turn it opens and settles with the answ
       label: "Scheduled: plants",
     },
   ]);
+});
+
+it("offers no controls on a run's turn while it waits behind an answer", async () => {
+  const clock = fakeClock("2026-10-24T08:00:00Z");
+  const pause = pauseTool();
+  const agent = await fixture({
+    clock,
+    builtIns: [pause.extension],
+    defaults: ["schedules", "pause"],
+    answers: answers(),
+  });
+  await schedule(agent, "turn-1", { prompt: "Water the plants.", at: "2026-10-24T09:00:00Z" });
+  await agent.runtime.turns.submit(agent.turn("turn-2", tool("pause", {})));
+  await pause.started;
+  clock.advance(60 * 60_000);
+  await vi.waitFor(() => {
+    expect(agent.runtime.activity("opened-1", "discord-private")).toEqual({
+      phase: "queued",
+      running: [],
+      recent: [],
+      tool_calls: 0,
+    });
+  });
+  pause.release();
+  expect(await agent.outcome("opened-1")).toMatchObject({ output: "Ran: Water the plants." });
+});
+
+it("offers no controls on a run's turn while it runs", async () => {
+  const clock = fakeClock("2026-10-24T08:00:00Z");
+  const pause = pauseTool();
+  const agent = await fixture({
+    clock,
+    builtIns: [pause.extension],
+    defaults: ["schedules", "pause"],
+    answers: answers(),
+  });
+  await schedule(agent, "turn-1", { prompt: tool("pause", {}), at: "2026-10-24T09:00:00Z" });
+  clock.advance(60 * 60_000);
+  await pause.started;
+  const running = agent.runtime.activity("opened-1", "discord-private");
+  expect(running).toMatchObject({ phase: "tools" });
+  expect(running).not.toHaveProperty("controls");
+  pause.release();
+  expect(await agent.outcome("opened-1")).toMatchObject({ outcome: "answered" });
 });
 
 it("runs a schedule on the model of the channel core opens its run in, not the one it was made in", async () => {

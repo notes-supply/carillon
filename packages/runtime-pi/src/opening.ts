@@ -108,6 +108,7 @@ export function openingTask(host: OpeningHost) {
       interface_id,
       conversation,
       submission,
+      opened: true,
       ...(opening.needs === undefined ? {} : { needs: opening.needs }),
     });
     // The work may have ended while the input was being placed.

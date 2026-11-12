@@ -427,7 +427,7 @@ carillon settings --agent assistant reset busy    # steer again
 `queue` answers it after the running answer, and `interrupt` ends the
 running answer and answers the new message, with every waiting one, next.
 A waiting message offers reactions to steer it in, interrupt for it, or stop
-it. The change applies to the next message Pi receives; a message already
+it, and a running one a reaction to stop its answer. The change applies to the next message Pi receives; a message already
 received keeps the mode it arrived with.
 
 ### What Pi can do besides answer
@@ -679,8 +679,10 @@ ended. A runtime that holds a message's turn may offer controls as reactions,
 which the bot shows while the runtime lists them. While a message waits
 behind the agent's running turn, an allowlisted person's reaction hands it to
 the running turn now (steer), ends the running turn and runs it next
-(interrupt), or doesn't run it (stop). On T3, a running message offers stop
-too, which stops its run. The emoji are
+(interrupt), or doesn't run it (stop). A running message offers stop alone,
+which ends its answer: the reaction shows once the bot next reads the
+running turn, usually within a few seconds, and comes off as the answer
+lands. The emoji are
 settings with these defaults, Unicode or a custom `name:id`, and apply live,
 replacing the controls messages show. The controls must differ from each
 other and from the rest.
