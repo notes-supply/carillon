@@ -170,10 +170,6 @@ async fn run() -> Result<()> {
             let loaded = installation()?;
             let provider = instance(&loaded, PROGRAM, provider)?;
             let key_file = browser::key_file(&loaded.value.data_dir, &provider);
-            if !key_file.parent().is_some_and(Path::is_dir) {
-                println!("Carillon's web chat has not started yet, so no browser is signed in.");
-                return Ok(());
-            }
             Key::replace(&key_file).with_context(|| format!("replace {}", key_file.display()))?;
             println!("Every browser is signed out of Carillon's web chat.");
             Ok(())
