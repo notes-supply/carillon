@@ -4,7 +4,7 @@
  * inserted as text. The one exception is `prose`, for HTML the provider
  * rendered from Markdown and sanitized.
  */
-import { ending, ledger, plain, sendingLine, size, when } from "./model.js";
+import { ending, ledger, plain, sendingLine, size, titleOf, when } from "./model.js";
 
 /** @import { Control, Conversation, FileLink, Ledger, Line, Live, Mark, Pending, Turn } from "./model.js" */
 
@@ -266,7 +266,7 @@ export function chat(conversation, { current, unread, now }) {
   const link = el(
     "a",
     "chat",
-    el("span", "chat-title", conversation.title === "" ? "Files only" : conversation.title),
+    el("span", "chat-title", titleOf(conversation, [])),
     el("span", "chat-when", when(conversation.active_at, now)),
   );
   link.href = `#${conversation.id}`;

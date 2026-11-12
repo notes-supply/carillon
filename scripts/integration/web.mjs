@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -205,10 +205,9 @@ async function testGate(token) {
   const policy = page.headers.get("content-security-policy");
   assert.match(policy, /default-src 'none'/u);
   assert.match(policy, /font-src 'self'/u);
-  const license = "literata-OFL.txt";
-  const served = (await readdir("crates/carillon-web/site")).filter((file) => file !== license);
-  assert.ok(served.length > 5, "the page's files were not found");
-  for (const file of served) {
+  const modules = ["app.js", "api.js", "model.js", "view.js"];
+  const rest = ["style.css", "icon.svg", "literata.woff2", "literata-italic.woff2"];
+  for (const file of [...modules, ...rest]) {
     assert.equal((await fetch(`${origin}/${file}`)).status, 200, `the page's ${file}`);
   }
   assert.equal(await raw("/", { host: "rebound.example" }), 421);
