@@ -25,7 +25,8 @@ delivery = "retained"
 ```
 
 `delivery = "retained"` matters: a web answer is delivered when core records
-it, and the provider claims no delivery.
+it, and the provider claims no delivery. The provider refuses to serve an
+entry without that line.
 
 ## Commands
 

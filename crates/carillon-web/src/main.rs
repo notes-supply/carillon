@@ -23,7 +23,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
     bundled::Bundled,
-    config::{DeliveryMode, LoadedConfig, ProviderRole, token_matches},
+    config::{LoadedConfig, ProviderRole, token_matches},
     home,
 };
 use carillon_interface::instance;
@@ -138,12 +138,7 @@ async fn run() -> Result<()> {
             if !token_matches(&entry.token_hash, &loaded.credential(&provider)?) {
                 bail!("the credential of {provider} does not match its entry in carillon.toml");
             }
-            if entry.delivery != DeliveryMode::Retained {
-                bail!(
-                    "{provider} needs `delivery = \"retained\"` in its entry in carillon.toml: \
-                     a web chat's answers are read from core, and nothing else delivers them"
-                );
-            }
+            serve::retained(entry)?;
             println!(
                 "The web chat is set up at http://{address}. While Carillon runs, `carillon web \
                  open` signs this machine's browser in and opens it."
@@ -170,6 +165,11 @@ async fn run() -> Result<()> {
             let loaded = installation()?;
             let provider = instance(&loaded, PROGRAM, provider)?;
             let key_file = browser::key_file(&loaded.value.data_dir, &provider);
+            // A hand-written entry has no directory before its first start.
+            if !key_file.parent().is_some_and(Path::is_dir) {
+                println!("Carillon's web chat has not started yet, so no browser is signed in.");
+                return Ok(());
+            }
             Key::replace(&key_file).with_context(|| format!("replace {}", key_file.display()))?;
             println!("Every browser is signed out of Carillon's web chat.");
             Ok(())

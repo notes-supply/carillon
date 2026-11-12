@@ -67,7 +67,7 @@ owner absent
   --workspace "$HOME/workspace" --base-port "$PORT" >/dev/null
 serve() {
   RUST_LOG=info "$RELEASE/bin/carillon-web" serve --config "$INSTALLATION/carillon.toml" \
-    --provider web --token-file "$INSTALLATION/missing.token" >"$TEST_ROOT/serve.log" 2>&1
+    --provider web --token-file "$INSTALLATION/${1:-missing.token}" >"$TEST_ROOT/serve.log" 2>&1
 }
 serve
 grep -F 'interface provider web is not in carillon.toml; not serving' "$TEST_ROOT/serve.log" >/dev/null
@@ -76,7 +76,19 @@ grep -F 'interface provider web is not in carillon.toml; not serving' "$TEST_ROO
 serve
 grep -F 'interface provider web is disabled; not serving' "$TEST_ROOT/serve.log" >/dev/null
 [ ! -e "$INSTALLATION/state/components/web/browser.key" ]
-printf 'web service passed: it ends at once where it is not registered or is disabled\n'
+# An entry written by hand may have no directory yet, or external delivery,
+# whose answers would wait for a claim the web provider never makes.
+rm -r "$INSTALLATION/state/components/web"
+"$RELEASE/bin/carillon-web" --home "$INSTALLATION" sign-out >"$TEST_ROOT/sign-out.log"
+grep -Fx "Carillon's web chat has not started yet, so no browser is signed in." \
+  "$TEST_ROOT/sign-out.log" >/dev/null
+[ ! -e "$INSTALLATION/state/components/web" ]
+"$RELEASE/bin/carillon" --home "$INSTALLATION" provider web enable >/dev/null
+sed -i '/^delivery = "retained"$/d' "$INSTALLATION/carillon.toml"
+! serve credentials/web.token || fail 'the web provider served an entry with external delivery'
+grep -F "web needs the line \`delivery = \"retained\"\` in its entry in carillon.toml" \
+  "$TEST_ROOT/serve.log" >/dev/null
+printf 'web service passed: it ends at once where it is not registered or is disabled, and refuses external delivery\n'
 
 owner alone
 install_release --interface web >"$TEST_ROOT/alone.log"

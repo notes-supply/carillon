@@ -17,7 +17,9 @@ use axum::{
     response::{IntoResponse as _, Response},
     routing::{get, post},
 };
-use carillon_installation::config::{LoadedConfig, attachment_staging, component_directory};
+use carillon_installation::config::{
+    DeliveryMode, LoadedConfig, Provider, attachment_staging, component_directory,
+};
 use carillon_interface::{
     CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
 };
@@ -52,6 +54,20 @@ pub(crate) struct Web {
     pub(crate) stopping: CancellationToken,
 }
 
+/// Refuses an entry whose answers core would hold for an interface to claim
+/// and send: the web provider claims none, so every restart would wait for
+/// them.
+pub(crate) fn retained(entry: &Provider) -> Result<()> {
+    if entry.delivery != DeliveryMode::Retained {
+        bail!(
+            "{} needs the line `delivery = \"retained\"` in its entry in carillon.toml: a web \
+             chat's answers are read from core, and nothing else delivers them",
+            entry.id
+        );
+    }
+    Ok(())
+}
+
 /// Serves provider `provider_id` of `config` with the page in `site`, the
 /// release's copy, until it is asked to stop.
 pub(crate) async fn serve(
@@ -71,6 +87,7 @@ pub(crate) async fn serve(
     else {
         return Ok(());
     };
+    retained(&provider)?;
     if !site::has_page(&site) {
         bail!(
             "the web page is not at {}; name its directory with --site",
