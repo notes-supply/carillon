@@ -25,6 +25,7 @@ import { availableBasePort, PORT_OFFSETS } from "./integration/ports.mjs";
 import { embedText, seen } from "./integration/replies.mjs";
 import { testSettings } from "./integration/settings.mjs";
 import { testSkills } from "./integration/skills.mjs";
+import { runningJob, testRunningStop } from "./integration/stop.mjs";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
@@ -394,7 +395,7 @@ try {
   });
   await testModuleOperations();
   await testProviderFailure();
-  await testActivityVisibility();
+  await testActivityAndStop();
   await testT3ActivityThroughDelivery();
 
   process.stdout.write(
@@ -414,7 +415,7 @@ try {
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
         activity:
-          "a slow native command is visible to its interface before the answer, and core keeps the final report its card shows",
+          "a slow native command is visible to its interface before the answer, core keeps the final report its card shows, and a stop relayed while it runs ends the turn stopped",
         t3_activity:
           "T3 runtime reports of a call and of a failure reach core's record of their jobs and the same work card",
         attachments:
@@ -894,7 +895,7 @@ async function testProviderFailure() {
  * ordinary text, and a read naming the job shows the final report Pi's
  * runtime took before it forgot the turn, and the Discord provider's card.
  */
-async function testActivityVisibility() {
+async function testActivityAndStop() {
   const privateState = join(installation, "pi");
   const storage = join(installation, "state/components/runtime-pi/agents");
   const marker = "activity-release";
@@ -913,7 +914,7 @@ async function testActivityVisibility() {
       })}\n\n`;
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(
-      requests === 1
+      requests !== 2
         ? `${chunk(
             {
               role: "assistant",
@@ -958,14 +959,7 @@ async function testActivityVisibility() {
     const answered = simulate("activity-slow", "wait for the marker");
     answered.catch(() => undefined);
     const discord = `Bearer ${await credentialValue("discord-private")}`;
-    let running;
-    for (let attempt = 0; running === undefined && attempt < 200; attempt += 1) {
-      const read = await jobs(discord);
-      assert.equal(read.status, 200);
-      running = read.body.jobs.find((job) => job.turns.at(-1).activity?.running.length > 0);
-      if (running === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-    }
-    assert.ok(running, "the running command never became visible");
+    const running = await runningJob(() => jobs(discord));
     const [turn] = running.turns;
     assert.equal(turn.state, "running");
     assert.equal(running.target_id, "300");
@@ -1007,6 +1001,8 @@ async function testActivityVisibility() {
     const after = await jobs(discord);
     assert.deepEqual(after.body, { jobs: [] });
     assert.equal(requests, 2);
+    await testRunningStop({ basePort, discord, simulate, jobs, workspace, marker });
+    assert.equal(requests, 3, "a stopped answer asks its model nothing more");
   } finally {
     await stop("runtime");
     provider.close();
