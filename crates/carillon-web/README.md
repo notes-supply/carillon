@@ -126,7 +126,10 @@ lints and type-checks them against the DOM, and runs the model's tests.
 In the browser the page keeps the token and, for each conversation, the
 text not yet received by Carillon: what is in the composer and, until its
 receipt, the message on its way. It keeps no event ID and no file, so a
-reload sends nothing by itself.
+reload sends nothing by itself. A receipt clears only the text that was
+sent. Tabs share this storage. Two tabs that hold different unsent text for
+one conversation store the text typed last, and a tab stores its own again
+when another tab's receipt clears the draft.
 
 Answers are set in Literata, by the Literata Project Authors, under the SIL
 Open Font License 1.1. [`literata.woff2`](site/literata.woff2) and
@@ -163,7 +166,7 @@ These statuses mean the same on every route:
 
 | Status | Meaning | What the page does |
 | --- | --- | --- |
-| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token and ask the person to run `carillon web open`. |
+| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token the request carried, if it is still the one stored, and ask the person to run `carillon web open`. |
 | 403, 421 | The request did not come from the page's own origin, or named another host. | Nothing. A page loaded from the provider never sees these. |
 | 503 | Carillon cannot answer now: core is away, as it is for a moment at every restart, or it failed, or the provider is stopping. | Keep what is on screen and try again. The body is always the same sentence. |
 
@@ -185,6 +188,9 @@ POST /api/sign-in
 Take the code from the fragment and remove the fragment from the address
 before the request. A code that was traded already, has expired, was made
 before the provider started or was not signed by the current key is 401.
+That 401 says nothing of a token the browser already has, which every tab
+shares: keep it, and use it. An old link opened in a browser that is signed
+in opens the chat.
 
 ### Read the session
 
@@ -302,7 +308,7 @@ does not have is 404.
 | `running` | It is not finished. Its runtime has it. | |
 | `answered` | It has its answer. | `html`, `files` |
 | `interrupted` | It did not complete. `html` is core's or the runtime's explanation. | `html` |
-| `steered` | The message went into a turn already running. | |
+| `steered` | A later message joined it. Its answer is on the newest message that took part. | |
 | `stopped` | Someone stopped it. | |
 
 The turns tell you that a turn is unfinished and not whether it waits. A
@@ -310,9 +316,10 @@ message that its runtime holds behind a running answer reads `running`
 here. Whether an unfinished turn is queued or running comes from the
 [live read](#read-live-turns) alone.
 
-A steered message has no answer of its own. The answer is on the newest
-message that took part, which may not be the one above, so label it
-neutrally.
+A steered turn has no answer of its own. When messages join one answer, Pi
+settles every one of them but the newest as `steered` and puts the answer
+on the newest. So the steered turn is the earlier message, the one that
+began the work, and its answer is below it. Say so from the person's side.
 
 `html` is the answer's Markdown, rendered by the provider. Insert it as it
 is. Raw HTML in an answer is shown as text. A link stays a link only to
@@ -323,7 +330,8 @@ style.
 
 `report` is an ended turn's final [activity snapshot](#the-activity-snapshot),
 or null. Its `phase` is the last phase the turn was in while it ran. Draw an
-ended turn from `state`, never from `report.phase`.
+ended turn from `state`, never from `report.phase`. Pi posts a report with
+an answer, so a turn that was stopped has none.
 
 ### Files
 
@@ -358,7 +366,9 @@ file=<numbers.csv>
 
 The body has one `text` part and any number of `file` parts. A message needs
 text or a file. Leave out a `file` part that has no file: an HTML form sends
-an empty one when nothing is chosen.
+an empty one when nothing is chosen. A browser writes `"`, a carriage return
+and a line feed in a file's name as `%22`, `%0D` and `%0A`, and the provider
+reads those three back, so a file keeps the name it has on disk.
 
 - `agent` names the agent of a conversation's first message. Later messages
   need none. Naming another agent than the conversation's is 409.
@@ -484,7 +494,7 @@ lists `stop`. A turn the runtime opened lists none.
 
 | `action` | On | What it does | How the turns end |
 | --- | --- | --- | --- |
-| `steer` | A waiting message | Hands it to the running turn. | The message's turn is `steered`. The answer comes on the newest message that took part. |
+| `steer` | A waiting message | Hands it to the running turn. | The turn that was running is `steered`. The answer comes on the newest message that took part. |
 | `interrupt` | A waiting message | Ends the running turn and runs the message next. | The earlier turn is `stopped`. The message's turn runs and is `answered`. |
 | `stop` | A waiting message | Does not run it. | The message's turn is `stopped`. The running turn goes on. |
 | `stop` | A running answer | Ends that answer, and none that follows it. | Its turn is `stopped`, and so is the turn of every message that was steered into it. |

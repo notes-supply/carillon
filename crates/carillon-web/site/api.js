@@ -1,21 +1,22 @@
 // @ts-check
 /**
  * Requests to the provider. Each carries the browser's token, and none
- * throws: an answer is its status and body, and status 0 means nothing
- * answered, which is how a stopped provider looks.
+ * throws: an answer is its status, its body and the token the request
+ * carried, and status 0 means nothing answered, which is how a stopped
+ * provider looks.
  */
 
-/** @typedef {{ status: number, body: string }} Answer */
+/** @typedef {{ status: number, body: string, token: string | null }} Answer */
 
 const TOKEN = "token";
 
+/** The browser's token, which every tab of this origin shares. */
 export const token = {
+  get: () => localStorage.getItem(TOKEN),
   /** @param {string} value */
   set: (value) => localStorage.setItem(TOKEN, value),
   drop: () => localStorage.removeItem(TOKEN),
 };
-
-const bearer = () => `Bearer ${localStorage.getItem(TOKEN) ?? ""}`;
 
 /**
  * @param {string} path
@@ -24,18 +25,19 @@ const bearer = () => `Bearer ${localStorage.getItem(TOKEN) ?? ""}`;
  * @returns {Promise<Answer>}
  */
 export async function ask(path, method = "GET", json) {
+  const carried = token.get();
   try {
     const response = await fetch(path, {
       method,
       headers: {
-        authorization: bearer(),
+        authorization: `Bearer ${carried ?? ""}`,
         ...(json === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(json === undefined ? {} : { body: JSON.stringify(json) }),
     });
-    return { status: response.status, body: await response.text() };
+    return { status: response.status, body: await response.text(), token: carried };
   } catch {
-    return { status: 0, body: "" };
+    return { status: 0, body: "", token: carried };
   }
 }
 
@@ -48,14 +50,16 @@ export async function ask(path, method = "GET", json) {
  * @returns {Promise<Answer>}
  */
 export function put(path, form, progress) {
+  const carried = token.get();
   return new Promise((resolve) => {
     const request = new XMLHttpRequest();
     request.open("PUT", path);
-    request.setRequestHeader("authorization", bearer());
+    request.setRequestHeader("authorization", `Bearer ${carried ?? ""}`);
     request.upload.onprogress = (event) => progress(event.loaded, event.total, false);
     request.upload.onload = (event) => progress(event.loaded, event.total, true);
-    request.onload = () => resolve({ status: request.status, body: request.responseText });
-    request.onerror = request.onabort = () => resolve({ status: 0, body: "" });
+    request.onload = () =>
+      resolve({ status: request.status, body: request.responseText, token: carried });
+    request.onerror = request.onabort = () => resolve({ status: 0, body: "", token: carried });
     request.send(form);
   });
 }

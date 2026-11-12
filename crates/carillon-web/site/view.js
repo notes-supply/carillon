@@ -34,14 +34,17 @@ export function phrase(words) {
 const STRIKE_MS = 1100;
 const SOUND_MS = 1800;
 
+const LEGEND =
+  "One mark for each tool call: a dot for a call no longer listed, a bar for one that finished, a short bar for one that failed, a hollow bar for one under way. The ring is the turn itself.";
+
 /**
  * @param {(Mark | "now" | "now sounding")[]} marks
- * @param {string} label
+ * @param {string} label What the marks count, for whoever cannot see them.
+ * @param {string} [title]
  */
-function row(marks, label) {
+function row(marks, label, title = "") {
   const node = el("span", "row");
-  node.role = "img";
-  node.ariaLabel = label;
+  [node.role, node.ariaLabel, node.title] = ["img", label, title];
   marks.forEach((mark, index) => {
     const drawn = el("i", `mark ${mark}`);
     // A mark drawn again goes on where it was, each a half strike after the one before it.
@@ -154,7 +157,7 @@ function ledgerNode(shown, control) {
   const head = el(
     "div",
     "ledger-head",
-    row([...shown.marks, shown.waiting ? "now" : "now sounding"], shown.tally),
+    row([...shown.marks, shown.waiting ? "now" : "now sounding"], shown.counted, LEGEND),
     el("span", "phase", shown.phase),
     el("span", "tally", shown.tally),
   );
@@ -185,9 +188,14 @@ function ledgerNode(shown, control) {
 export function turnBody(turn, live, asked, now, control) {
   const ended = ending(turn);
   if (ended === undefined) return ledgerNode(ledger(turn, live, asked, now), control);
-  const foot = el("p", "outcome", ended.label);
-  if (turn.state !== "steered") foot.append(" ", time(turn.finished_at ?? turn.accepted_at, now));
-  if (ended.took !== "") foot.append(`, ${ended.took}`);
+  // What a finished turn did stays with it, folded behind the line that says how it ended.
+  const outcome = el(ended.did.length > 0 ? "summary" : "p", "outcome", ended.label);
+  if (turn.state !== "steered")
+    outcome.append(" ", time(turn.finished_at ?? turn.accepted_at, now));
+  if (ended.took !== "") outcome.append(`, ${ended.took}`);
+  const foot = ended.did.length > 0 ? el("details", "did", outcome, lines(ended.did)) : outcome;
+  if ((turn.report?.tool_calls ?? 0) > ended.did.length && ended.did.length > 0)
+    foot.append(el("p", "ledger-note", "The calls before these are not listed."));
   const body = el("div", "turn-body");
   if (turn.state === "answered") {
     body.append(prose(turn.html, "prose"));

@@ -5,7 +5,9 @@ import {
   SIGNED_OUT,
   awaiting,
   changed,
+  dropsToken,
   earlier,
+  generations,
   ending,
   invokes,
   joined,
@@ -14,11 +16,11 @@ import {
   merge,
   offered,
   overLimit,
+  plain,
   pressed,
   reading,
   refusal,
   sendingLine,
-  sequence,
   since,
   size,
   span,
@@ -141,13 +143,72 @@ describe("the poll", () => {
 });
 
 describe("answers to requests", () => {
-  it("drops an answer a newer request or another conversation superseded", () => {
-    const reads = sequence();
-    const first = reads.next();
-    expect(reads.current(first)).toBe(true);
-    const second = reads.next();
-    expect(reads.current(first)).toBe(false);
-    expect(reads.current(second)).toBe(true);
+  /** A provider whose answers arrive when the test says, and which records what it was asked. */
+  function provider() {
+    /** @type {{ path: string, answer: (body: string) => void }[]} */
+    const asked = [];
+    /** @param {string} path @returns {Promise<string>} */
+    const ask = (path) => new Promise((answer) => asked.push({ path, answer }));
+    return { asked, ask, paths: () => asked.map(({ path }) => path) };
+  }
+
+  it("delivers the answers of the newest generation of requests", async () => {
+    const { asked, ask } = provider();
+    const read = generations(ask).begin();
+    const list = read("/list");
+    asked[0]?.answer("the list");
+    await expect(list).resolves.toBe("the list");
+    const turns = read("/turns");
+    asked[1]?.answer("the turns");
+    await expect(turns).resolves.toBe("the turns");
+  });
+
+  it("drops an answer that a newer request of its kind superseded", async () => {
+    const { asked, ask } = provider();
+    const polls = generations(ask);
+    const older = polls.begin()("/list");
+    const newer = polls.begin()("/list");
+    asked[1]?.answer("the newer list");
+    asked[0]?.answer("the older list, late");
+    await expect(newer).resolves.toBe("the newer list");
+    await expect(older).resolves.toBeUndefined();
+  });
+
+  it("starts no further request of a poll once the page hid", async () => {
+    const { asked, ask, paths } = provider();
+    const polls = generations(ask);
+    const read = polls.begin();
+    const list = read("/list");
+    polls.end();
+    asked[0]?.answer("the list");
+    await expect(list).resolves.toBeUndefined();
+    await expect(read("/turns")).resolves.toBeUndefined();
+    await expect(read("/live")).resolves.toBeUndefined();
+    expect(paths()).toEqual(["/list"]);
+  });
+
+  it("drops an earlier page asked for in a visit that has ended, and by an older click", async () => {
+    const { asked, ask } = provider();
+    const pages = generations(ask);
+    const previousVisit = pages.begin()("/turns?before=a");
+    pages.end();
+    const firstClick = pages.begin()("/turns?before=b");
+    const secondClick = pages.begin()("/turns?before=b");
+    for (const [index, body] of ["of the old visit", "first", "second"].entries())
+      asked[index]?.answer(body);
+    await expect(previousVisit).resolves.toBeUndefined();
+    await expect(firstClick).resolves.toBeUndefined();
+    await expect(secondClick).resolves.toBe("second");
+  });
+
+  it("drops the stored token only on a 401 to a request that carried it", () => {
+    expect(dropsToken(401, "t1", "t1")).toBe(true);
+    // A sign-in link that failed carried no token, so it says nothing about the one stored.
+    expect(dropsToken(401, null, "t1")).toBe(false);
+    expect(dropsToken(401, null, null)).toBe(false);
+    // Another tab signed in since: its token is not the one refused.
+    expect(dropsToken(401, "t1", "t2")).toBe(false);
+    for (const status of [0, 200, 403, 503]) expect(dropsToken(status, "t1", "t1")).toBe(false);
   });
 
   it("tells signed out, away and refused apart", () => {
@@ -195,13 +256,13 @@ describe("turns", () => {
 
   it("takes a page that reaches the first turn as the whole conversation", () => {
     const page = { turns: [turn("b"), turn("c")], before: null };
-    expect(merge(held, page)).toBe(page);
+    expect(merge(held, page)).toEqual(page);
   });
 
   it("replaces everything when the newest page shares no turn with those held", () => {
     const page = { turns: [turn("x"), turn("y")], before: "x" };
-    expect(merge(held, page)).toBe(page);
-    expect(merge({ turns: [], before: null }, page)).toBe(page);
+    expect(merge(held, page)).toEqual(page);
+    expect(merge({ turns: [], before: null }, page)).toEqual(page);
   });
 
   it("puts an older page before the turns held", () => {
@@ -242,6 +303,7 @@ describe("a message not yet received", () => {
     const file = new File(["x"], "a.txt");
     expect(sendingLine(pending({ files: [file], sent: 512, total: 1024 }))).toBe("Sending, 50%");
     expect(sendingLine(pending({ stage: "receiving" }))).toBe("Carillon is receiving it.");
+    expect(sendingLine(pending({ stage: "received" }))).toBe("Received.");
     expect(sendingLine(pending({ stage: "retrying" }))).toBe(
       "Carillon is not answering. This message will be sent when it does.",
     );
@@ -268,6 +330,15 @@ describe("a draft", () => {
     expect(since("first", "first")).toBe("");
     expect(since("first\n\nnext\n\nmore", "first")).toBe("next\n\nmore");
     expect(since(joined("first", "first"), "first")).toBe("first");
+  });
+
+  it("of another tab is left whole by this tab's receipt", () => {
+    // Tab A typed last, so the one stored draft is its text. Tab B's message is then received.
+    expect(since("typed in tab A", "sent from tab B")).toBe("typed in tab A");
+  });
+
+  it("shows a message's line ends as the person typed them", () => {
+    expect(plain("first\r\nsecond\r\n\r\nthird")).toBe("first\nsecond\n\nthird");
   });
 
   it("is left whole when it does not begin with what was sent", () => {
@@ -369,6 +440,7 @@ describe("a turn at work", () => {
       now,
     );
     expect(shown.marks).toEqual(["past", "past", "done", "failed", "done", "running"]);
+    expect(shown.counted).toBe("6 tool calls, 1 under way, 1 failed, 2 finished");
     expect(shown.calls).toEqual([
       { mark: "done", name: "grep", detail: '"beta" docs/', time: "8 ms" },
       { mark: "failed", name: "bash", detail: "", time: "failed, 41 ms" },
@@ -496,10 +568,24 @@ describe("a turn at work", () => {
       "stop",
       now,
     );
-    expect(shown.controls.map(({ label, asked }) => [label, asked])).toEqual([
-      ["Interrupt", true],
-      ["Stopping", true],
-    ]);
+    expect(shown.controls.map(({ label, asked }) => [label, asked])).toEqual([["Stopping", true]]);
+  });
+
+  it("keeps the pressed control on the turn when the live read stops listing it", () => {
+    for (const read of [live("running"), live("running", null), live("running", { controls: [] })])
+      expect(ledger(turn("t1", "running"), read, "stop", now).controls).toEqual([
+        { action: "stop", label: "Stopping", title: "End this answer.", asked: true },
+      ]);
+  });
+
+  it("says in words what the row of marks counts", () => {
+    expect(ledger(turn("t1", "running"), live("running"), undefined, now).counted).toBe(
+      "0 tool calls",
+    );
+    const one = { tool_calls: 1, running: [{ tool: "bash", started_at: 1130 }] };
+    expect(ledger(turn("t1", "running"), live("running", one), undefined, now).counted).toBe(
+      "1 tool call, 1 under way",
+    );
   });
 });
 
@@ -515,6 +601,11 @@ describe("a pressed control", () => {
     expect(pressed(undefined, live("running"), 101)).toBeUndefined();
   });
 
+  it("stays pressed for as long as the turn runs once the runtime stops listing it", () => {
+    expect(pressed(asked, live("running"), 100 + 3600)).toBe("stop");
+    expect(pressed(asked, live("running", null), 100 + 3600)).toBe("stop");
+  });
+
   it("is released when the turn moves on, so an interrupted-in message can be stopped", () => {
     const interrupt = {
       action: /** @type {const} */ ("interrupt"),
@@ -523,11 +614,13 @@ describe("a pressed control", () => {
     };
     expect(pressed(interrupt, live("queued"), 101)).toBe("interrupt");
     expect(pressed(interrupt, live("running"), 101)).toBeUndefined();
+    expect(pressed(asked, live("ended"), 101)).toBeUndefined();
   });
 
-  it("is released when the runtime took it and changed nothing", () => {
-    expect(pressed(asked, live("running"), 115)).toBe("stop");
-    expect(pressed(asked, live("running"), 116)).toBeUndefined();
+  it("is released when the runtime still lists it after a quarter of a minute", () => {
+    const listing = live("running", { controls: ["stop"] });
+    expect(pressed(asked, listing, 115)).toBe("stop");
+    expect(pressed(asked, listing, 116)).toBeUndefined();
   });
 });
 
@@ -542,17 +635,38 @@ describe("an ended turn", () => {
     expect(ending({ ...turn("a"), report })).toEqual({
       label: "Answered",
       took: "2 min 14 s, 14 tool calls",
+      did: [],
     });
-    expect(ending(turn("a", "stopped"))).toEqual({ label: "Stopped", took: "2 min 14 s" });
+    expect(ending(turn("a", "stopped"))).toEqual({ label: "Stopped", took: "2 min 14 s", did: [] });
     expect(ending(turn("a", "interrupted"))?.label).toBe("Did not finish");
-    expect(ending({ ...turn("a"), finished_at: 1000 })).toEqual({ label: "Answered", took: "" });
+    expect(ending({ ...turn("a"), finished_at: 1000 })?.took).toBe("");
   });
 
-  it("labels a steered message without saying where its answer is", () => {
-    const steered = ending(turn("a", "steered"));
-    expect(steered?.label).toMatch(/^Steered into the answer that was running\./u);
-    expect(steered?.label).toMatch(/newest message that took part/u);
-    expect(steered?.took).toBe("");
+  it("keeps the calls its final report lists", () => {
+    const report = {
+      phase: /** @type {const} */ ("model"),
+      running: [],
+      recent: [
+        { tool: "bash", detail: "git log -5", ok: true, duration_ms: 41 },
+        { tool: "read", ok: false },
+      ],
+      tool_calls: 12,
+    };
+    expect(ending({ ...turn("a"), report })?.did).toEqual([
+      { mark: "done", name: "bash", detail: "git log -5", time: "41 ms" },
+      { mark: "failed", name: "read", detail: "", time: "failed" },
+    ]);
+  });
+
+  it("says of a steered message that its answer is below, on a later one", () => {
+    // The runtime marks every message of a joined answer but the newest, so this is the earlier one.
+    const steered = ending({ ...turn("a", "steered"), report: null });
+    expect(steered).toEqual({
+      label:
+        "A later message joined this one. Their answer is below, on the newest message that took part.",
+      took: "",
+      did: [],
+    });
   });
 
   it("is not described while it is unfinished", () => {

@@ -43,7 +43,8 @@
 /** @typedef {"past" | "done" | "failed" | "running" | "waiting"} Mark One mark of the row: a call no longer listed, finished, failed, under way or not started. */
 /** @typedef {{ mark: Mark, name: string, detail: string, time: string }} Line */
 /** @typedef {{ action: Control, label: string, title: string, asked: boolean }} Offer */
-/** @typedef {{ phase: string, waiting: boolean, tally: string, headline: string, marks: Mark[], calls: Line[], work: Line[], notes: string[], controls: Offer[] }} Ledger */
+/** @typedef {{ action: Control, state: Live["state"] | undefined, at: number }} Asked A control the person pressed, how the turn stood then, and when. */
+/** @typedef {{ phase: string, waiting: boolean, tally: string, headline: string, marks: Mark[], counted: string, calls: Line[], work: Line[], notes: string[], controls: Offer[] }} Ledger */
 
 /**
  * Whether the poll says a conversation's turns must be read again: its
@@ -125,16 +126,44 @@ export function unfinished(turns) {
 }
 
 /**
- * Numbers requests of one kind, so an answer can tell whether a newer
- * request, or a move to another conversation, has superseded its own.
+ * Requests of one kind, in generations. `begin` starts a generation and
+ * returns the function that makes its requests. Once a later generation has
+ * begun, or `end` was called, that function starts no request and delivers
+ * no answer: it resolves to undefined. So an answer to a superseded
+ * request, or for a conversation no longer shown, changes nothing, and a
+ * page that hid starts nothing.
+ * @template {unknown[]} A
+ * @template T
+ * @param {(...args: A) => Promise<T>} ask
  */
-export function sequence() {
+export function generations(ask) {
   let latest = 0;
   return {
-    next: () => ++latest,
-    /** @param {number} ticket */
-    current: (ticket) => ticket === latest,
+    end() {
+      latest += 1;
+    },
+    begin() {
+      const mine = (latest += 1);
+      /** @param {A} args */
+      return async (...args) => {
+        if (mine !== latest) return undefined;
+        const answer = await ask(...args);
+        return mine === latest ? answer : undefined;
+      };
+    },
   };
+}
+
+/**
+ * Whether an answer says the stored token is no longer good: a 401 to a
+ * request that carried the token still stored. A sign-in that fails carried
+ * none, and a token another tab stored since is not the one refused.
+ * @param {number} status
+ * @param {string | null} carried The token the request carried.
+ * @param {string | null} stored
+ */
+export function dropsToken(status, carried, stored) {
+  return status === 401 && carried !== null && carried === stored;
 }
 
 /**
@@ -343,7 +372,7 @@ const PRESSED_FOR_SECONDS = 15;
  * is unfinished.
  * @param {Turn} turn
  * @param {Live | undefined} live
- * @param {Control | undefined} asked The control the person has pressed, until the turn ends.
+ * @param {Control | undefined} asked The control the person pressed. It alone is shown, as pressed, whatever the live read lists meanwhile.
  * @param {number} now Unix seconds.
  * @returns {Ledger}
  */
@@ -351,10 +380,7 @@ export function ledger(turn, live, asked, now) {
   const activity = live?.activity ?? undefined;
   const { running = [], recent = [], tool_calls: calls = 0, work, agent } = activity ?? {};
   const listed = recent.length + running.length;
-  const tally = [
-    ...(calls > 0 ? [`${String(calls)} tool ${calls === 1 ? "call" : "calls"}`] : []),
-    span((now - turn.accepted_at) * 1000),
-  ];
+  const tally = [...(calls > 0 ? [toolCalls(calls)] : []), span((now - turn.accepted_at) * 1000)];
   const notes = [];
   if (work?.omitted !== undefined) notes.push(`${String(work.omitted)} more not shown.`);
   if (work?.partial === true) notes.push("The runtime could not see all of the delegated work.");
@@ -369,13 +395,7 @@ export function ledger(turn, live, asked, now) {
   const waits = live?.state === "queued";
   /** @type {Mark[]} */
   const past = Array.from({ length: Math.min(Math.max(calls - listed, 0), MAX_PAST_MARKS) });
-  /** @type {Line[]} */
-  const finished = recent.map((call) => ({
-    mark: call.ok ? "done" : "failed",
-    name: call.tool,
-    detail: call.detail ?? "",
-    time: timed(call.ok ? "" : "failed", call.duration_ms),
-  }));
+  const finished = recent.map(finishedLine);
   /** @type {Line[]} */
   const underWay = running.map((call) => ({
     mark: "running",
@@ -384,12 +404,15 @@ export function ledger(turn, live, asked, now) {
     time: `${call.estimated === true ? "about " : ""}${span((now - call.started_at) * 1000)}`,
   }));
   const offers = turn.from.kind === "person" && live !== undefined && live.state !== "ended";
+  const offered = offers ? (activity?.controls ?? []) : [];
+  const marks = [...past.fill("past"), ...[...finished, ...underWay].map(({ mark }) => mark)];
   return {
     phase: phase(live),
     waiting: waits,
     tally: tally.join(", "),
     headline: activity?.headline ?? activity?.notes?.at(-1) ?? "",
-    marks: [...past.fill("past"), ...[...finished, ...underWay].map(({ mark }) => mark)],
+    marks,
+    counted: counted(calls, marks),
     calls: [...finished, ...underWay],
     work: (work?.items ?? []).map((item) => {
       const [mark, word] = WORK_STATES[item.state];
@@ -402,7 +425,7 @@ export function ledger(turn, live, asked, now) {
       };
     }),
     notes,
-    controls: (offers ? (activity?.controls ?? []) : []).map((action) => ({
+    controls: (asked === undefined ? offered : [asked]).map((action) => ({
       action,
       label: CONTROLS[action][asked === action ? "pressed" : "label"],
       title: CONTROLS[action][waits ? "waiting" : "answering"],
@@ -411,18 +434,49 @@ export function ledger(turn, live, asked, now) {
   };
 }
 
+const toolCalls = (/** @type {number} */ calls) =>
+  `${String(calls)} tool ${calls === 1 ? "call" : "calls"}`;
+
+/**
+ * What a row of marks counts, in words, for whoever cannot tell a dot from a bar.
+ * @param {number} calls
+ * @param {Mark[]} marks
+ */
+function counted(calls, marks) {
+  const words = { running: "under way", failed: "failed", done: "finished" };
+  const parts = Object.entries(words).flatMap(([kind, word]) => {
+    const count = marks.filter((mark) => mark === kind).length;
+    return count === 0 ? [] : [`${String(count)} ${word}`];
+  });
+  return [toolCalls(calls), ...parts].join(", ");
+}
+
 /**
  * The control the person pressed, while the page still shows it as pressed:
- * until the turn's live state moves on from what it was, or for a quarter
- * of a minute when the runtime took the control and changed nothing.
- * @param {{ action: Control, state: Live["state"] | undefined, at: number } | undefined} asked
+ * until the turn's live state moves on from what it was. A runtime that is
+ * acting on a control stops listing it. One that still lists it after a
+ * quarter of a minute took it and changed nothing, so it is offered again.
+ * @param {Asked | undefined} asked
  * @param {Live | undefined} live
  * @param {number} now Unix seconds.
  */
 export function pressed(asked, live, now) {
-  if (asked === undefined || asked.state !== live?.state || now - asked.at > PRESSED_FOR_SECONDS)
-    return undefined;
-  return asked.action;
+  if (asked === undefined || asked.state !== live?.state) return undefined;
+  const listed = live?.activity?.controls?.includes(asked.action) === true;
+  return listed && now - asked.at > PRESSED_FOR_SECONDS ? undefined : asked.action;
+}
+
+/**
+ * @param {Activity["recent"][number]} call
+ * @returns {Line}
+ */
+function finishedLine(call) {
+  return {
+    mark: call.ok ? "done" : "failed",
+    name: call.tool,
+    detail: call.detail ?? "",
+    time: timed(call.ok ? "" : "failed", call.duration_ms),
+  };
 }
 
 /** @param {Live | undefined} live */
@@ -442,27 +496,30 @@ function timed(word, ms) {
 }
 
 /**
- * How an ended turn ended, in words, and how long it took. The words come
- * from its state, never from its report's phase. A steered message has no
- * answer of its own, and which message got the answer is not known here.
+ * How an ended turn ended, in words, how long it took, and the calls its
+ * final report lists. The words come from its state, never from its
+ * report's phase. When messages join one answer, the runtime marks every
+ * one but the newest `steered` and puts the answer on the newest, so the
+ * steered one is the earlier message.
  * @param {Turn} turn
  */
 export function ending(turn) {
-  const calls = turn.report?.tool_calls ?? 0;
-  const seconds = (turn.finished_at ?? turn.accepted_at) - turn.accepted_at;
-  const took = [
-    ...(seconds > 0 ? [span(seconds * 1000)] : []),
-    ...(calls > 0 ? [`${String(calls)} tool ${calls === 1 ? "call" : "calls"}`] : []),
-  ].join(", ");
   if (turn.state === "queued" || turn.state === "running") return undefined;
   if (turn.state === "steered")
     return {
       label:
-        "Steered into the answer that was running. The answer is with the newest message that took part.",
+        "A later message joined this one. Their answer is below, on the newest message that took part.",
       took: "",
+      did: [],
     };
+  const { tool_calls: calls = 0, recent = [] } = turn.report ?? {};
+  const seconds = (turn.finished_at ?? turn.accepted_at) - turn.accepted_at;
+  const took = [
+    ...(seconds > 0 ? [span(seconds * 1000)] : []),
+    ...(calls > 0 ? [toolCalls(calls)] : []),
+  ].join(", ");
   const label = { answered: "Answered", interrupted: "Did not finish", stopped: "Stopped" };
-  return { label: label[turn.state], took };
+  return { label: label[turn.state], took, did: recent.map(finishedLine) };
 }
 
 /**

@@ -5,7 +5,9 @@ import {
   SIGNED_OUT,
   awaiting,
   changed,
+  dropsToken,
   earlier,
+  generations,
   invokes,
   joined,
   linksAged,
@@ -15,7 +17,6 @@ import {
   pressed,
   reading,
   refusal,
-  sequence,
   since,
   titleOf,
   unfinished,
@@ -25,7 +26,7 @@ import {
 import { attachedFile, chat, el, pendingItem, phrase, turnBody, turnHead } from "./view.js";
 
 /** @import { Answer } from "./api.js" */
-/** @import { Command, Control, Conversation, Limits, Live, Page, Pending, Turn } from "./model.js" */
+/** @import { Asked, Command, Control, Conversation, Limits, Live, Page, Pending, Turn } from "./model.js" */
 
 /**
  * @template {HTMLElement} T
@@ -98,7 +99,7 @@ let open = {
 };
 /** @type {Map<string, Live>} */
 let live = new Map();
-/** @type {Map<string, { action: Control, state: Live["state"] | undefined, at: number }>} */
+/** @type {Map<string, Asked>} */
 const asked = new Map();
 /** @type {Map<string, Pending>} */
 const pending = new Map();
@@ -110,11 +111,16 @@ const errors = new Map();
 const commands = new Map();
 /** @type {Map<string, number>} */
 const activityWhenLooked = new Map();
-/** @type {Map<string, { key: string, node: HTMLLIElement }>} */
+/** @type {Map<string, { head: string, body: string, node: HTMLLIElement }>} */
 const drawn = new Map();
 
-const polls = sequence();
+/** A poll's reads end when a newer poll begins, another conversation is shown, or the page hides. */
+const polls = generations(ask);
+/** A read of earlier turns ends with the visit that asked for it. */
+const turnPages = generations(ask);
+const chatPages = generations(ask);
 let [failures, timer, choice, railKey] = [0, 0, 0, ""];
+let openInRail = false;
 let menuDismissed = false;
 let followEnd = true;
 let signedOut = false;
@@ -137,11 +143,15 @@ function setError(id, words) {
   page.error.hidden = words === "";
 }
 
-/** @param {string} [why] */
-function shut(why = SIGNED_OUT) {
+/**
+ * Closes the page to a browser that is not signed in.
+ * @param {string} why
+ * @param {Answer} [refused] The answer that said so, whose token is then dropped.
+ */
+function shut(why, refused) {
   signedOut = true;
   clearTimeout(timer);
-  token.drop();
+  if (refused !== undefined && dropsToken(refused.status, refused.token, token.get())) token.drop();
   page.app.hidden = true;
   page.door.hidden = false;
   page.doorWhy.replaceChildren(...phrase(why));
@@ -152,9 +162,13 @@ function shut(why = SIGNED_OUT) {
  */
 function okOrNotice(answer) {
   const kind = reading(answer.status);
-  if (kind === "signed-out") shut();
+  if (kind === "signed-out") shut(SIGNED_OUT, answer);
   else if (kind !== "ok") say(refusal(answer.status, answer.body));
   return kind === "ok";
+}
+
+function focusComposer() {
+  if (matchMedia("(min-width: 46rem)").matches) page.text.focus();
 }
 
 /** Polls now, unless the page is hidden: it polls at once when it shows again. */
@@ -165,25 +179,23 @@ function kick() {
 const pause = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function tick() {
-  const ticket = polls.next();
   clearTimeout(timer);
-  const answered = await poll(ticket);
-  if (!polls.current(ticket) || signedOut) return;
+  const answered = await poll(polls.begin());
+  if (answered === undefined || signedOut) return;
   failures = answered ? 0 : failures + 1;
   if (answered) say("");
-  if (!document.hidden) timer = setTimeout(kick, wait(failures));
+  timer = setTimeout(kick, wait(failures));
 }
 
 /**
  * One poll: the list, then the open conversation's turns when the list
- * says they changed, then the live state of its unfinished turns. Once a
- * newer poll has begun, or another conversation is on screen, this one's
- * answers are dropped.
- * @param {number} ticket
+ * says they changed, then the live state of its unfinished turns.
+ * @param {(path: string) => Promise<Answer | undefined>} read This poll's requests.
+ * @returns {Promise<boolean | undefined>} Whether Carillon answered, or undefined once the poll has ended.
  */
-async function poll(ticket) {
-  const answer = await ask("/api/conversations");
-  if (!polls.current(ticket)) return true;
+async function poll(read) {
+  const answer = await read("/api/conversations");
+  if (answer === undefined) return undefined;
   if (!okOrNotice(answer)) return false;
   /** @type {{ conversations: Conversation[], next: number | null }} */
   const first = data(answer);
@@ -192,19 +204,30 @@ async function poll(ticket) {
   drawRail();
   const current = listed.find(({ id }) => id === open.id);
   if (open.inCore && linksAged(open.readAt, now())) open.stale = true;
-  if ((open.stale || changed(open.listedAtRead, current)) && !(await readTurns(current, ticket)))
-    return false;
+  if (open.stale || changed(open.listedAtRead, current)) {
+    const turns = await readTurns(current, read);
+    if (turns !== true) return turns;
+  }
   const ids = unfinished(open.page.turns);
-  return ids.length === 0 || (await readLive(ids, current, ticket));
+  if (ids.length === 0) return true;
+  const lives = await read(`/api/turns?ids=${ids.join(",")}`);
+  if (lives === undefined) return undefined;
+  if (!okOrNotice(lives)) return false;
+  /** @type {{ turns: Live[] }} */
+  const { turns } = data(lives);
+  live = new Map(turns.map((turn) => [turn.id, turn]));
+  if (turns.some((turn) => turn.state === "ended")) return await readTurns(current, read);
+  drawTurns();
+  return true;
 }
 
 /**
  * @param {Conversation | undefined} current How the list had the conversation before the read began.
- * @param {number} ticket
+ * @param {(path: string) => Promise<Answer | undefined>} read
  */
-async function readTurns(current, ticket) {
-  const answer = await ask(`/api/conversations/${open.id}/turns`);
-  if (!polls.current(ticket)) return true;
+async function readTurns(current, read) {
+  const answer = await read(`/api/conversations/${open.id}/turns`);
+  if (answer === undefined) return undefined;
   const inCore = answer.status !== 404;
   if (inCore) {
     if (!okOrNotice(answer)) return false;
@@ -214,23 +237,6 @@ async function readTurns(current, ticket) {
   drawRail();
   drawTurns();
   drawComposer();
-  return true;
-}
-
-/**
- * @param {string[]} ids
- * @param {Conversation | undefined} current
- * @param {number} ticket
- */
-async function readLive(ids, current, ticket) {
-  const answer = await ask(`/api/turns?ids=${ids.join(",")}`);
-  if (!polls.current(ticket)) return true;
-  if (!okOrNotice(answer)) return false;
-  /** @type {{ turns: Live[] }} */
-  const read = data(answer);
-  live = new Map(read.turns.map((turn) => [turn.id, turn]));
-  if (read.turns.some((turn) => turn.state === "ended")) return await readTurns(current, ticket);
-  drawTurns();
   return true;
 }
 
@@ -270,6 +276,9 @@ function drawRail() {
   page.noChats.hidden = all.length > 0;
   page.moreChats.hidden = next === null;
   const current = all.find(({ id }) => id === open.id);
+  if (current !== undefined && !openInRail)
+    page.chats.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
+  openInRail = current !== undefined;
   const name = titleOf(current, open.page.turns);
   page.title.textContent = name;
   document.title = open.loaded && open.inCore ? name : "Carillon";
@@ -284,21 +293,26 @@ function drawTurns() {
     const working = turn.state === "queued" || turn.state === "running";
     const read = live.get(turn.id);
     const control = working ? pressed(asked.get(turn.id), read, moment) : undefined;
-    const key = JSON.stringify([turn, working ? [read, control, moment] : 0]);
+    const [head, body] = [
+      JSON.stringify(turn.from),
+      JSON.stringify([turn, working ? [read, control, moment] : 0]),
+    ];
     let entry = drawn.get(turn.id);
     if (entry === undefined) {
-      entry = { key: "", node: el("li", "turn", turnHead(turn, moment), el("div")) };
+      entry = { head: "", body: "", node: el("li", "turn", el("div"), el("div")) };
+      entry.node.tabIndex = -1;
       drawn.set(turn.id, entry);
     }
-    if (entry.key !== key) {
-      const { node } = entry;
-      entry.key = key;
+    const { node } = entry;
+    // A turn read again has new file links, the person's own files included.
+    if (entry.head !== head) node.firstElementChild?.replaceWith(turnHead(turn, moment));
+    if (entry.body !== body)
       keepingFocus(node, "data-action", () =>
         node.lastElementChild?.replaceWith(
           turnBody(turn, read, control, moment, (action) => void press(turn, action)),
         ),
       );
-    }
+    Object.assign(entry, { head, body });
     return entry.node;
   });
   const waiting = pending.get(open.id);
@@ -312,19 +326,13 @@ function drawTurns() {
   while (page.turns.children.length > nodes.length) page.turns.lastElementChild?.remove();
   page.earlier.hidden = open.page.before === null;
   page.invitation.hidden = !open.loaded || nodes.length > 0;
-  if (followEnd) showNewest(nodes.at(-1));
-}
-
-/**
- * Scrolls to the end of the transcript, or to the top of a newest turn
- * taller than the window.
- * @param {HTMLElement | undefined} newest
- */
-function showNewest(newest) {
-  const { transcript } = page;
-  if (newest === undefined) return;
-  const tall = newest.offsetHeight > transcript.clientHeight;
-  transcript.scrollTop = tall ? newest.offsetTop - transcript.offsetTop : transcript.scrollHeight;
+  // Follow the end, but show a newest turn taller than the window from its top.
+  const [newest, { transcript }] = [nodes.at(-1), page];
+  if (followEnd && newest !== undefined)
+    transcript.scrollTop =
+      newest.offsetHeight > transcript.clientHeight
+        ? newest.offsetTop - transcript.offsetTop
+        : transcript.scrollHeight;
 }
 
 function busy() {
@@ -346,6 +354,7 @@ function drawComposer() {
         attached.set(open.id, rest);
         setError(open.id, overLimit(rest, session.limits) ?? "");
         drawComposer();
+        (page.attached.querySelectorAll("button")[chosen.indexOf(file)] ?? page.text).focus();
       }),
     ),
   );
@@ -375,7 +384,8 @@ function storeDraft(id, text) {
  * @param {boolean} minted
  */
 function show(id, minted) {
-  polls.next();
+  polls.end();
+  turnPages.end();
   open = {
     id,
     page: EMPTY,
@@ -387,7 +397,7 @@ function show(id, minted) {
   };
   live = new Map();
   drawn.clear();
-  [railKey, followEnd, choice] = ["", true, 0];
+  [railKey, followEnd, choice, openInRail] = ["", true, 0, false];
   const draft = localStorage.getItem(draftKey(id)) ?? "";
   setText(busy() ? since(draft, pending.get(id)?.text ?? "") : draft);
   setError(id, errors.get(id) ?? "");
@@ -395,7 +405,7 @@ function show(id, minted) {
   drawTurns();
   drawComposer();
   drawMenu();
-  if (matchMedia("(min-width: 46rem)").matches) page.text.focus();
+  focusComposer();
   kick();
 }
 
@@ -433,8 +443,8 @@ function send() {
   pending.set(id, message);
   attached.delete(id);
   followEnd = true;
+  // The stored draft is left as it is: it holds this message until its receipt.
   setText("");
-  storeDraft(id, "");
   setError(id, "");
   drawTurns();
   drawComposer();
@@ -475,10 +485,11 @@ async function deliver(id, message) {
       redraw();
     });
     const kind = reading(answer.status);
-    const draft = localStorage.getItem(draftKey(id)) ?? "";
+    const stored = localStorage.getItem(draftKey(id)) ?? "";
     if (kind === "ok") {
       message.stage = "received";
-      storeDraft(id, since(draft, message.text));
+      // Only what was sent is cleared: another tab may have stored a draft of its own since.
+      storeDraft(id, since(stored, message.text));
       if (id === open.id) {
         open.stale = true;
         drawComposer();
@@ -487,15 +498,18 @@ async function deliver(id, message) {
       return;
     }
     if (kind !== "away") {
+      // Refused: the message goes back to the composer, before what was written since.
       pending.delete(id);
       attached.set(id, [...message.files, ...(attached.get(id) ?? [])]);
       setError(id, refusal(answer.status, answer.body));
+      const typed = id === open.id ? page.text.value : since(stored, message.text);
+      storeDraft(id, joined(message.text, typed));
       if (id === open.id) {
-        setText(draft);
+        setText(joined(message.text, typed));
         drawTurns();
         drawComposer();
       }
-      if (kind === "signed-out") shut();
+      if (kind === "signed-out") shut(SIGNED_OUT, answer);
       return;
     }
     message.stage = "retrying";
@@ -513,9 +527,10 @@ async function press(turn, action) {
   const { id } = open;
   asked.set(turn.id, { action, state: live.get(turn.id)?.state, at: now() });
   drawTurns();
+  focusComposer();
   const answer = await ask(`/api/messages/${turn.from.event_id}/control`, "POST", { action });
   const kind = reading(answer.status);
-  if (kind === "signed-out") shut();
+  if (kind === "signed-out") shut(SIGNED_OUT, answer);
   else if (kind === "ok") setError(id, "");
   else {
     asked.delete(turn.id);
@@ -594,25 +609,31 @@ function attach(files) {
 }
 
 async function showEarlier() {
-  const { id, page: held } = open;
-  if (held.before === null) return;
-  const answer = await ask(`/api/conversations/${id}/turns?before=${held.before}`);
-  if (id !== open.id || !okOrNotice(answer)) return;
+  const { before } = open.page;
+  if (before === null) return;
+  const answer = await turnPages.begin()(`/api/conversations/${open.id}/turns?before=${before}`);
+  // A newest page read meanwhile may have replaced the turns this page continues.
+  if (answer === undefined || open.page.before !== before || !okOrNotice(answer)) return;
   const height = page.transcript.scrollHeight;
   open.page = earlier(open.page, data(answer));
   followEnd = false;
   drawTurns();
   page.transcript.scrollTop += page.transcript.scrollHeight - height;
+  const first = page.turns.firstElementChild;
+  if (first instanceof HTMLElement) first.focus({ preventScroll: true });
 }
 
 async function showMore() {
   if (next === null) return;
-  const answer = await ask(`/api/conversations?before=${String(next)}`);
-  if (!okOrNotice(answer)) return;
+  const answer = await chatPages.begin()(`/api/conversations?before=${String(next)}`);
+  if (answer === undefined || !okOrNotice(answer)) return;
   /** @type {{ conversations: Conversation[], next: number | null }} */
   const more = data(answer);
+  const shown = page.chats.children.length;
   [older, next] = [[...older, ...more.conversations], more.next];
   drawRail();
+  const first = page.chats.children[shown]?.firstElementChild;
+  if (first instanceof HTMLElement) first.focus();
 }
 
 page.text.addEventListener("input", wrote);
@@ -672,11 +693,16 @@ page.chats.addEventListener("click", () => page.app.classList.add("in-room"));
 part("new", HTMLAnchorElement).addEventListener("click", () => page.app.classList.add("in-room"));
 window.addEventListener("hashchange", route);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) clearTimeout(timer);
-  else if (!signedOut) kick();
+  if (document.hidden) {
+    clearTimeout(timer);
+    polls.end();
+  } else if (!signedOut) kick();
 });
 window.addEventListener("storage", (event) => {
   if (signedOut && event.key === "token" && event.newValue !== null) location.reload();
+  // Another tab cleared this conversation's draft, as its own receipt does: what this tab holds is still unsent.
+  if (event.key === draftKey(open.id) && event.newValue === null)
+    storeDraft(open.id, page.text.value);
 });
 
 /** The sign-in code of the address, which it leaves: a code works once. */
@@ -690,14 +716,17 @@ async function start() {
   const code = takeSignInCode();
   if (code !== null) {
     const traded = await ask("/api/sign-in", "POST", { code });
-    if (reading(traded.status) !== "ok") {
+    const kind = reading(traded.status);
+    if (kind === "ok") {
+      /** @type {{ token: string }} */
+      const signedIn = data(traded);
+      token.set(signedIn.token);
+    } else if (token.get() === null) {
       const unanswered = "Carillon did not answer the sign-in link. Run `carillon web open` again.";
-      shut(reading(traded.status) === "away" ? unanswered : refusal(traded.status, traded.body));
+      shut(kind === "away" ? unanswered : refusal(traded.status, traded.body));
       return;
     }
-    /** @type {{ token: string }} */
-    const signedIn = data(traded);
-    token.set(signedIn.token);
+    // A link that no longer works changes nothing for a browser that is signed in.
   }
   for (let failed = 0; ; failed += 1) {
     const answer = await ask("/api/session");
@@ -707,7 +736,7 @@ async function start() {
       break;
     }
     if (kind !== "away") {
-      shut(kind === "signed-out" ? SIGNED_OUT : refusal(answer.status, answer.body));
+      shut(kind === "signed-out" ? SIGNED_OUT : refusal(answer.status, answer.body), answer);
       return;
     }
     page.door.hidden = false;

@@ -310,6 +310,9 @@ progress {
 .outcome {
   margin: 0.75rem 0 0;
 }
+summary.outcome {
+  cursor: pointer;
+}
 .interrupted {
   margin-top: 0.75rem;
   padding: 0.1rem 0.85rem 0.6rem;
@@ -392,12 +395,26 @@ progress {
 :is(.notice, .error) code {
   background: var(--paper);
 }
+/* A block wider than the column scrolls inside itself. A shade at an edge
+   says more lies beyond it: the cover over each shade scrolls away with
+   the block's content. */
+.prose :is(pre, table) {
+  --cover: var(--wash);
+  --shade: rgb(0 0 0 / 0.3);
+  background:
+    linear-gradient(to right, var(--cover) 40%, transparent) left / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--cover) 40%, transparent) right / 2.5rem 100% no-repeat local,
+    linear-gradient(to right, var(--shade), transparent) left / 0.7rem calc(100% - 2px) no-repeat
+      scroll,
+    linear-gradient(to left, var(--shade), transparent) right / 0.7rem calc(100% - 2px) no-repeat
+      scroll,
+    var(--cover);
+  overflow-x: auto;
+}
 .prose pre {
   padding: 0.85rem 1rem;
   border-radius: var(--round);
-  background: var(--wash);
   line-height: 1.55;
-  overflow-x: auto;
 }
 .prose pre code {
   padding: 0;
@@ -405,12 +422,12 @@ progress {
   font-size: inherit;
 }
 .prose table {
+  --cover: var(--paper);
   display: block;
   max-width: 100%;
   border-collapse: collapse;
   font: 0.875rem/1.4 var(--ui);
   font-variant-numeric: tabular-nums;
-  overflow-x: auto;
 }
 .prose :is(th, td) {
   padding: 0.4rem 1.25rem 0.4rem 0;
