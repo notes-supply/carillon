@@ -114,7 +114,7 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let core = crate::client::test_client(format!("http://{address}"))?;
+    let core = crate::test_client(format!("http://{address}"))?;
     let audience_id = Some("discord-100-400".to_owned());
     let submit = serde_json::to_vec(&HostRequest::Submit {
         text: "/compact keep `this`".to_owned(),

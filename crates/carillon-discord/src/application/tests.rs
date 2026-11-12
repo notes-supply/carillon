@@ -24,14 +24,12 @@ use tower::ServiceExt as _;
 use twilight_http::response::StatusCode as DiscordStatusCode;
 
 use super::{
-    Connection, DiscordApp, DiscordState, IncomingMessage, InteractionSource, Lanes, MessagePlan,
-    Participation, QueuedMessage, Reactions, ServeOptions, discord_router,
+    Connection, CoreClient, DiscordApp, DiscordState, IncomingMessage, InteractionSource, Lanes,
+    MessagePlan, Participation, QueuedMessage, Reactions, ServeOptions, discord_router,
     discord_status_is_terminal, interaction_source, queue_message,
 };
 use crate::{
     attachments::Downloads,
-    client::CoreClient,
-    client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation, Settings},
     module::{
         Module, Source,
@@ -40,6 +38,7 @@ use crate::{
             replying, showing, variant, write_module,
         },
     },
+    test_client as core_client,
 };
 
 async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module>> {
@@ -73,6 +72,7 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
             version: "test".to_owned(),
             status: "ready".to_owned(),
         },
+        simulation_claims: Some(Arc::new(core.deliveries())),
         core,
         participation: Arc::new(Participation::load(directory.join("participation.json"))?),
         module: stub_module(directory, &replying("stub reply", &[])).await?,
@@ -281,9 +281,9 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
         .context("occupied listener was accepted")?;
         core.abort();
         assert!(
-            failure.chain().any(|cause| cause
-                .to_string()
-                .contains("bind Discord interface provider")),
+            failure
+                .chain()
+                .any(|cause| cause.to_string().contains("bind interface provider")),
             "{failure:#}"
         );
         assert_eq!(reconciles.load(Ordering::SeqCst), 0);

@@ -1,8 +1,8 @@
 use super::submit_event_with_retry;
 use crate::{
-    client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation},
     conversations::{IncomingMessage, Participation, tests::discord_config},
+    test_client as core_client,
 };
 use anyhow::{Context as _, anyhow};
 use axum::{
@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn ingress(
-    core: crate::client::CoreClient,
+    core: carillon_interface::CoreClient,
     config: crate::config::DiscordConfig,
     participation: Arc<Participation>,
     http: Arc<twilight_http::Client>,

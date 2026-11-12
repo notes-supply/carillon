@@ -29,6 +29,7 @@ use carillon_installation::{
     filesystem::{PublishError, atomic_write, remove, sync_ancestors},
     maintenance::MaintenanceLock,
 };
+use carillon_interface::{CoreClient, RUNTIME_LATE};
 use carillon_protocol::model::ConversationQuery;
 use carillon_wasm::{Host, Module as Compiled, Native};
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,6 @@ use twilight_model::{
 
 use crate::{
     channels::{self, Routing},
-    client::{CoreClient, RUNTIME_LATE},
     config::{DiscordConfig, Writer},
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},

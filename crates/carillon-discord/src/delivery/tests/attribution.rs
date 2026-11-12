@@ -28,7 +28,7 @@ async fn a_reply_to_a_delivered_answer_names_the_agent_that_gave_it() -> anyhow:
     tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             Reactions::new(http.clone(), crate::config::Settings::new(config.clone())),
             participation(directory.path())?,
             std::path::PathBuf::new(),

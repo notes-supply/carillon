@@ -9,17 +9,17 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
 };
+use carillon_interface::{RUNTIME_CALL_TIMEOUT, authorize_operator};
 use carillon_protocol::settings::{Change, Page};
 use tokio::{
     task::JoinSet,
     time::{Instant, timeout},
 };
 
-use super::{DiscordState, authorize_operator};
+use super::DiscordState;
 use crate::{
     InterfaceError,
     channels::{self, Routing},
-    client::RUNTIME_CALL_TIMEOUT,
 };
 
 /// How long a title waits for Discord to name the channel.
@@ -31,7 +31,7 @@ pub(super) async fn list(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Page>>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let settings = state.settings.current();
     let routes = settings.routes.iter().cloned().map(Routing::Routed);
     let direct = settings
@@ -53,7 +53,7 @@ pub(super) async fn show(
     headers: HeaderMap,
     Path(channel_id): Path<String>,
 ) -> Result<Json<Page>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let routing = routed(&state, &channel_id)?;
     Ok(Json(page(&state, &routing).await))
 }
@@ -67,7 +67,7 @@ pub(super) async fn change(
     Path(channel_id): Path<String>,
     body: Result<Json<Change>, JsonRejection>,
 ) -> Result<Json<Page>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let routing = routed(&state, &channel_id)?;
     let Json(change) = body.map_err(|rejection| InterfaceError {
         status: StatusCode::BAD_REQUEST,

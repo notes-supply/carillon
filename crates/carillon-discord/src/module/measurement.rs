@@ -286,7 +286,7 @@ async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters
         return;
     };
     while !stop.load(Ordering::Relaxed) {
-        let calls = crate::client::test_client("http://127.0.0.1:1".to_owned()).map(|core| {
+        let calls = crate::test_client("http://127.0.0.1:1".to_owned()).map(|core| {
             InteractionCalls::new(
                 core,
                 writer.clone(),

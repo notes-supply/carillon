@@ -16,29 +16,29 @@ use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
 #[derive(Clone)]
-pub(crate) struct CoreClient {
+pub struct CoreClient {
     http: Client,
     base_url: String,
     token: String,
     provider_id: String,
-    /// Fresh per process start; core releases delivery claims held under
-    /// other, presumed dead, instance identities during reconciliation.
-    instance_id: String,
 }
 
 impl CoreClient {
-    pub(crate) fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP client cannot be built.
+    pub fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
         Ok(Self {
             http: loopback::client().build()?,
             base_url,
             token,
             provider_id,
-            instance_id: Uuid::now_v7().to_string(),
         })
     }
 
     /// This provider's ID, which is the interface ID of its channels.
-    pub(crate) fn provider_id(&self) -> &str {
+    #[must_use]
+    pub fn provider_id(&self) -> &str {
         &self.provider_id
     }
 
@@ -54,13 +54,17 @@ impl CoreClient {
             .timeout(Duration::from_secs(10))
             .bearer_auth(&self.token)
             .header(PROVIDER_HEADER, &self.provider_id)
-            .header(INSTANCE_HEADER, &self.instance_id)
     }
 
     /// Submit an event with its stable platform event ID. With attachments,
     /// core answers once it has captured them, so the wait is longer than
     /// core's own capture deadline; other calls keep their short one.
-    pub(crate) async fn submit_event(
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal, or a transient failure after which core may
+    /// hold the event all the same.
+    pub async fn submit_event(
         &self,
         event: &ExternalEvent,
     ) -> Result<EventReceipt, InterfaceError> {
@@ -73,7 +77,12 @@ impl CoreClient {
         core_json(request, "submit event to core").await
     }
 
-    pub(crate) async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
+    /// What core holds of one of this provider's events.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal to say, or a transient failure.
+    pub async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/events"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.path_segments_mut()
@@ -86,53 +95,13 @@ impl CoreClient {
         .await
     }
 
-    /// Claim the next delivery for this provider instance.
-    pub(crate) async fn claim_delivery(&self) -> Result<Option<Delivery>, InterfaceError> {
-        let request = self.request(Method::GET, self.url("/v1/deliveries"));
-        core_json(request, "claim core delivery").await
-    }
-
-    /// Claim the delivery of one turn for this provider instance, if it has
-    /// one pending or held.
-    pub(crate) async fn claim_turn_delivery(
-        &self,
-        turn_id: &str,
-    ) -> Result<Option<Delivery>, InterfaceError> {
-        let mut url = Url::parse(&self.url("/v1/deliveries"))
-            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
-        url.query_pairs_mut().append_pair("turn_id", turn_id);
-        core_json(self.request(Method::GET, url), "claim core delivery").await
-    }
-
-    /// Commit the observed outcome of a held delivery claim.
-    pub(crate) async fn acknowledge_delivery(
-        &self,
-        id: i64,
-        outcome: DeliveryOutcome,
-        native_ref: Option<String>,
-    ) -> Result<(), InterfaceError> {
-        let request = self
-            .request(Method::POST, self.url(&format!("/v1/deliveries/{id}/ack")))
-            .json(&DeliveryAck {
-                native_ref,
-                outcome,
-            });
-        core_send(request, "acknowledge core delivery").await?;
-        Ok(())
-    }
-
-    /// Reconcile abandoned claims after establishing instance exclusivity.
-    pub(crate) async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
-        let request = self.request(Method::POST, self.url("/v1/deliveries/reconcile"));
-        core_json(request, "reconcile abandoned delivery claims").await
-    }
-
     /// A page of this provider's jobs at work, `after` the previous page,
     /// each running turn with its runtime's latest snapshot when it has one.
-    pub(crate) async fn jobs_at_work(
-        &self,
-        after: Option<&str>,
-    ) -> Result<JobPage, InterfaceError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn jobs_at_work(&self, after: Option<&str>) -> Result<JobPage, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         if let Some(after) = after {
@@ -148,7 +117,11 @@ impl CoreClient {
     /// The jobs this provider names by their origin turn, at most
     /// [`JOB_READ_LIMIT`](carillon_protocol::model::JOB_READ_LIMIT), however
     /// they stand; core leaves out a name of nothing this provider began.
-    pub(crate) async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.query_pairs_mut()
@@ -159,8 +132,12 @@ impl CoreClient {
     }
 
     /// Asks core to relay a person's control of the running turn `event_id`
-    /// became to the runtime holding it.
-    pub(crate) async fn control(
+    /// became to the runtime holding it. Success has no body.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal with the status core or the runtime gave it.
+    pub async fn control(
         &self,
         event_id: &str,
         action: ControlAction,
@@ -178,7 +155,9 @@ impl CoreClient {
         Ok(())
     }
 
-    pub(crate) fn authenticates(&self, token: &str) -> bool {
+    /// Whether `token` is this provider's own credential.
+    #[must_use]
+    pub fn authenticates(&self, token: &str) -> bool {
         carillon_installation::config::token_matches(
             &carillon_installation::config::hash_token(&self.token),
             token,
@@ -186,12 +165,16 @@ impl CoreClient {
     }
 
     /// The settings the runtime serving the request's subject owns there,
-    /// after applying its change. A refusal keeps the status core answered
+    /// after applying its change.
+    ///
+    /// # Errors
+    ///
+    /// A refusal keeps the status core answered
     /// with: 409 when the change was drawn from an earlier revision, 422 when
     /// its value is not offered; 504 when the runtime did not answer in time
     /// and 503 when it cannot be reached, whether core or the provider found
     /// it so.
-    pub(crate) async fn settings(
+    pub async fn settings(
         &self,
         request: &SettingsRequest,
     ) -> Result<RuntimeSettings, InterfaceError> {
@@ -203,7 +186,11 @@ impl CoreClient {
     }
 
     /// The runtime's own commands a person may run in the conversation.
-    pub(crate) async fn commands(
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::settings`].
+    pub async fn commands(
         &self,
         query: &ConversationQuery,
     ) -> Result<CommandCatalog, InterfaceError> {
@@ -220,6 +207,94 @@ impl CoreClient {
         let request = self.request(Method::GET, url).timeout(RUNTIME_CALL_TIMEOUT);
         runtime_json(request).await
     }
+
+    /// Opens delivery claims under a fresh instance identity. A provider
+    /// process opens them once and keeps them: reconciling under one
+    /// identity releases the claims held under every other.
+    #[must_use]
+    pub fn deliveries(&self) -> Deliveries {
+        Deliveries {
+            core: self.clone(),
+            instance_id: Uuid::now_v7().to_string(),
+        }
+    }
+}
+
+/// The delivery claims of one provider instance. Core hands a delivery to
+/// one instance identity, and offers that identity the claim it holds again
+/// until its outcome is acknowledged. So the identity has one owner, which
+/// sends what it claims once: this is not `Clone`.
+pub struct Deliveries {
+    core: CoreClient,
+    instance_id: String,
+}
+
+impl Deliveries {
+    fn request(&self, method: Method, url: impl IntoUrl) -> RequestBuilder {
+        self.core
+            .request(method, url)
+            .header(INSTANCE_HEADER, &self.instance_id)
+    }
+
+    /// Claim the next delivery for this provider instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal, or a transient failure that leaves the claim
+    /// ambiguous: core may have committed it without answering.
+    pub async fn claim(&self) -> Result<Option<Delivery>, InterfaceError> {
+        let request = self.request(Method::GET, self.core.url("/v1/deliveries"));
+        core_json(request, "claim core delivery").await
+    }
+
+    /// Claim the delivery of one turn for this provider instance, if it has
+    /// one pending or held.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::claim`].
+    pub async fn claim_turn(&self, turn_id: &str) -> Result<Option<Delivery>, InterfaceError> {
+        let mut url = Url::parse(&self.core.url("/v1/deliveries"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.query_pairs_mut().append_pair("turn_id", turn_id);
+        core_json(self.request(Method::GET, url), "claim core delivery").await
+    }
+
+    /// Commit the observed outcome of a held delivery claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal, or a transient failure worth repeating with
+    /// the same outcome.
+    pub async fn acknowledge(
+        &self,
+        id: i64,
+        outcome: DeliveryOutcome,
+        native_ref: Option<String>,
+    ) -> Result<(), InterfaceError> {
+        let url = self.core.url(&format!("/v1/deliveries/{id}/ack"));
+        let request = self.request(Method::POST, url).json(&DeliveryAck {
+            native_ref,
+            outcome,
+        });
+        core_send(request, "acknowledge core delivery").await?;
+        Ok(())
+    }
+
+    /// Reconcile abandoned claims after establishing instance exclusivity.
+    /// This instance keeps its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
+        let url = self.core.url("/v1/deliveries/reconcile");
+        core_json(
+            self.request(Method::POST, url),
+            "reconcile abandoned delivery claims",
+        )
+        .await
+    }
 }
 
 /// Core captures an event's files for at most five minutes before it answers.
@@ -227,9 +302,9 @@ const CAPTURE_SUBMISSION_TIMEOUT: Duration = Duration::from_mins(6);
 
 /// Settings and command calls answer a waiting person, inside the command
 /// module's deadline, so they give up well before it.
-pub(crate) const RUNTIME_CALL_TIMEOUT: Duration = Duration::from_secs(6);
+pub const RUNTIME_CALL_TIMEOUT: Duration = Duration::from_secs(6);
 /// What a person is told when a settings or command call ran out of time.
-pub(crate) const RUNTIME_LATE: &str = "The runtime did not answer in time.";
+pub const RUNTIME_LATE: &str = "The runtime did not answer in time.";
 
 /// Core and the runtime phrase rejections for people; transport failures
 /// get a local explanation while preserving an HTTP status for callers.
@@ -302,13 +377,6 @@ async fn core_json<T: DeserializeOwned>(
         .map_err(|error| InterfaceError::transient(format!("read {action}: {error}")))?;
     serde_json::from_slice(&bytes)
         .map_err(|error| InterfaceError::protocol(format!("decode {action}: {error}")))
-}
-
-#[cfg(test)]
-pub(crate) fn test_client(base_url: String) -> Result<CoreClient> {
-    let mut client = CoreClient::new(base_url, "discord".to_owned(), "token".to_owned())?;
-    client.instance_id = "instance".to_owned();
-    Ok(client)
 }
 
 #[cfg(test)]

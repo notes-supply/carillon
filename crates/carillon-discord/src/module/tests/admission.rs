@@ -250,7 +250,7 @@ async fn conversation(
             .ratelimiter(None)
             .build(),
     );
-    let core = crate::client::test_client(format!("http://{address}"))?;
+    let core = crate::test_client(format!("http://{address}"))?;
     let directory = tempfile::tempdir()?;
     let participation = Arc::new(crate::conversations::Participation::load(
         directory.path().join("participation.json"),

@@ -4,13 +4,13 @@
 //! client, beside the delivery loop where a case needs it. Cases marked as
 //! using the rate limiter run Twilight's own limiter, permit queue and 429
 //! retries.
-use super::{CardRecords, Delivering, activity_monitor};
+use super::{CardRecords, CoreClient, Delivering, activity_monitor};
 use crate::{
-    client::{CoreClient, test_client as core_client},
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
     conversations::tests::{discord_config, unread_participation},
     delivery::{Reactions, delivery_loop},
     module::{Module, tests::release_module},
+    test_client as core_client,
 };
 use anyhow::Context as _;
 use axum::{
@@ -392,7 +392,7 @@ impl Substitute {
         let stopping = CancellationToken::new();
         let reactions = Reactions::new(http, crate::config::Settings::new(config));
         let delivered = delivery_loop(
-            core.clone(),
+            core.deliveries(),
             reactions.clone(),
             unread_participation(records),
             PathBuf::new(),

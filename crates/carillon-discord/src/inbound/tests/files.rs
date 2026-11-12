@@ -22,10 +22,10 @@ use tokio::{net::TcpListener, sync::mpsc, time::Instant};
 
 use crate::{
     attachments::tests::{Serve, attachment, serve_cdn},
-    client::test_client,
     config::{DiscordActivation, DiscordConversation},
     conversations::{IncomingMessage, Participation, SourceAttachment, tests::discord_config},
     inbound::{QueuedMessage, lanes},
+    test_client,
 };
 
 /// How the fake core answers submissions, in order; then it accepts.

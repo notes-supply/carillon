@@ -15,8 +15,8 @@ use tokio::time::Instant;
 
 use super::{Routing, change, page, settled};
 use crate::{
-    client::test_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, Writer},
+    test_client,
 };
 
 fn route(agent: &str) -> DiscordRoute {
@@ -33,7 +33,7 @@ fn route(agent: &str) -> DiscordRoute {
 async fn core(
     delay: Duration,
 ) -> anyhow::Result<(
-    crate::client::CoreClient,
+    carillon_interface::CoreClient,
     Arc<Mutex<Vec<SettingsRequest>>>,
     tokio::task::JoinHandle<std::io::Result<()>>,
 )> {

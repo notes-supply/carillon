@@ -307,6 +307,7 @@ dependencies = [
  "base64 0.22.1",
  "carillon-discord-module",
  "carillon-installation",
+ "carillon-interface",
  "carillon-protocol",
  "carillon-wasm",
  "clap",
@@ -371,6 +372,24 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "uuid",
+]
+
+[[package]]
+name = "carillon-interface"
+version = "0.1.0-beta.9"
+dependencies = [
+ "anyhow",
+ "axum",
+ "carillon-installation",
+ "carillon-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 

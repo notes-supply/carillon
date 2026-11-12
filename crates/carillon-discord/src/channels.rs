@@ -13,6 +13,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use carillon_discord_module::contract::Notice;
 use carillon_installation::config::AgentConfig;
+use carillon_interface::{CoreClient, RUNTIME_LATE};
 use carillon_protocol::settings::{
     Change, Choice, Page, Revision, RuntimePart, RuntimeSettings, Setting, SettingsRequest,
     Subject, Value,
@@ -23,7 +24,6 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::{
     InterfaceError,
-    client::{CoreClient, RUNTIME_LATE},
     config::{
         DIRECT_MESSAGES, DirectMessages, DiscordActivation, DiscordConfig, DiscordConversation,
         DiscordRoute, Refused, Writer,

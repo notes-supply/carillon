@@ -1,8 +1,8 @@
 use super::{admitted, relay};
 use crate::{
-    client::test_client,
     config::{DiscordActivation, DiscordConversation},
     conversations::tests::discord_config,
+    test_client,
 };
 use axum::{Json, Router, extract::Path, http::StatusCode, routing::post};
 use carillon_protocol::turns::ControlAction;

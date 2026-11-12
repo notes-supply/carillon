@@ -31,11 +31,12 @@
 mod call;
 mod controls;
 
-use crate::{client::CoreClient, config::Settings, delivery::Reactions, module::Module};
+use crate::{config::Settings, delivery::Reactions, module::Module};
 use anyhow::{Context as _, Result};
 use call::{Call, Wanted, bounded, done, job_wanted};
 use carillon_discord_module::contract::{CardRequest, Seen};
 use carillon_installation::filesystem::{PublishError, publish};
+use carillon_interface::CoreClient;
 use carillon_protocol::model::{JOB_READ_LIMIT, Job, TurnState};
 use serde::{Deserialize, Serialize};
 use std::{
