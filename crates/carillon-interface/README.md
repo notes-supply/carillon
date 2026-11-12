@@ -19,10 +19,12 @@ in `carillon-protocol`.
   body. `Deliveries` is the claim, acknowledgement and reconciliation of
   deliveries under one instance identity. Its owner keeps two rules, which
   the type does not enforce, so that each delivery is sent once. A process
-  opens one, because a reconcile under another identity turns the first
-  one's live claims uncertain. The owner claims, sends and acknowledges in
-  sequence, because until a claim's outcome is acknowledged core answers
-  every claim under that identity with the same delivery.
+  opens one, because a reconcile under another identity takes the first
+  one's live claims: answers become uncertain and silences return to
+  pending. The owner claims, sends and acknowledges in sequence, because
+  until a claim's outcome is acknowledged core answers a repeated `claim`
+  with a delivery that identity already holds. `claim_turn` claims by turn,
+  so it can take another turn's delivery meanwhile.
 - [`error`](src/error.rs): `InterfaceError`, a status and a message, which
   is also the JSON answer a provider's own routes give. `is_transient` says
   which failures are worth repeating: 5xx other than 502 and 507, and

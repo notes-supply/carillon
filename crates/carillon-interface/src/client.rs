@@ -209,8 +209,9 @@ impl CoreClient {
     }
 
     /// Opens delivery claims under a fresh instance identity. Open them once
-    /// in a provider process: a reconcile under one identity turns the live
-    /// claims of every other uncertain.
+    /// in a provider process: a reconcile under one identity takes the live
+    /// claims of every other, marking answers uncertain and returning
+    /// silences to pending.
     #[must_use]
     pub fn deliveries(&self) -> Deliveries {
         Deliveries {
@@ -224,7 +225,9 @@ impl CoreClient {
 /// is its owner's work, by two rules the type does not enforce. Open one in
 /// a process, as [`CoreClient::deliveries`] says. Claim, send and
 /// acknowledge in sequence: until a claim's outcome is acknowledged, core
-/// answers every claim under this identity with that same delivery.
+/// answers a repeated [`Self::claim`] with a delivery this identity already
+/// holds. [`Self::claim_turn`] claims by turn, so it can take another turn's
+/// delivery meanwhile.
 pub struct Deliveries {
     core: CoreClient,
     instance_id: String,
