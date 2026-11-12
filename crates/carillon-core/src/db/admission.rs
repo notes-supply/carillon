@@ -88,8 +88,8 @@ impl Database {
                 (providers, resources, Some(explanation))
             }
         };
-        conversations::record_channel(&transaction, interface_id, event)?;
         let now = timestamp()?;
+        conversations::accepted(&transaction, interface_id, event, now)?;
         let turn_id = uuid::Uuid::now_v7().to_string();
         transaction.execute(
             "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
@@ -122,19 +122,7 @@ impl Database {
                  WHERE id = ?1",
                 params![turn_id, notice, now],
             )?;
-            transaction.execute(
-                "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                     content, state, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
-                params![
-                    turn_id,
-                    interface_id,
-                    event.delivery_target_id,
-                    event.feedback_target_id,
-                    notice,
-                    now,
-                ],
-            )?;
+            self.record_delivery(&transaction, &turn_id, notice, None, now)?;
             TurnState::Interrupted
         } else {
             TurnState::Queued

@@ -2,6 +2,7 @@
 //! runtimes, and the delivery outbox, served over the loopback provider API.
 
 mod controls;
+mod conversations;
 mod maintenance;
 mod registry;
 mod runtime;
@@ -21,7 +22,7 @@ use axum::{
     routing::{get, post, put},
 };
 use carillon_installation::{
-    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    config::{DeliveryMode, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
     loopback,
 };
 use carillon_protocol::{
@@ -85,6 +86,13 @@ pub(super) fn core_options(config: &LoadedConfig) -> CoreOptions {
             .iter()
             .filter(|provider| provider.role == ProviderRole::Interface)
             .map(|provider| (provider.id.clone(), provider.upload_mib()))
+            .collect(),
+        retained: config
+            .value
+            .providers
+            .iter()
+            .filter(|provider| provider.delivery == DeliveryMode::Retained)
+            .map(|provider| provider.id.clone())
             .collect(),
         runtimes: runtime_facts(config),
     }
@@ -230,6 +238,11 @@ fn router(state: AppState) -> Router {
         .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
         .route("/v1/runtime/resources", post(runtime::resources))
         .route("/v1/jobs", get(jobs))
+        .route("/v1/conversations", get(conversations::list))
+        .route(
+            "/v1/conversations/{agent_id}/{audience_id}",
+            get(conversations::transcript),
+        )
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
         .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))

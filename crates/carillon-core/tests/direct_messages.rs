@@ -26,6 +26,7 @@ async fn a_direct_message_conversation_keeps_one_turn_per_event_across_replays_a
         }],
         attachments: AttachmentLimits::default(),
         uploads: std::collections::BTreeMap::new(),
+        retained: std::collections::BTreeSet::new(),
     };
     let interface = SelectedProvider {
         id: "discord".to_owned(),

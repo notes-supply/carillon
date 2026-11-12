@@ -216,6 +216,32 @@ pub struct Provider {
     /// the answer instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_upload_mib: Option<u64>,
+    /// How an interface's answers reach its people.
+    #[serde(default, skip_serializing_if = "DeliveryMode::is_external")]
+    pub delivery: DeliveryMode,
+}
+
+/// How an interface's answers reach its people.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeliveryMode {
+    /// The interface claims each answer from core, sends it on its platform
+    /// and reports whether it arrived.
+    #[default]
+    External,
+    /// The interface's people read answers from core's record, so an answer
+    /// is delivered once core records it: nothing waits for the interface.
+    Retained,
+}
+
+impl DeliveryMode {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde passes the field by reference"
+    )]
+    fn is_external(&self) -> bool {
+        *self == Self::External
+    }
 }
 
 impl Provider {
@@ -514,13 +540,22 @@ impl Config {
                 bail!("provider ID {} is configured more than once", provider.id);
             }
         }
-        if let Some(provider) = self.providers.iter().find(|provider| {
-            provider.role == ProviderRole::Runtime && provider.max_upload_mib.is_some()
-        }) {
-            bail!(
-                "max_upload_mib applies only to interface providers; remove it from runtime provider {}",
-                provider.id
-            );
+        for runtime in self
+            .providers
+            .iter()
+            .filter(|provider| provider.role == ProviderRole::Runtime)
+        {
+            for (field, set) in [
+                ("max_upload_mib", runtime.max_upload_mib.is_some()),
+                ("delivery", runtime.delivery != DeliveryMode::External),
+            ] {
+                if set {
+                    bail!(
+                        "{field} applies only to interface providers; remove it from runtime provider {}",
+                        runtime.id
+                    );
+                }
+            }
         }
         let mut agent_ids = BTreeSet::new();
         for agent in &self.agents {
@@ -610,7 +645,68 @@ fn valid_token_hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_provider_identity;
+    use super::{Config, DeliveryMode, validate_provider_identity};
+
+    fn registry(interface: &str, runtime: &str) -> Result<Config, toml::de::Error> {
+        let hash = "0".repeat(64);
+        toml::from_str(&format!(
+            r#"data_dir = "state"
+[core]
+listen = "127.0.0.1:4000"
+operator_token_hash = "{hash}"
+[[providers]]
+id = "web"
+role = "interface"
+version = "1"
+url = "http://127.0.0.1:4001"
+token_hash = "{hash}"
+enabled = true
+{interface}
+[[providers]]
+id = "runtime"
+role = "runtime"
+version = "1"
+url = "http://127.0.0.1:4002"
+token_hash = "{hash}"
+enabled = true
+{runtime}
+"#
+        ))
+    }
+
+    #[test]
+    fn an_interface_alone_may_retain_its_deliveries() -> anyhow::Result<()> {
+        let unset = registry("", "")?;
+        unset.validate()?;
+        assert_eq!(unset.providers[0].delivery, DeliveryMode::External);
+        assert!(!toml::to_string(&unset)?.contains("delivery"));
+
+        let retained = registry(r#"delivery = "retained""#, "")?;
+        retained.validate()?;
+        assert_eq!(retained.providers[0].delivery, DeliveryMode::Retained);
+        assert_eq!(
+            registry("", "")?.providers[1].delivery,
+            retained.providers[1].delivery
+        );
+        let written: Config = toml::from_str(&toml::to_string(&retained)?)?;
+        assert_eq!(written.providers[0].delivery, DeliveryMode::Retained);
+
+        let unknown = registry(r#"delivery = "kept""#, "")
+            .map(drop)
+            .map_err(|error| error.message().to_owned());
+        assert_eq!(
+            unknown,
+            Err("unknown variant `kept`, expected `external` or `retained`".to_owned())
+        );
+        let refused = registry("", r#"delivery = "retained""#)?.validate();
+        assert_eq!(
+            refused.err().map(|error| error.to_string()).as_deref(),
+            Some(
+                "delivery applies only to interface providers; remove it from runtime provider runtime"
+            )
+        );
+        Ok(())
+    }
 
     #[test]
     fn provider_identity_uses_one_path_safe_slug_grammar() {

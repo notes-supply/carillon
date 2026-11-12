@@ -55,6 +55,7 @@ fn installation(root: &Path) -> Result<Fixture> {
             token_hash: hash_token("test-only"),
             enabled: true,
             max_upload_mib: None,
+            delivery: DeliveryMode::External,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -929,6 +930,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 
 mod attachments;
 mod configuration;
+mod conversations;
 mod cutover;
 mod durable;
 mod health;
@@ -936,6 +938,7 @@ mod held;
 mod live;
 mod maintenance;
 mod reserved;
+mod retained;
 mod settings;
 
 /// One async worker, as when every worker could be taken: another writer
@@ -1103,50 +1106,5 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_read_within_its_bound
     assert_eq!(oversized.turn_state, TurnState::Completed);
     assert_eq!(oversized.content, "reply to oversized");
     assert_eq!(reported(&oversized.turn_id)?, None);
-    Ok(())
-}
-
-#[tokio::test]
-async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let mut replacement = state
-        .config
-        .provider("test-runtime", ProviderRole::Runtime)?
-        .clone();
-    replacement.id = "replacement".to_owned();
-    replacement.url = "http://127.0.0.1:59".to_owned();
-    fs::write(
-        directory.path().join("credentials/replacement.token"),
-        "test-only",
-    )?;
-    state.config.value.providers.push(replacement);
-    let mut plain = state.config.value.agents[0].clone();
-    "plain".clone_into(&mut plain.id);
-    "replacement".clone_into(&mut plain.runtime);
-    plain.resources = None;
-    state.config.value.agents.push(plain);
-    state.config.value.validate()?;
-    fs::write(
-        state.config.value.resource_roots()[0].join("SYSTEM.md"),
-        "assistant",
-    )?;
-
-    // One audience, two agents: two conversations, each on its agent's runtime.
-    let assistant = accept(&state, "assistant-turn", "conversation").await?;
-    let plain = accept_for(&state, "plain", "plain-turn", "conversation").await?;
-    let core = configured(&state).core;
-    let request = answer_next(&core, "replacement").await?;
-    assert_eq!(request.correlation_id, plain.turn_id);
-    assert_eq!(request.agent_id, "plain");
-    assert_eq!(fs::read_dir(&request.resource_root)?.count(), 0);
-    let request = answer_next(&core, "test-runtime").await?;
-    assert_eq!(request.correlation_id, assistant.turn_id);
-    let system = fs::read_to_string(Path::new(&request.resource_root).join("SYSTEM.md"))?;
-    assert_eq!(system, "assistant");
-    crate::assert_refused(
-        accept_for(&state, "unknown", "unknown-turn", "conversation").await,
-        "unknown agent",
-    )?;
     Ok(())
 }

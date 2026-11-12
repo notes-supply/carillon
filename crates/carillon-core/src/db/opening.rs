@@ -97,6 +97,7 @@ impl Database {
             Some((latest, _)) => latest,
         };
         let turn_id = uuid::Uuid::now_v7().to_string();
+        let now = timestamp()?;
         transaction.execute(
             "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
                  target_id, feedback_target_id, input, native_json, runtime_id,
@@ -109,8 +110,15 @@ impl Database {
                 turn_id,
                 event_id,
                 opening.label.as_deref().unwrap_or_default(),
-                timestamp()?,
+                now,
             ],
+        )?;
+        conversations::active(
+            &transaction,
+            &opening.interface_id,
+            &opening.agent_id,
+            &opening.audience_id,
+            now,
         )?;
         let channel_id = channel(&transaction)?;
         transaction.commit()?;

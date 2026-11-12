@@ -11,6 +11,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
+use carillon_protocol::conversations::{ConversationPage, Transcript};
 use carillon_protocol::model::{
     ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
     EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
@@ -18,7 +19,11 @@ use carillon_protocol::model::{
 };
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 /// What admission decided before any capture work.
 enum Admitted {
@@ -62,6 +67,9 @@ pub struct CoreOptions {
     /// The largest file each interface uploads, in MiB, by its ID. Core
     /// keeps no larger answer file for that interface's conversations.
     pub uploads: BTreeMap<String, u64>,
+    /// The interfaces whose people read answers from core's record, by ID.
+    /// Their answers are delivered once core records them.
+    pub retained: BTreeSet<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,7 +148,7 @@ impl Core {
         let runtimes = std::mem::take(&mut options.runtimes);
         Self {
             intake: Arc::new(Intake::new(options.attachments)),
-            database,
+            database: database.retaining(std::mem::take(&mut options.retained)),
             options,
             runtimes: Arc::new(watch::Sender::new(runtimes.into())),
             work: Arc::new(watch::Sender::new(())),
@@ -154,6 +162,10 @@ impl Core {
     pub(crate) fn reconfigured(&self, mut options: CoreOptions) -> Self {
         let runtimes = std::mem::take(&mut options.runtimes);
         Self {
+            database: self
+                .database
+                .clone()
+                .retaining(std::mem::take(&mut options.retained)),
             options,
             runtimes: Arc::new(watch::Sender::new(runtimes.into())),
             ..self.clone()
@@ -530,6 +542,31 @@ impl Core {
         Ok(self.database.named_jobs(interface, named)?)
     }
 
+    /// A page of an authenticated interface's conversations, the latest
+    /// active first: those whose activity marker is below `before`.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn conversations(&self, interface: &str, before: Option<i64>) -> Result<ConversationPage> {
+        self.database.conversations(interface, before)
+    }
+
+    /// A page of the turns of one conversation of an authenticated
+    /// interface, oldest first: its newest, or those before the turn
+    /// `before`. A conversation with no turn reads as empty, and so does
+    /// a page before a turn that is not the conversation's.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn transcript(
+        &self,
+        interface: &str,
+        agent_id: &str,
+        audience_id: &str,
+        before: Option<&str>,
+    ) -> Result<Transcript> {
+        self.database
+            .transcript(interface, agent_id, audience_id, before)
+    }
+
     /// Inspect a turn, without granting external operator authority.
     /// # Errors
     /// Returns storage errors.
@@ -669,7 +706,7 @@ fn kept_report(turn_id: &str, activity: Option<TurnActivity>) -> Option<TurnActi
 }
 
 fn validate_options(options: &CoreOptions) -> Result<()> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeSet::new();
     for agent in &options.agents {
         anyhow::ensure!(
             !agent.id.is_empty() && ids.insert(&agent.id) && !agent.runtime.is_empty(),
@@ -680,7 +717,7 @@ fn validate_options(options: &CoreOptions) -> Result<()> {
 }
 
 fn validate_runtimes(runtimes: &[RuntimeProvider]) -> Result<()> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeSet::new();
     for runtime in runtimes {
         anyhow::ensure!(
             !runtime.id.is_empty() && ids.insert(&runtime.id),

@@ -371,7 +371,8 @@ for state in schema:'database schema is not the current Carillon format' \
     previous)
       node -e '
         const database = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
-        const sql = database.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get("conversations").sql;
+        const sql = database.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name = ? AND sql IS NOT NULL")
+          .all("conversations").map((object) => object.sql).join(";");
         const rows = database.prepare("SELECT * FROM conversations").all();
         require("node:fs").writeFileSync(process.argv[2], JSON.stringify({ sql, rows }));
         database.exec("DROP TABLE conversations; PRAGMA wal_checkpoint(TRUNCATE)");
@@ -401,9 +402,12 @@ for state in schema:'database schema is not the current Carillon format' \
         const database = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
         const { sql, rows } = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
         database.exec(sql);
-        const insert = database.prepare(
-          "INSERT INTO conversations (interface_id, agent_id, audience_id, channel_id) VALUES (?, ?, ?, ?)");
-        for (const row of rows) insert.run(row.interface_id, row.agent_id, row.audience_id, row.channel_id);
+        for (const row of rows) {
+          const columns = Object.keys(row);
+          const places = columns.map(() => "?");
+          database.prepare("INSERT INTO conversations (" + columns + ") VALUES (" + places + ")")
+            .run(...Object.values(row));
+        }
         database.close();' "$DATABASE" "$TEST_ROOT/conversations.json" ;;
     discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
     module) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" && rm "$TEST_ROOT/broken.wasm" ;;
