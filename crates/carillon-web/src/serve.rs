@@ -85,6 +85,7 @@ pub(crate) async fn serve(
             key_file: browser::key_file(data_dir, &provider.id),
             // A browser names the address in one spelling whatever the registry's.
             authority: listener.local_addr()?.to_string(),
+            started: browser::now_ms(),
             used: Mutex::default(),
         },
         staging,

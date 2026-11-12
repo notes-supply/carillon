@@ -17,7 +17,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::http::{
@@ -33,17 +33,21 @@ use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
 use uuid::Uuid;
 
-/// How many seconds `carillon web open`'s link works.
-const CODE_LIFETIME: u64 = 2 * 60;
+/// How many milliseconds `carillon web open`'s link works.
+const CODE_LIFETIME: u128 = 2 * 60 * 1000;
 
 pub(crate) struct Browser {
     pub(crate) key_file: PathBuf,
     /// The `host:port` the provider listens on, as a browser writes it: the
     /// only name a request may give this provider.
     pub(crate) authority: String,
+    /// When this provider started, in Unix milliseconds. A code made before
+    /// then is refused: the provider that ran before may have traded it, and
+    /// remembered that only while it ran.
+    pub(crate) started: u128,
     /// The sign-in codes traded already, each by the name it carries, until
     /// it expires.
-    pub(crate) used: Mutex<Vec<(String, u64)>>,
+    pub(crate) used: Mutex<Vec<(String, u128)>>,
 }
 
 /// Where provider `provider_id` keeps its browser key.
@@ -58,11 +62,20 @@ pub(crate) fn refusal(status: StatusCode, message: &str) -> InterfaceError {
     }
 }
 
-/// Unix seconds.
-pub(crate) fn now() -> u64 {
+fn since_epoch() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
+        .unwrap_or_default()
+}
+
+/// Unix seconds.
+pub(crate) fn now() -> u64 {
+    since_epoch().as_secs()
+}
+
+/// Unix milliseconds, which a sign-in code counts in.
+pub(crate) fn now_ms() -> u128 {
+    since_epoch().as_millis()
 }
 
 /// The browser key as one request read it.
@@ -119,9 +132,10 @@ impl Key {
         self.matches(&["token"], token)
     }
 
-    /// A code that signs one browser in, once, until `expires`: that time,
-    /// a name of its own, and this key's signature of both.
-    pub(crate) fn code(&self, expires: u64) -> String {
+    /// A code that signs one browser in, once, until `expires`: that time
+    /// in Unix milliseconds, a name of its own, and this key's signature of
+    /// both.
+    pub(crate) fn code(&self, expires: u128) -> String {
         let (expires, name) = (expires.to_string(), Uuid::now_v7().simple().to_string());
         let signature = self.sign(&["code", &expires, &name]);
         format!("{expires}.{name}.{signature}")
@@ -135,7 +149,7 @@ pub(crate) fn new_code(key_file: &Path) -> io::Result<String> {
         Some(key) => key,
         None => Key::replace(key_file)?,
     };
-    Ok(key.code(now() + CODE_LIFETIME))
+    Ok(key.code(now_ms() + CODE_LIFETIME))
 }
 
 impl Browser {
@@ -172,14 +186,16 @@ impl Browser {
     }
 
     /// The browser's token for `code`, when the key as it is now signed the
-    /// code, it has not expired and no request traded it before.
+    /// code, it has not expired, it was made since this provider started and
+    /// no request traded it before.
     pub(crate) fn redeem(&self, code: &str) -> Option<String> {
         let key = Key::read(&self.key_file)?;
         let [expires, name, signature] = code.split('.').collect::<Vec<_>>()[..] else {
             return None;
         };
-        let now = now();
-        let until = expires.parse().ok().filter(|until: &u64| *until > now)?;
+        let (now, fresh) = (now_ms(), self.started + CODE_LIFETIME);
+        let until = expires.parse().ok();
+        let until = until.filter(|until: &u128| *until > now && *until >= fresh)?;
         if !key.matches(&["code", expires, name], signature) {
             return None;
         }

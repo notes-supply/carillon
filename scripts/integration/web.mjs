@@ -207,16 +207,18 @@ async function signIn() {
   const link = carillon("web", "open", "--print");
   assert.match(link, new RegExp(`^${origin}/#sign-in=\\d+\\.[0-9a-f]{32}\\.[0-9a-f]{64}$`, "u"));
   const code = link.split("#sign-in=")[1];
-  const trade = () =>
-    fetch(`${origin}/api/sign-in`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin },
-      body: JSON.stringify({ code }),
-    });
-  const traded = await trade();
+  const traded = await trade(code);
   assert.equal(traded.status, 200);
-  assert.equal((await trade()).status, 401, "a sign-in code worked twice");
+  assert.equal((await trade(code)).status, 401, "a sign-in code worked twice");
   return (await traded.json()).token;
+}
+
+function trade(code) {
+  return fetch(`${origin}/api/sign-in`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin },
+    body: JSON.stringify({ code }),
+  });
 }
 
 async function testGate(token) {
@@ -380,11 +382,15 @@ try {
   // The provider keeps nothing but its key: a restart loses no conversation
   // and signs no browser out.
   const before = await turns(token, chat);
+  const unused = carillon("web", "open", "--print").split("#sign-in=")[1];
   services("stop", "web");
   services("start", "web");
   await healthy("web");
   assert.deepEqual(await turns(token, chat), before);
   assert.equal((await fetch(`${origin}${link}`)).status, 200);
+  // What a provider traded it remembers only while it runs, so one that
+  // starts takes no code made before it.
+  assert.equal((await trade(unused)).status, 401, "a code from before a restart worked");
 
   // Answers reach a web chat by being recorded, so a drain waits for no
   // page and no provider.

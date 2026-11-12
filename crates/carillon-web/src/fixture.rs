@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::{
-    browser::{self, Browser, Key, now},
+    browser::{self, Browser, Key, now_ms},
     send::Sends,
     serve::{Web, router},
     site::Site,
@@ -358,6 +358,7 @@ workspace = "work"
             browser: Browser {
                 key_file: browser::key_file(&data_dir, "web"),
                 authority: AUTHORITY.to_owned(),
+                started: now_ms(),
                 used: Mutex::default(),
             },
             sends: Sends::default(),
@@ -383,7 +384,7 @@ workspace = "work"
 
     /// A sign-in code as `carillon web open` makes one, good until
     /// `expires`.
-    pub(crate) fn code(&self, expires: u64) -> Result<String> {
+    pub(crate) fn code(&self, expires: u128) -> Result<String> {
         let key = Key::read(&self.key_file()).context("no browser key")?;
         Ok(key.code(expires))
     }
@@ -419,7 +420,9 @@ workspace = "work"
     /// A token as a browser gets one: a code made with the key, traded at
     /// the page's route.
     pub(crate) async fn sign_in(&self) -> Result<String> {
-        let traded = self.send(trade(&self.code(now() + 60)?)?).await?;
+        let traded = self
+            .send(trade(&browser::new_code(&self.key_file())?)?)
+            .await?;
         assert_eq!(traded.status, StatusCode::OK);
         Ok(traded.json()?["token"]
             .as_str()

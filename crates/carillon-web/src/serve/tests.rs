@@ -21,11 +21,14 @@ use serde_json::json;
 use sha2::Sha256;
 
 use crate::{
-    browser::{Key, now},
+    browser::{Key, now_ms},
     fixture::{
         AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, bearer, operator, request, trade,
     },
 };
+
+/// How long a sign-in code works, in the milliseconds it counts in.
+const TWO_MINUTES: u128 = 120_000;
 
 /// One route of each class the provider serves.
 const ROUTES: [(Method, &str); 12] = [
@@ -225,7 +228,7 @@ async fn trade_status(fixture: &Fixture, code: String) -> Result<StatusCode> {
 async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it() -> Result<()> {
     let fixture = Fixture::new().await?;
     let status = |code: String| trade_status(&fixture, code);
-    let code = fixture.code(now() + 120)?;
+    let code = fixture.code(now_ms() + TWO_MINUTES)?;
     assert_eq!(status(code.clone()).await?, StatusCode::OK);
     let again = fixture.send(trade(&code)?).await?;
     assert_eq!(again.status, StatusCode::UNAUTHORIZED);
@@ -238,15 +241,19 @@ async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it
     let respelled = format!("{signed}.{}", signature.to_uppercase());
     assert_eq!(status(respelled).await?, StatusCode::UNAUTHORIZED);
 
-    for past in [now() - 1, 1] {
+    for past in [now_ms() - 1, 1] {
         let expired = fixture.code(past)?;
         assert_eq!(status(expired).await?, StatusCode::UNAUTHORIZED);
     }
-    let good = fixture.code(now() + 120)?;
+    // Made before this provider started. The one before it may have
+    // taken it, and what a provider has taken it remembers only while it runs.
+    let earlier = fixture.code(fixture.web.browser.started + TWO_MINUTES - 1)?;
+    assert_eq!(status(earlier).await?, StatusCode::UNAUTHORIZED);
+    let good = fixture.code(now_ms() + TWO_MINUTES)?;
     let (expires, rest) = good.split_once('.').unwrap_or_default();
     let (name, signature) = rest.split_once('.').unwrap_or_default();
     for forged in [
-        format!("{}.{name}.{signature}", now() + 3600),
+        format!("{}.{name}.{signature}", now_ms() + 2 * TWO_MINUTES),
         format!("{expires}.other{name}.{signature}"),
         format!("{expires}.{name}.{}", "0".repeat(signature.len())),
         format!("{expires}.{name}."),
@@ -263,7 +270,7 @@ async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it
     }
     assert_eq!(status(good).await?, StatusCode::OK);
 
-    let waiting = fixture.code(now() + 120)?;
+    let waiting = fixture.code(now_ms() + TWO_MINUTES)?;
     Key::replace(&fixture.key_file())?;
     assert_eq!(status(waiting).await?, StatusCode::UNAUTHORIZED);
     Ok(())
@@ -273,7 +280,7 @@ async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it
 async fn two_requests_racing_for_one_code_sign_one_browser_in() -> Result<()> {
     let fixture = Arc::new(Fixture::new().await?);
     for _ in 0..20 {
-        let code = fixture.code(now() + 120)?;
+        let code = fixture.code(now_ms() + TWO_MINUTES)?;
         let racers = [(); 2].map(|()| {
             let (fixture, request) = (Arc::clone(&fixture), trade(&code));
             tokio::spawn(async move { anyhow::Ok(fixture.send(request?).await?.status) })
@@ -479,9 +486,9 @@ async fn open_makes_a_link_the_provider_takes_and_says_when_none_runs() -> Resul
     let code = made
         .strip_prefix(&format!("http://{address}/#sign-in="))
         .with_context(|| format!("{made} does not open the provider's page"))?;
-    let expires: u64 = code.split('.').next().unwrap_or_default().parse()?;
+    let expires: u128 = code.split('.').next().unwrap_or_default().parse()?;
     assert!(
-        (now() + 115..=now() + 120).contains(&expires),
+        (now_ms() + TWO_MINUTES - 5000..=now_ms() + TWO_MINUTES).contains(&expires),
         "the link does not work for two minutes"
     );
     listening.set_nonblocking(true)?;

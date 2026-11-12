@@ -53,9 +53,11 @@ trusts nothing a browser attaches on its own.
 - `carillon web open` reads the key and makes a sign-in code: a time two
   minutes on, a name of its own and the key's signature of both. It opens
   `<address>/#sign-in=<code>`. The provider takes a code that the current
-  key signed, that has not expired and that no request traded before. It
-  remembers a traded code only until the code expires. The page trades the
-  code for a token and keeps the token in `localStorage`.
+  key signed, that has not expired, that was made since the provider
+  started and that no request traded before. It remembers a traded code
+  only while it runs and until the code expires, so it takes no code from
+  before its start. The page trades the code for a token and keeps the
+  token in `localStorage`.
 - Every `/api` request carries `Authorization: Bearer <token>`. No cookie
   carries authority.
 - `Host` must be the address the provider listens on, as a browser writes
@@ -136,8 +138,8 @@ POST /api/sign-in
 ```
 
 Take the code from the fragment and remove the fragment from the address
-before the request. A code that was traded already, has expired or was not
-signed by the current key is 401.
+before the request. A code that was traded already, has expired, was made
+before the provider started or was not signed by the current key is 401.
 
 ### Read the session
 
