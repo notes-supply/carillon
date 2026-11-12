@@ -98,7 +98,8 @@ an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 seconds meanwhile. Any other answer interrupts the turn; nothing ran, so its
 notice is the runtime's explanation alone. The runtime later settles the turn with
 its own credential: answered, failed with an explanation it judged safe to
-show, steered into the turn running before it, or stopped. Steered and
+show, steered into an answer that another message carries, on Pi the newest
+of those that joined it, or stopped. Steered and
 stopped deliver a silence the interface shows on the message instead of a
 reply. The outcome and its delivery commit together, once; the same outcome
 again is recorded, another is refused. A turn still queued is settled too,
@@ -461,9 +462,9 @@ setup registers that interface, runs its program and nothing else, and
 restarts a running Carillon once core has drained, because core takes a
 new provider only when it starts. It writes nothing but the new entry, and
 refuses a port another program of the machine listens on before it writes
-that. When the interface's program does not finish, setup takes the entry
-out again. Carillon counts as stopped only when nothing listens at core's
-address: a core that is there and does not answer fails the command. Setup reruns retain a plain T3 agent's ID by its saved T3 project
+that. When the interface's program ends without finishing, setup takes the
+entry out again. Carillon counts as stopped only when core's address
+refuses the connection: any other failure to reach core fails the command. Setup reruns retain a plain T3 agent's ID by its saved T3 project
 ID. New projects receive IDs that avoid both existing agents and saved
 project bindings, so keeping a Discord route cannot silently move it to a
 different project. Adding Pi explicitly to plain T3 Code channels plans its

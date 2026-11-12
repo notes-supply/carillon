@@ -674,15 +674,19 @@ give it another `url`, then run setup again. When another program on the
 machine listens there, setup names the port: stop that program, then run
 setup again.
 
-When core is there and does not answer, setup cannot tell what Carillon
-serves. The command fails with core's error, the entry stays in
+When core's address does anything but refuse the connection, as when core
+is there and does not answer, setup cannot tell what Carillon serves. The command fails with core's error, the entry stays in
 `carillon.toml`, and `carillon restart` applies it.
 
 `carillon setup --interface discord` adds Discord to an installation that
 has only the web chat in the same way. It runs Discord's own setup, which
-asks for the bot and its channels, and nothing else. If you cancel it, or it
-does not finish, setup takes Discord's entry out of `carillon.toml` again,
-so Carillon starts as it did before. Run the command again to add it.
+asks for the bot and its channels, and nothing else. If you cancel it at a
+question, or it fails, setup takes Discord's entry out of `carillon.toml`
+again, so Carillon starts as it did before. Run the command again to add
+it. If the command itself is killed while Discord's setup runs, the entry
+stays without its settings, and the next start reports `discord-private`
+unavailable: run the command again to finish, or `carillon provider
+discord-private disable` to start without it.
 
 ### The page's files
 
@@ -817,7 +821,7 @@ processing_emoji = "👀"
 delivered_emoji = "✅"
 failed_emoji = "❌"
 uncertain_emoji = "⚠️"
-steered_emoji = "↪️"     # handed to the turn before it, which answers both
+steered_emoji = "↪️"     # joined another answer; on Pi the newest message that joined carries it
 stopped_emoji = "⏹️"
 steer_emoji = "⏩"
 interrupt_emoji = "⏭️"
