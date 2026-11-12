@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use axum::http::{
-    HeaderMap, HeaderValue, Method, StatusCode,
+    HeaderMap, HeaderValue, StatusCode,
     header::{HOST, ORIGIN},
 };
 use carillon_installation::{
@@ -110,9 +110,9 @@ impl Browser {
     /// What every request passes before anything reads it. `Host` must name
     /// this provider, so a rebinding domain is refused. An `Origin` must be
     /// this provider's own; a request without one comes from the page's own
-    /// navigation or from a program. No preflight is answered, so no other
-    /// origin can send the bearer.
-    pub(crate) fn admit(&self, method: &Method, headers: &HeaderMap) -> Result<(), InterfaceError> {
+    /// navigation or from a program. A preflight carries its origin, so
+    /// another origin's is refused here and it never sends the bearer.
+    pub(crate) fn admit(&self, headers: &HeaderMap) -> Result<(), InterfaceError> {
         let mut hosts = headers.get_all(HOST).iter();
         if hosts.next().map(HeaderValue::as_bytes) != Some(self.authority.as_bytes())
             || hosts.next().is_some()
@@ -130,12 +130,6 @@ impl Browser {
             return Err(refusal(
                 StatusCode::FORBIDDEN,
                 "Carillon's web chat answers only its own page.",
-            ));
-        }
-        if method == Method::OPTIONS {
-            return Err(refusal(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "Carillon's web chat answers no preflight.",
             ));
         }
         Ok(())
@@ -180,6 +174,11 @@ impl Browser {
             .with_context(|| format!("replace {}", self.key_file.display()))?;
         state.codes.clear();
         Ok(())
+    }
+
+    /// The signature that lets a link read what `parts` name.
+    pub(crate) fn sign(&self, parts: &[&str]) -> String {
+        hex::encode(mac(&self.state().key, parts).finalize().into_bytes())
     }
 
     /// Whether `signature` is the current key's for `parts`.

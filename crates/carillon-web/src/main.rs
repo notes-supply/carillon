@@ -5,6 +5,11 @@
 mod api;
 mod browser;
 mod channels;
+mod files;
+#[cfg(test)]
+mod fixture;
+mod identity;
+mod markdown;
 mod serve;
 mod site;
 

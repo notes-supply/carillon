@@ -4,14 +4,33 @@
 
 use std::sync::Arc;
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::get,
+};
 use carillon_interface::InterfaceError;
+use carillon_protocol::{
+    conversations::{ConversationSummary, TranscriptTurn, TurnSource},
+    model::{TurnActivity, TurnState},
+    turns::Silence,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::{browser::refusal, serve::Web};
+use crate::{
+    browser::refusal,
+    files::{self, FileView},
+    identity::{ConversationId, known},
+    markdown::render,
+    serve::Web,
+};
 
 pub(crate) fn routes() -> Router<Arc<Web>> {
-    Router::new().route("/session", get(session))
+    Router::new()
+        .route("/session", get(session))
+        .route("/conversations", get(conversations))
+        .route("/conversations/{id}/turns", get(turns))
 }
 
 #[derive(Deserialize)]
@@ -86,3 +105,213 @@ async fn session(State(web): State<Arc<Web>>) -> Json<Session> {
         custom_site: web.site.is_custom(),
     })
 }
+
+/// Where a page of a list continues from.
+#[derive(Deserialize)]
+struct Before<T> {
+    before: Option<T>,
+}
+
+#[derive(Serialize)]
+struct Conversations {
+    conversations: Vec<Conversation>,
+    /// More follow: read them with `before` set to this.
+    next: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct Conversation {
+    id: ConversationId,
+    agent_id: String,
+    /// The first line of the first message, empty when it had only files.
+    title: String,
+    /// Unix seconds.
+    started_at: i64,
+    active_at: i64,
+    /// Rises with every message, every turn the runtime opens and every
+    /// turn's end. While it and `at_work` are as they were, the
+    /// conversation has no new turn and no new answer.
+    activity: i64,
+    /// How many of its turns are queued or running.
+    at_work: u32,
+}
+
+impl Conversation {
+    /// `None` for a conversation the page did not make, whose audience is
+    /// no UUID.
+    fn of(summary: ConversationSummary) -> Option<Self> {
+        Some(Self {
+            id: ConversationId::parse(&summary.audience_id)?,
+            agent_id: summary.agent_id,
+            title: summary.title,
+            started_at: summary.started_at,
+            active_at: summary.active_at,
+            activity: summary.activity,
+            at_work: summary.at_work,
+        })
+    }
+}
+
+/// `GET /api/conversations[?before=]`: a page of conversations, the latest
+/// active first.
+async fn conversations(
+    State(web): State<Arc<Web>>,
+    Query(Before { before }): Query<Before<i64>>,
+) -> Result<Json<Conversations>, InterfaceError> {
+    let page = web.core.conversations(before).await?;
+    Ok(Json(Conversations {
+        conversations: page
+            .conversations
+            .into_iter()
+            .filter_map(Conversation::of)
+            .collect(),
+        next: page.next,
+    }))
+}
+
+#[derive(Serialize)]
+struct Turns {
+    /// Oldest first.
+    turns: Vec<Turn>,
+    /// Older turns exist: read them with `before` set to this.
+    before: Option<String>,
+}
+
+/// One turn, ready to draw: who began it, then how it stands.
+#[derive(Serialize)]
+struct Turn {
+    id: String,
+    from: From,
+    /// Unix seconds.
+    accepted_at: i64,
+    finished_at: Option<i64>,
+    #[serde(flatten)]
+    progress: Progress,
+    /// An ended turn's final report, as its runtime drew it. A turn still
+    /// at work has its snapshot in a live read.
+    report: Option<TurnActivity>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum From {
+    Person {
+        /// What a control of the turn names.
+        event_id: String,
+        /// As written: text, never markup.
+        text: String,
+        /// It invoked one of the runtime's commands.
+        command: bool,
+        files: Vec<FileView>,
+    },
+    /// The runtime opened the turn itself, for a schedule or a subagent's
+    /// report, and says what for.
+    Runtime { label: Option<String> },
+}
+
+/// How a turn stands, as a person reads it.
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum Progress {
+    Queued,
+    Running,
+    Answered {
+        html: String,
+        files: Vec<FileView>,
+    },
+    /// It did not complete. `html` is core's or the runtime's explanation.
+    Interrupted {
+        html: String,
+    },
+    /// The message went into a turn already running. Its answer is on the
+    /// newest message that took part, which may not be the one above.
+    Steered,
+    /// Someone stopped it.
+    Stopped,
+}
+
+impl Turn {
+    async fn of(web: &Web, turn: TranscriptTurn) -> Self {
+        let from = match turn.source {
+            TurnSource::Message {
+                event_id,
+                text,
+                command,
+                files,
+            } => {
+                let mut views = Vec::with_capacity(files.len());
+                for file in &files {
+                    views.push(files::view(web, &file.path, &file.name, file.size).await);
+                }
+                From::Person {
+                    event_id,
+                    text,
+                    command,
+                    files: views,
+                }
+            }
+            TurnSource::Opened { label } => From::Runtime { label },
+        };
+        let (content, silence, files) = turn.answer.map_or_else(Default::default, |answer| {
+            (answer.content, answer.silence, answer.files)
+        });
+        let progress = match (turn.state, silence) {
+            (TurnState::Queued, _) => Progress::Queued,
+            (TurnState::Running, _) => Progress::Running,
+            (_, Some(Silence::Steered)) => Progress::Steered,
+            (_, Some(Silence::Stopped)) => Progress::Stopped,
+            (TurnState::Interrupted, None) => Progress::Interrupted {
+                html: render(&content),
+            },
+            (TurnState::Completed, None) => {
+                let mut views = Vec::with_capacity(files.len());
+                for file in &files {
+                    views.push(files::view(web, &file.path, &file.name, file.size).await);
+                }
+                Progress::Answered {
+                    html: render(&content),
+                    files: views,
+                }
+            }
+        };
+        Self {
+            id: turn.turn_id,
+            from,
+            accepted_at: turn.accepted_at,
+            finished_at: turn.finished_at,
+            progress,
+            report: turn.report,
+        }
+    }
+}
+
+/// `GET /api/conversations/{id}/turns[?before=]`: a page of a
+/// conversation's turns, its newest first.
+async fn turns(
+    State(web): State<Arc<Web>>,
+    Path(id): Path<ConversationId>,
+    Query(Before { before }): Query<Before<String>>,
+) -> Result<Json<Turns>, InterfaceError> {
+    let conversation = known(&web.core, id).await?;
+    let page = web
+        .core
+        .transcript(
+            &conversation.agent_id,
+            &conversation.audience_id,
+            before.as_deref(),
+        )
+        .await?;
+    let before = page
+        .turns
+        .first()
+        .filter(|_| page.earlier)
+        .map(|first| first.turn_id.clone());
+    let mut turns = Vec::with_capacity(page.turns.len());
+    for turn in page.turns {
+        turns.push(Turn::of(&web, turn).await);
+    }
+    Ok(Json(Turns { turns, before }))
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,204 +1,37 @@
 //! The provider's routes, driven as a browser, the operator and a hostile
 //! page would drive them.
 
-use std::{os::unix::fs::PermissionsExt as _, sync::Arc, time::Duration};
+use std::{os::unix::fs::PermissionsExt as _, time::Duration};
 
 use anyhow::{Context as _, Result};
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     http::{
         Method, Request, StatusCode,
-        header::{AUTHORIZATION, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, ORIGIN},
-        request::Builder,
-        response::Parts,
+        header::{AUTHORIZATION, HOST, ORIGIN},
     },
 };
-use carillon_installation::config::{LoadedConfig, hash_token};
-use carillon_protocol::model::Health;
-use serde_json::{Value, json};
-use tempfile::TempDir;
-use tower::ServiceExt as _;
+use serde_json::json;
 
-use super::{Web, router};
-use crate::{
-    browser::{self, Browser},
-    site::Site,
+use crate::fixture::{
+    AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, bearer, operator, request, trade,
 };
 
-pub(crate) const AUTHORITY: &str = "127.0.0.1:45404";
-const INTERFACE_TOKEN: &str = "interface-token";
-const OPERATOR_TOKEN: &str = "operator-token";
-
-pub(crate) struct Fixture {
-    pub(crate) directory: TempDir,
-    pub(crate) web: Arc<Web>,
-}
-
-/// An answer, read whole.
-pub(crate) struct Answer {
-    pub(crate) status: StatusCode,
-    pub(crate) parts: Parts,
-    pub(crate) body: Vec<u8>,
-}
-
-impl Answer {
-    pub(crate) fn json(&self) -> Result<Value> {
-        serde_json::from_slice(&self.body)
-            .with_context(|| format!("{}: {}", self.status, String::from_utf8_lossy(&self.body)))
-    }
-
-    pub(crate) fn header(&self, name: &str) -> &str {
-        self.parts
-            .headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-    }
-}
-
-impl Fixture {
-    pub(crate) fn new() -> Result<Self> {
-        let directory = tempfile::tempdir()?;
-        let root = directory.path();
-        let registry = format!(
-            r#"data_dir = "state"
-[core]
-listen = "127.0.0.1:45400"
-operator_token_hash = "{operator}"
-[[providers]]
-id = "web"
-role = "interface"
-program = "web"
-version = "0.0.0"
-url = "http://{AUTHORITY}"
-token_hash = "{token}"
-enabled = true
-max_upload_mib = 1024
-delivery = "retained"
-[[providers]]
-id = "runtime-other"
-role = "runtime"
-program = "runtime-other"
-version = "0.0.0"
-url = "http://127.0.0.1:45402"
-token_hash = "{token}"
-enabled = true
-[[agents]]
-id = "assistant"
-name = "Assistant"
-runtime = "runtime-other"
-workspace = "work"
-[[agents]]
-id = "second"
-name = "Second"
-runtime = "runtime-other"
-workspace = "work"
-"#,
-            operator = hash_token(OPERATOR_TOKEN),
-            token = hash_token(INTERFACE_TOKEN),
-        );
-        std::fs::write(root.join("carillon.toml"), registry)?;
-        let release = root.join("release");
-        std::fs::create_dir_all(&release)?;
-        std::fs::write(release.join("index.html"), "<main>release page</main>")?;
-        std::fs::write(release.join("app.js"), "// release script")?;
-        let registry = LoadedConfig::load(&root.join("carillon.toml"))?;
-        let data_dir = &registry.value.data_dir;
-        let web = Arc::new(Web {
-            health: Health {
-                id: "web".to_owned(),
-                role: "interface".to_owned(),
-                version: "0.0.0".to_owned(),
-                status: "ready".to_owned(),
-            },
-            browser: Browser::open(browser::key_file(data_dir, "web"), AUTHORITY.to_owned())?,
-            site: Site {
-                custom: data_dir.join("components/web/site"),
-                release,
-            },
-            registry,
-        });
-        Ok(Self { directory, web })
-    }
-
-    /// The answer to `request`. No answer of this provider may carry a CORS
-    /// header, and each has the headers that keep it on its origin.
-    pub(crate) async fn send(&self, request: Request<Body>) -> Result<Answer> {
-        let response = router(Arc::clone(&self.web)).oneshot(request).await?;
-        let (parts, body) = response.into_parts();
-        for name in parts.headers.keys() {
-            assert!(
-                !name.as_str().starts_with("access-control-"),
-                "{name} was sent"
-            );
-        }
-        assert_eq!(parts.headers["x-content-type-options"], "nosniff");
-        assert_eq!(parts.headers["referrer-policy"], "no-referrer");
-        assert_eq!(parts.headers["cross-origin-resource-policy"], "same-origin");
-        assert!(parts.headers.contains_key(CONTENT_SECURITY_POLICY));
-        assert!(!parts.headers.contains_key("set-cookie"));
-        Ok(Answer {
-            status: parts.status,
-            parts,
-            body: to_bytes(body, usize::MAX).await?.to_vec(),
-        })
-    }
-
-    /// A token as a browser gets one: a code from the operator's route,
-    /// traded at the page's.
-    pub(crate) async fn sign_in(&self) -> Result<String> {
-        let issued = self
-            .send(operator(Method::POST, "/v1/sign-in").body(Body::empty())?)
-            .await?;
-        assert_eq!(issued.status, StatusCode::OK);
-        let code = issued.json()?["code"]
-            .as_str()
-            .context("no code")?
-            .to_owned();
-        let traded = self.send(trade(&code)?).await?;
-        assert_eq!(traded.status, StatusCode::OK);
-        Ok(traded.json()?["token"]
-            .as_str()
-            .context("no token")?
-            .to_owned())
-    }
-}
-
-/// A request that names this provider, as a program sends one.
-pub(crate) fn request(method: Method, path: &str) -> Builder {
-    Request::builder()
-        .method(method)
-        .uri(path)
-        .header(HOST, AUTHORITY)
-}
-
-pub(crate) fn bearer(method: Method, path: &str, token: &str) -> Builder {
-    request(method, path).header(AUTHORIZATION, format!("Bearer {token}"))
-}
-
-pub(crate) fn operator(method: Method, path: &str) -> Builder {
-    bearer(method, path, OPERATOR_TOKEN)
-}
-
-fn trade(code: &str) -> Result<Request<Body>> {
-    Ok(request(Method::POST, "/api/sign-in")
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "code": code }).to_string()))?)
-}
-
 /// One route of each class the provider serves.
-const ROUTES: [(Method, &str); 6] = [
+const ROUTES: [(Method, &str); 8] = [
     (Method::GET, "/"),
     (Method::GET, "/app.js"),
     (Method::GET, "/health"),
     (Method::POST, "/api/sign-in"),
     (Method::GET, "/api/session"),
+    (Method::GET, "/api/conversations"),
     (Method::POST, "/v1/sign-in"),
+    (Method::GET, "/files/capture/0?name=a&exp=1&sig=00"),
 ];
 
 #[tokio::test]
 async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     for (method, path) in ROUTES {
         let named = |hosts: &[&str]| {
             let mut request = Request::builder().method(method.clone()).uri(path);
@@ -231,7 +64,7 @@ async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<(
 
 #[tokio::test]
 async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     for (method, path) in ROUTES {
         for origin in [
@@ -277,7 +110,7 @@ async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
 
 #[tokio::test]
 async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let session = |token: Option<&str>| {
         match token {
@@ -296,9 +129,9 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
                 {"id": "second", "name": "Second"},
             ],
             "limits": {
-                "files": 10,
-                "file_bytes": 1024 * 1024 * 1024_u64,
-                "message_bytes": 2048 * 1024 * 1024_u64,
+                "files": 3,
+                "file_bytes": 1024 * 1024,
+                "message_bytes": 2 * 1024 * 1024,
             },
             "custom_site": false,
         })
@@ -346,7 +179,7 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
 
 #[tokio::test(start_paused = true)]
 async fn a_sign_in_code_works_once_and_for_two_minutes() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let issue = || async {
         let issued = fixture
             .send(operator(Method::POST, "/v1/sign-in").body(Body::empty())?)
@@ -396,7 +229,7 @@ async fn a_sign_in_code_works_once_and_for_two_minutes() -> Result<()> {
 
 #[tokio::test]
 async fn an_operator_route_takes_only_the_operator_credential() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let browser = fixture.sign_in().await?;
     for path in ["/v1/sign-in", "/v1/sign-out", "/v1/unknown"] {
         for refused in [
@@ -425,7 +258,7 @@ async fn an_operator_route_takes_only_the_operator_credential() -> Result<()> {
 
 #[tokio::test]
 async fn health_and_the_page_need_no_credential() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let health = fixture
         .send(request(Method::GET, "/health").body(Body::empty())?)
         .await?;
@@ -477,7 +310,7 @@ async fn health_and_the_page_need_no_credential() -> Result<()> {
 
 #[tokio::test]
 async fn a_complete_copy_of_the_page_in_the_provider_s_state_is_served_instead() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let custom = fixture.directory.path().join("state/components/web/site");
     std::fs::create_dir_all(&custom)?;

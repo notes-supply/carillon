@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use carillon_installation::config::{LoadedConfig, component_directory};
-use carillon_interface::{InterfaceError, Started, authorize_operator, bearer, start};
+use carillon_interface::{CoreClient, InterfaceError, Started, authorize_operator, bearer, start};
 use carillon_protocol::model::Health;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::info;
@@ -23,13 +23,14 @@ use tracing::info;
 use crate::{
     api,
     browser::{self, Browser, refusal},
-    channels,
+    channels, files,
     site::{self, INDEX, Site},
 };
 
 /// What every handler shares. Nothing here is a conversation's: core keeps
 /// those.
 pub(crate) struct Web {
+    pub(crate) core: CoreClient,
     /// The registry the provider started with: its agents, the operator's
     /// credential hash and core's limits on a message's files.
     pub(crate) registry: LoadedConfig,
@@ -49,8 +50,8 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result
     let Some(Started {
         provider,
         listener,
+        core,
         health,
-        ..
     }) = start(&config, &options.provider_id, &options.token_file).await?
     else {
         return Ok(());
@@ -68,6 +69,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result
         .context("provider URL must use http://")?
         .to_owned();
     let web = Arc::new(Web {
+        core,
         health,
         browser: Browser::open(browser::key_file(data_dir, &provider.id), authority)?,
         site: Site {
@@ -108,6 +110,7 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .route("/api/sign-in", post(api::sign_in))
         .nest("/api", api)
         .nest("/v1", operator)
+        .route("/files/{*path}", get(files::file))
         .fallback(site::file)
         .layer(from_fn_with_state(Arc::clone(&web), gate))
         .with_state(web)
@@ -127,7 +130,7 @@ const PAGE_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'sel
 /// another origin, before anything reads it, and gives every answer the
 /// headers that keep it on this origin. No answer has a CORS header.
 async fn gate(State(web): State<Arc<Web>>, request: Request, next: Next) -> Response {
-    let mut response = match web.browser.admit(request.method(), request.headers()) {
+    let mut response = match web.browser.admit(request.headers()) {
         Ok(()) => next.run(request).await,
         Err(refused) => refused.into_response(),
     };
