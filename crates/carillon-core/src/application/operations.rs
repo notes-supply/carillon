@@ -354,6 +354,18 @@ pub(super) async fn status(config: &LoadedConfig) -> Result<StatusReport> {
         })
 }
 
+/// What core reports, or `None` when nothing listens at its address, as
+/// when Carillon is stopped. A core that is there and does not answer, or
+/// answers anything else, is an error: it runs, and what it serves is not
+/// known.
+pub(super) async fn status_if_running(config: &LoadedConfig) -> Result<Option<StatusReport>> {
+    match operator_get(config, operator_url(config, "/v1/status")?).await {
+        Ok(report) => Ok(Some(report)),
+        Err(error) if error.downcast_ref().is_some_and(reqwest::Error::is_connect) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn operator_url(config: &LoadedConfig, path: &str) -> Result<Url> {
     Ok(Url::parse(&format!(
         "http://{}{path}",
@@ -519,6 +531,23 @@ mod tests {
                     .is_timeout()
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn carillon_is_stopped_only_when_nothing_listens_at_cores_address() -> Result<()> {
+        let unavailable = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+        let (mut config, _directory, server) = applying_core(Some(unavailable)).await?;
+        let answered = super::status_if_running(&config).await.err();
+        let answered = answered.context("a core that answers 503 counted as stopped")?;
+        let status = answered.downcast_ref().and_then(reqwest::Error::status);
+        assert_eq!(status, Some(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+        server.abort();
+
+        let vacated = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        config.value.core.listen = vacated.local_addr()?;
+        drop(vacated);
+        assert!(super::status_if_running(&config).await?.is_none());
         Ok(())
     }
 

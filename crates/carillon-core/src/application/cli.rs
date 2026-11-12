@@ -34,7 +34,7 @@ use super::{
     http::{Applied, CoreDatabase, RegistryStatus, check, serve},
     operations::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
-        operator_url, print_health, registry_status, status, wait_until_healthy,
+        operator_url, print_health, registry_status, status, status_if_running, wait_until_healthy,
     },
     settings::{Named, settings},
     setup::{Options as SetupOptions, init, setup},
@@ -471,13 +471,22 @@ async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let ids: Vec<&str> = added.iter().map(|interface| interface.id()).collect();
     let ids = ids.join(", ");
-    let Ok(report) = status(&config).await else {
+    let report = status_if_running(&config).await.with_context(|| {
+        format!(
+            "{ids} is in carillon.toml, but core at {} did not say what it serves; `carillon \
+             restart` applies it",
+            config.value.core.listen
+        )
+    })?;
+    let Some(report) = report else {
         println!("Carillon is not running. `carillon start` starts it with {ids}.");
         return Ok(());
     };
     let serves = |interface: &Bundled| {
-        let mut serving = report.providers.iter();
-        serving.any(|health| health.id == interface.id())
+        report
+            .providers
+            .iter()
+            .any(|health| health.id == interface.id())
     };
     if added.iter().all(serves) {
         println!("Carillon already serves {ids}, so it was not restarted.");

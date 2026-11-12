@@ -196,6 +196,16 @@ running
 printf 'operations passed: entry point, resolution, start/drained restart, logs, provider commands, Discord module, lock\n'
 
 cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+# A core that is there and does not answer is not a stopped Carillon.
+core=$(sed -n 1p "$MANAGER/pids")
+kill -STOP "$core"
+refuse add-web-unanswered carillon setup --interface web
+kill -CONT "$core"
+grep -F "web is in carillon.toml, but core at 127.0.0.1:$BASE_PORT did not say what it serves; \`carillon restart\` applies it" \
+  "$TEST_ROOT/add-web-unanswered.log" >/dev/null
+! grep -F 'is not running' "$TEST_ROOT/add-web-unanswered.log" >/dev/null || fail 'a silent core was called stopped'
+[ ! -e "$TRACE" ]
+running
 refuse add-web-unstopped env FAKE_STOP=fail carillon setup --interface web
 grep -F "web is in carillon.toml and starts at the next \`carillon restart\`" \
   "$TEST_ROOT/add-web-unstopped.log" >/dev/null
