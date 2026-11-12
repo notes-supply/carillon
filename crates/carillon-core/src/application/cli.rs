@@ -113,8 +113,15 @@ enum Command {
     },
     /// Set up an installation at the terminal: the runtimes, Pi for
     /// Carillon's assistant and T3 for T3 Code channels, then each
-    /// interface. A rerun keeps what is already set up when asked to.
-    Setup(SetupOptions),
+    /// interface. A rerun keeps what is already set up when asked to. Told
+    /// only `--interface`, a rerun adds that interface, asks about nothing
+    /// else, and restarts a running Carillon once core has drained.
+    Setup {
+        #[command(flatten)]
+        options: SetupOptions,
+        #[command(flatten)]
+        wait: Wait,
+    },
     /// Run the core service with an explicit registry.
     Core {
         #[arg(long)]
@@ -281,10 +288,10 @@ pub(crate) async fn run() -> Result<()> {
             "{}",
             init(&home()?, workspace.as_deref(), base_port, &interface)?.display()
         ),
-        Command::Setup(options) => {
+        Command::Setup { options, wait } => {
             let home = home()?;
             let added = setup(&home, options, &mut Terminal)?;
-            serve_added(&home, &added).await?;
+            serve_added(&home, &added, &wait).await?;
         }
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
@@ -455,7 +462,7 @@ async fn restart(home: &Path, config: &LoadedConfig, timeout: Duration, force: b
 /// Has a running Carillon serve the interfaces setup `added`. Core takes a
 /// new provider only when it starts, so the services restart, drained as
 /// `carillon restart` drains them. A stopped Carillon stays stopped.
-async fn serve_added(home: &Path, added: &[Bundled]) -> Result<()> {
+async fn serve_added(home: &Path, added: &[Bundled], wait: &Wait) -> Result<()> {
     if added.is_empty() {
         return Ok(());
     }
@@ -479,13 +486,12 @@ async fn serve_added(home: &Path, added: &[Bundled]) -> Result<()> {
          It stops once nothing would be lost, as `carillon restart` does, and work that is \
          running carries on afterwards."
     );
-    let wait = Wait { timeout: 60 };
     restart(home, &config, wait.timeout(), false)
         .await
         .with_context(|| {
             format!("{ids} is in carillon.toml and starts at the next `carillon restart`")
         })?;
-    report_running(&config, &wait).await?;
+    report_running(&config, wait).await?;
     if added.contains(&Bundled::Web) {
         println!("`carillon web open` opens the web chat in your browser.");
     }
