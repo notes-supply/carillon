@@ -13,13 +13,12 @@ import {
   merge,
   offered,
   overLimit,
-  parseDraft,
   pressed,
   reading,
   refusal,
-  restored,
   sendingLine,
   sequence,
+  since,
   size,
   span,
   titleOf,
@@ -98,7 +97,6 @@ const pending = (fields) => ({
   command: false,
   text: "hello",
   files: [],
-  at: 1000,
   stage: "uploading",
   sent: 0,
   total: 0,
@@ -168,7 +166,9 @@ describe("answers to requests", () => {
 
   it("has a sentence of its own for a status without words", () => {
     expect(refusal(0, "")).toBe(AWAY);
-    expect(refusal(503, "<html>")).toBe(AWAY);
+    expect(
+      refusal(503, '{"error":"Carillon is not answering right now. Try again in a moment."}'),
+    ).toBe(AWAY);
     expect(refusal(401, "")).toBe(SIGNED_OUT);
     expect(SIGNED_OUT).toContain("carillon web open");
     expect(refusal(422, "Failed to deserialize")).toBe(
@@ -251,37 +251,22 @@ describe("a message not yet received", () => {
 });
 
 describe("a draft", () => {
-  it("is read back as it was stored, and anything else is empty", () => {
-    expect(parseDraft('{"text":"half a thought"}')).toEqual({ text: "half a thought" });
-    expect(parseDraft('{"text":"next","sending":{"text":"first","at":1000}}')).toEqual({
-      text: "next",
-      sending: { text: "first", at: 1000 },
-    });
-    for (const stored of [null, "", "plain words", "[]", '{"text":4}', '{"sending":{}}'])
-      expect(parseDraft(stored).text).toBe("");
-    expect(parseDraft('{"text":"a","sending":{"text":"b"}}')).toEqual({ text: "a" });
+  it("keeps the message on its way before what was written since, until the receipt", () => {
+    expect(joined("first", "next")).toBe("first\n\nnext");
+    expect(joined("", "next")).toBe("next");
+    expect(joined("first", "")).toBe("first");
   });
 
-  it("gives back a message that was being sent when the page closed and never arrived", () => {
-    const draft = { text: "next", sending: { text: "first\nline", at: 1000 } };
-    expect(restored(draft, [])).toBe("first\nline\n\nnext");
-    expect(restored({ text: "", sending: draft.sending }, [turn("a")])).toBe("first\nline");
+  it("is cleared on the receipt of what was sent, and of nothing else", () => {
+    expect(since("first", "first")).toBe("");
+    expect(since("first\n\nnext\n\nmore", "first")).toBe("next\n\nmore");
+    expect(since(joined("first", "first"), "first")).toBe("first");
   });
 
-  it("drops that message when core has it, as the turns show", () => {
-    const draft = { text: "next", sending: { text: "first\nline", at: 1000 } };
-    expect(restored(draft, [turn("a", "running", "first\r\nline")])).toBe("next");
-  });
-
-  it("keeps it when only an older message had the same words", () => {
-    const draft = { text: "", sending: { text: "yes", at: 2000 } };
-    expect(restored(draft, [turn("a", "answered", "yes")])).toBe("yes");
-  });
-
-  it("joins what was sent and what was typed since with a blank line", () => {
-    expect(joined("a", "b")).toBe("a\n\nb");
-    expect(joined("", "b")).toBe("b");
-    expect(joined("a", "")).toBe("a");
+  it("is left whole when it does not begin with what was sent", () => {
+    expect(since("something else", "first")).toBe("something else");
+    expect(since("firstly", "first")).toBe("firstly");
+    expect(since("typed beside files", "")).toBe("typed beside files");
   });
 });
 
@@ -553,6 +538,7 @@ describe("an ended turn", () => {
     });
     expect(ending(turn("a", "stopped"))).toEqual({ label: "Stopped", took: "2 min 14 s" });
     expect(ending(turn("a", "interrupted"))?.label).toBe("Did not finish");
+    expect(ending({ ...turn("a"), finished_at: 1000 })).toEqual({ label: "Answered", took: "" });
   });
 
   it("labels a steered message without saying where its answer is", () => {
@@ -578,7 +564,7 @@ describe("numbers a person reads", () => {
       "2 min 14 s",
       "1 h 5 min",
     ]);
-    expect(span(-5)).toBe("0 ms");
+    expect([0, -5].map(span)).toEqual(["0 s", "0 s"]);
   });
 
   it("writes a file's size to two figures", () => {

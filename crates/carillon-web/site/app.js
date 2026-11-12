@@ -16,12 +16,11 @@ import {
   merge,
   offered,
   overLimit,
-  parseDraft,
   pressed,
   reading,
   refusal,
-  restored,
   sequence,
+  since,
   titleOf,
   unfinished,
   unread,
@@ -30,7 +29,7 @@ import {
 import { attachedFile, chat, el, pendingItem, phrase, turnBody, turnHead } from "./view.js";
 
 /** @import { Answer } from "./api.js" */
-/** @import { Command, Control, Conversation, Draft, Limits, Live, Page, Pending, Turn } from "./model.js" */
+/** @import { Command, Control, Conversation, Limits, Live, Page, Pending, Turn } from "./model.js" */
 
 /**
  * An element `index.html` must have, so a copy of the page that lost one
@@ -113,8 +112,6 @@ const commands = new Map();
 const looked = new Map();
 /** The turns drawn, so one that has not changed is left alone. @type {Map<string, { key: string, node: HTMLLIElement }>} */
 const drawn = new Map();
-/** The draft of a message that was being sent when the page last closed, until the person writes. @type {Draft | undefined} */
-let unconfirmed;
 
 const reads = sequence();
 let [round, failures, timer, choice, railKey] = [0, 0, 0, 0, ""];
@@ -209,7 +206,6 @@ async function readTurns(current) {
     open.page = merge(open.page, data(answer));
   }
   Object.assign(open, { started: answer.status !== 404, seen: current, stale: false, read: true });
-  if (unconfirmed !== undefined) setText(restored(unconfirmed, open.page.turns));
   drawRail();
   drawTurns();
   drawComposer();
@@ -303,7 +299,13 @@ function drawTurns() {
   while (page.turns.children.length > nodes.length) page.turns.lastElementChild?.remove();
   page.earlier.hidden = open.page.before === null;
   page.invitation.hidden = !open.read || nodes.length > 0;
-  if (stick) page.transcript.scrollTop = page.transcript.scrollHeight;
+  // Follow the end, but begin a turn taller than the window at its top: an answer is read from its start.
+  const last = nodes.at(-1);
+  if (stick && last !== undefined)
+    page.transcript.scrollTop =
+      last.offsetHeight > page.transcript.clientHeight
+        ? last.offsetTop - page.transcript.offsetTop
+        : page.transcript.scrollHeight;
 }
 
 /** Whether the open conversation has a message that core has not received. */
@@ -339,32 +341,34 @@ function setText(value) {
 }
 
 /**
- * Stores a conversation's draft: what the composer holds and, until its
- * receipt, the text of the message on its way. No event ID and no file is
- * stored, so a reload sends nothing by itself.
+ * Stores a conversation's draft, given what its composer holds. Until the
+ * receipt, the message on its way stays in front of it: a reload sends
+ * nothing by itself, and loses nothing the person wrote.
  * @param {string} id
  * @param {string} text
  */
 function store(id, text) {
   const waiting = pending.get(id);
-  const sending =
-    waiting === undefined || waiting.stage === "received"
-      ? undefined
-      : { text: waiting.text, at: waiting.at };
-  if (text === "" && sending === undefined) localStorage.removeItem(draftKey(id));
-  else localStorage.setItem(draftKey(id), JSON.stringify({ text, sending }));
+  const whole =
+    waiting === undefined || waiting.stage === "received" ? text : joined(waiting.text, text);
+  if (whole === "") localStorage.removeItem(draftKey(id));
+  else localStorage.setItem(draftKey(id), whole);
 }
 
-/** @param {string} id */
-function show(id) {
+/**
+ * Puts a conversation on screen. One the page has just minted is known to
+ * be empty, and core is not asked about it.
+ * @param {string} id
+ * @param {boolean} minted
+ */
+function show(id, minted) {
   reads.next();
-  open = { id, page: EMPTY, read: false, stale: true, started: false, seen: undefined };
+  open = { id, page: EMPTY, read: minted, stale: !minted, started: false, seen: undefined };
   live = new Map();
   drawn.clear();
   [railKey, stick, choice] = ["", true, 0];
-  const draft = parseDraft(localStorage.getItem(draftKey(id)));
-  unconfirmed = draft.sending !== undefined && !pending.has(id) ? draft : undefined;
-  setText(unconfirmed === undefined ? draft.text : restored(unconfirmed, []));
+  const draft = localStorage.getItem(draftKey(id)) ?? "";
+  setText(busy() ? since(draft, pending.get(id)?.text ?? "") : draft);
   fail(id, errors.get(id) ?? "");
   drawRail();
   drawTurns();
@@ -381,7 +385,7 @@ function route() {
   else if (!signedOut) {
     const id = UUID.test(hash) ? hash : crypto.randomUUID();
     if (id !== hash) history.replaceState(null, "", `#${id}`);
-    if (id !== open.id) show(id);
+    if (id !== open.id) show(id, id !== hash);
   }
 }
 
@@ -402,14 +406,13 @@ function send() {
     command: false,
     text,
     files,
-    at: now(),
     stage: "uploading",
     sent: 0,
     total: 0,
   };
   pending.set(id, message);
   attached.delete(id);
-  [unconfirmed, stick] = [undefined, true];
+  stick = true;
   setText("");
   store(id, "");
   fail(id, "");
@@ -430,11 +433,11 @@ async function deliver(id, message) {
     await loadCommands(id, message.agent);
     message.command = invokes(message.text, commands.get(id) ?? []);
   }
-  const query = new URLSearchParams({
-    ...(message.agent === null ? {} : { agent: message.agent }),
-    ...(message.command ? { command: "true" } : {}),
-  });
-  const path = `/api/conversations/${id}/messages/${message.eventId}?${query.toString()}`;
+  const query = [
+    ...(message.agent === null ? [] : [`agent=${encodeURIComponent(message.agent)}`]),
+    ...(message.command ? ["command=true"] : []),
+  ];
+  const path = `/api/conversations/${id}/messages/${message.eventId}${query.length > 0 ? "?" : ""}${query.join("&")}`;
   const redraw = () => {
     if (id === open.id) drawTurns();
   };
@@ -449,10 +452,10 @@ async function deliver(id, message) {
       redraw();
     });
     const kind = reading(answer.status);
-    const typed = parseDraft(localStorage.getItem(draftKey(id))).text;
+    const draft = localStorage.getItem(draftKey(id)) ?? "";
     if (kind === "ok") {
       message.stage = "received";
-      store(id, typed);
+      store(id, since(draft, message.text));
       if (id === open.id) {
         open.stale = true;
         drawComposer();
@@ -463,11 +466,10 @@ async function deliver(id, message) {
     if (kind !== "away") {
       // Refused: the message goes back before what was written since.
       pending.delete(id);
-      store(id, joined(message.text, typed));
       attached.set(id, [...message.files, ...(attached.get(id) ?? [])]);
       fail(id, refusal(answer.status, answer.body));
       if (id === open.id) {
-        setText(joined(message.text, typed));
+        setText(draft);
         drawTurns();
         drawComposer();
       }
@@ -548,7 +550,7 @@ function take(command) {
 }
 
 function wrote() {
-  [unconfirmed, dismissed] = [undefined, false];
+  dismissed = false;
   setText(page.text.value);
   store(open.id, page.text.value);
   if (page.text.value.startsWith("/") && open.read)

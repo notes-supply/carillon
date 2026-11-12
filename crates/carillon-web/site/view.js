@@ -187,10 +187,8 @@ export function turnBody(turn, live, asked, now, control) {
   const ended = ending(turn);
   if (ended === undefined) return ledgerNode(ledger(turn, live, asked, now), control);
   const foot = el("p", "outcome", ended.label);
-  if (ended.took !== "") {
-    const at = turn.finished_at ?? turn.accepted_at;
-    foot.append(" ", time(at, now), `, ${ended.took}`);
-  }
+  if (turn.state !== "steered") foot.append(" ", time(turn.finished_at ?? turn.accepted_at, now));
+  if (ended.took !== "") foot.append(`, ${ended.took}`);
   const body = el("div", "turn-body");
   if (turn.state === "answered") {
     body.append(prose(turn.html, "prose"));
@@ -267,9 +265,7 @@ export function chat(conversation, { current, unread, now }) {
   link.href = `#${conversation.id}`;
   if (current) link.ariaCurrent = "page";
   if (conversation.at_work > 0) {
-    /** @type {Mark[]} */
-    const marks = Array.from({ length: Math.min(conversation.at_work, 3) }, () => "running");
-    link.append(row(marks, "At work"));
+    link.append(row(["running", "running", "running"], "At work"));
   } else if (unread) {
     const dot = el("i", "unread");
     [dot.role, dot.ariaLabel] = ["img", "New"];

@@ -29,7 +29,6 @@
 /** @typedef {{ turns: Turn[], before: string | null }} Page A conversation's turns, oldest first, and where older ones continue. */
 /** @typedef {{ name: string, description?: string, hint?: string }} Command */
 /** @typedef {{ files: number, file_bytes: number, message_bytes: number }} Limits */
-/** @typedef {{ text: string, sending?: { text: string, at: number } }} Draft What a conversation's composer holds, and the text of a message not yet received. */
 /**
  * @typedef {object} Pending A message until its turn is on screen.
  * @property {string} eventId Minted once, and sent again with every attempt.
@@ -37,7 +36,6 @@
  * @property {boolean} command
  * @property {string} text
  * @property {File[]} files
- * @property {number} at Unix seconds of the first attempt.
  * @property {"uploading" | "receiving" | "retrying" | "received"} stage
  * @property {number} sent Bytes uploaded in this attempt.
  * @property {number} total
@@ -144,11 +142,13 @@ export const SIGNED_OUT =
 
 /**
  * The words for an answer that is not 2xx: the provider's own when it gave
- * any, or a sentence for the status.
+ * any, or a sentence for the status. A stopped provider and a core that is
+ * away are one thing to the person, so both get the page's sentence.
  * @param {number} status
  * @param {string} body
  */
 export function refusal(status, body) {
+  if (reading(status) === "away") return AWAY;
   try {
     /** @type {unknown} */
     const parsed = JSON.parse(body);
@@ -160,9 +160,9 @@ export function refusal(status, body) {
   } catch {
     // Not JSON: the status decides.
   }
-  if (reading(status) === "away") return AWAY;
-  if (status === 401) return SIGNED_OUT;
-  return `Carillon refused the request with status ${String(status)}.`;
+  return status === 401
+    ? SIGNED_OUT
+    : `Carillon refused the request with status ${String(status)}.`;
 }
 
 /**
@@ -192,7 +192,9 @@ export function overLimit(files, limits) {
 }
 
 /**
- * Two texts as one message, with a blank line between them.
+ * Two texts as one message, with a blank line between them. A stored draft
+ * is this until the receipt: the message on its way, then what was written
+ * since.
  * @param {string} first
  * @param {string} second
  */
@@ -201,45 +203,15 @@ export function joined(first, second) {
 }
 
 /**
- * A stored draft, or an empty one when nothing readable is stored.
- * @param {string | null} stored
- * @returns {Draft}
+ * What was written since a message was sent: the stored draft without that
+ * message. On the receipt, the draft is cleared of what was sent and of
+ * nothing else.
+ * @param {string} stored
+ * @param {string} sent
  */
-export function parseDraft(stored) {
-  try {
-    /** @type {unknown} */
-    const value = JSON.parse(stored ?? "null");
-    if (typeof value === "object" && value !== null && "text" in value) {
-      const text = typeof value.text === "string" ? value.text : "";
-      const sending = "sending" in value ? value.sending : undefined;
-      if (typeof sending === "object" && sending !== null && "text" in sending && "at" in sending)
-        if (typeof sending.text === "string" && typeof sending.at === "number")
-          return { text, sending: { text: sending.text, at: sending.at } };
-      return { text };
-    }
-  } catch {
-    // Not a draft this page wrote.
-  }
-  return { text: "" };
-}
-
-/**
- * The composer's text once a conversation's turns are read after a reload.
- * A message that was being sent when the page closed is in the turns when
- * core received it. Otherwise its text is given back to be sent again.
- * @param {Draft} draft
- * @param {Turn[]} turns
- */
-export function restored(draft, turns) {
-  const { sending } = draft;
-  if (sending === undefined) return draft.text;
-  const received = turns.some(
-    (turn) =>
-      turn.from.kind === "person" &&
-      turn.accepted_at >= sending.at &&
-      plain(turn.from.text) === sending.text,
-  );
-  return received ? draft.text : joined(sending.text, draft.text);
+export function since(stored, sent) {
+  if (stored === sent) return "";
+  return sent !== "" && stored.startsWith(`${sent}\n\n`) ? stored.slice(sent.length + 2) : stored;
 }
 
 /**
@@ -463,8 +435,9 @@ function timed(word, ms) {
  */
 export function ending(turn) {
   const calls = turn.report?.tool_calls ?? 0;
+  const seconds = (turn.finished_at ?? turn.accepted_at) - turn.accepted_at;
   const took = [
-    ...(turn.finished_at === null ? [] : [span((turn.finished_at - turn.accepted_at) * 1000)]),
+    ...(seconds > 0 ? [span(seconds * 1000)] : []),
     ...(calls > 0 ? [`${String(calls)} tool ${calls === 1 ? "call" : "calls"}`] : []),
   ].join(", ");
   if (turn.state === "queued" || turn.state === "running") return undefined;
@@ -498,7 +471,7 @@ export function titleOf(conversation, turns) {
  * @param {number} ms
  */
 export function span(ms) {
-  if (ms < 1000) return `${String(Math.max(Math.round(ms), 0))} ms`;
+  if (ms < 1000) return ms <= 0 ? "0 s" : `${String(Math.round(ms))} ms`;
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${String(seconds)} s`;
   const minutes = Math.floor(seconds / 60);
@@ -530,7 +503,7 @@ export function size(bytes) {
 export function when(at, now, locale) {
   const [date, today] = [new Date(at * 1000), new Date(now * 1000)];
   if (date.toDateString() === today.toDateString())
-    return date.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleTimeString(locale, { timeStyle: "short" });
   return date.toLocaleDateString(locale, {
     day: "numeric",
     month: "short",

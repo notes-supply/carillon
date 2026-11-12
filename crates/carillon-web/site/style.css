@@ -430,6 +430,13 @@ progress {
   border-bottom-color: var(--lead);
   font-weight: 600;
 }
+/* The provider writes a column's alignment as one of these classes. */
+.prose .align-right {
+  text-align: right;
+}
+.prose .align-center {
+  text-align: center;
+}
 .prose hr {
   margin: 1.6em 0;
   border: 0;
@@ -531,6 +538,9 @@ a.file:hover {
   border: 0.2em solid var(--bronze);
   border-radius: 50%;
   background: none;
+}
+.mark.now:first-child {
+  margin-left: 0;
 }
 @media (prefers-reduced-motion: no-preference) {
   .mark.running {

@@ -374,7 +374,10 @@ async fn health_and_the_page_need_no_credential() -> Result<()> {
         "text/javascript; charset=utf-8"
     );
     // The page ships its reading face, and may load it from here alone.
-    std::fs::write(fixture.directory.path().join("release/face.woff2"), "a font")?;
+    std::fs::write(
+        fixture.directory.path().join("release/face.woff2"),
+        "a font",
+    )?;
     assert_eq!(
         page("/face.woff2").await?.header("content-type"),
         "font/woff2"
