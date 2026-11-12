@@ -44,7 +44,9 @@ has its agent, audience, channel and title, when it started and was last
 active, its marker and how many of its turns are at work.
 `before=<activity>` reads the page below a marker, so a conversation that
 becomes active between two reads moves to the first page and is on no
-later one. The list reads no turn and no message text, so an interface may
+later one. `audience_id=<audience>` lists only that audience's
+conversations, one for each agent it has talked to, so an interface that
+knows a conversation by its audience alone finds its agent. The list reads no turn and no message text, so an interface may
 poll it and compare each conversation's marker and count of turns at work.
 While both are unchanged the conversation has no new turn and no new
 answer, and its transcript need not be read again. A turn's state while it

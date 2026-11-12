@@ -17,11 +17,14 @@ use super::{
 
 impl Database {
     /// A page of the interface's conversations, the latest active first: at
-    /// most [`HISTORY_PAGE_LIMIT`] whose activity marker is below `before`.
+    /// most [`HISTORY_PAGE_LIMIT`] whose activity marker is below `before`,
+    /// and only those with `audience_id` when one is given. An audience
+    /// names one conversation for each agent it has talked to.
     pub(crate) fn conversations(
         &self,
         interface_id: &str,
         before: Option<i64>,
+        audience_id: Option<&str>,
     ) -> Result<ConversationPage> {
         let connection = self.connect()?;
         let mut conversations = connection
@@ -32,13 +35,15 @@ impl Database {
                         AND agent_id = c.agent_id AND audience_id = c.audience_id)
                  FROM conversations c
                  WHERE interface_id = ?1 AND activity < ?2
+                   AND (?4 IS NULL OR audience_id = ?4)
                  ORDER BY activity DESC LIMIT ?3",
             )?
             .query_map(
                 params![
                     interface_id,
                     before.unwrap_or(i64::MAX),
-                    i64::try_from(HISTORY_PAGE_LIMIT + 1)?
+                    i64::try_from(HISTORY_PAGE_LIMIT + 1)?,
+                    audience_id
                 ],
                 |row| {
                     Ok(ConversationSummary {

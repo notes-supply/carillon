@@ -543,11 +543,17 @@ impl Core {
     }
 
     /// A page of an authenticated interface's conversations, the latest
-    /// active first: those whose activity marker is below `before`.
+    /// active first: those whose activity marker is below `before`, and
+    /// only those with `audience` when one is given.
     /// # Errors
     /// Returns storage errors.
-    pub fn conversations(&self, interface: &str, before: Option<i64>) -> Result<ConversationPage> {
-        self.database.conversations(interface, before)
+    pub fn conversations(
+        &self,
+        interface: &str,
+        before: Option<i64>,
+        audience: Option<&str>,
+    ) -> Result<ConversationPage> {
+        self.database.conversations(interface, before, audience)
     }
 
     /// A page of the turns of one conversation of an authenticated

@@ -40,7 +40,8 @@ mise run example:core
 - `conversations` and `transcript` read an interface's own history: its
   conversations, the latest active first, and one conversation's turns, each
   with what began it and the answer core recorded. Both page backwards from
-  the newest with `before`. The list reads conversation rows and the
+  the newest with `before`, and the list takes an audience to list only
+  its conversations, one for each agent. The list reads conversation rows and the
   unfinished-turn index, no turn row and no message text. A conversation's
   activity marker rises with every turn accepted, opened or ended. An
   interface polls the list, compares each conversation's `activity` and

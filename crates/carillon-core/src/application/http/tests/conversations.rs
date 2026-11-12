@@ -76,6 +76,13 @@ async fn an_interface_reads_its_own_conversations_and_no_other_caller_reads_any(
         ),
         ("web chat/1", "hello", 0)
     );
+    accept(&state, "elsewhere", "another chat").await?;
+    let named = format!("{LIST}?audience_id=web%20chat%2F1");
+    let page: ConversationPage = exactly(read(&state, "test-interface", own, &named).await?)?;
+    assert_eq!(page.conversations, [conversation.clone()]);
+    let unknown = format!("{LIST}?audience_id=unknown");
+    let page: ConversationPage = exactly(read(&state, "test-interface", own, &unknown).await?)?;
+    assert!(page.conversations.is_empty());
     let below = format!("{LIST}?before={}", conversation.activity);
     let page: ConversationPage = exactly(read(&state, "test-interface", own, &below).await?)?;
     assert!(page.conversations.is_empty());
@@ -90,8 +97,10 @@ async fn an_interface_reads_its_own_conversations_and_no_other_caller_reads_any(
     );
 
     let other = Some("second");
-    let page: ConversationPage = exactly(read(&state, "second-interface", other, LIST).await?)?;
-    assert!(page.conversations.is_empty());
+    for path in [LIST, named.as_str()] {
+        let page: ConversationPage = exactly(read(&state, "second-interface", other, path).await?)?;
+        assert!(page.conversations.is_empty(), "{path}");
+    }
     let transcript: Transcript =
         exactly(read(&state, "second-interface", other, TRANSCRIPT).await?)?;
     assert!(transcript.turns.is_empty());

@@ -52,7 +52,7 @@ fn settle(database: &Database, turn_id: &str, settlement: Settlement<'_>) -> Res
 }
 
 fn listed(database: &Database, interface: &str) -> Result<Vec<ConversationSummary>> {
-    Ok(database.conversations(interface, None)?.conversations)
+    Ok(database.conversations(interface, None, None)?.conversations)
 }
 
 /// The audiences of the conversations `discord` lists, in its order.
@@ -202,7 +202,7 @@ fn the_conversation_list_pages_below_the_last_one_listed_while_others_move_up() 
             .map(|conversation| conversation.audience_id.clone())
             .collect::<Vec<_>>()
     };
-    let page = database.conversations("discord", None)?;
+    let page = database.conversations("discord", None, None)?;
     assert_eq!(audiences(&page), newest_first[..HISTORY_PAGE_LIMIT]);
     assert_eq!(
         page.next,
@@ -213,7 +213,7 @@ fn the_conversation_list_pages_below_the_last_one_listed_while_others_move_up() 
     let (listed, unlisted) = (&newest_first[3], &newest_first[HISTORY_PAGE_LIMIT + 1]);
     write(&database, "again", listed, "more")?;
     write(&database, "later", unlisted, "more")?;
-    let rest = database.conversations("discord", page.next)?;
+    let rest = database.conversations("discord", page.next, None)?;
     assert_eq!(
         audiences(&rest),
         [
@@ -223,6 +223,41 @@ fn the_conversation_list_pages_below_the_last_one_listed_while_others_move_up() 
     );
     assert_eq!(rest.next, None);
     assert_eq!(order(&database)?[..2], [unlisted.clone(), listed.clone()]);
+    Ok(())
+}
+
+#[test]
+fn an_audience_names_its_conversations_of_one_interface_one_for_each_agent() -> Result<()> {
+    let directory = tempdir()?;
+    let database = Database::create(&directory.path().join("state.sqlite3"))?;
+    write(&database, "one", "wanted", "hello")?;
+    write(&database, "two", "another", "hello")?;
+    let second = ExternalEvent {
+        agent_id: "second".to_owned(),
+        ..event("three", "wanted")
+    };
+    say(&database, "discord", &second)?;
+    say(&database, "web", &event("four", "wanted"))?;
+    let named = |interface: &str, before, audience: &str| -> Result<Vec<(String, String)>> {
+        let page = database.conversations(interface, before, Some(audience))?;
+        assert_eq!(page.next, None);
+        Ok(page
+            .conversations
+            .into_iter()
+            .map(|conversation| (conversation.agent_id, conversation.audience_id))
+            .collect())
+    };
+    let wanted = |agent: &str| (agent.to_owned(), "wanted".to_owned());
+    assert_eq!(
+        named("discord", None, "wanted")?,
+        [wanted("second"), wanted("agent")],
+        "the latest active first, and no other audience"
+    );
+    assert_eq!(named("web", None, "wanted")?, [wanted("agent")]);
+    assert!(named("discord", None, "unknown")?.is_empty());
+    assert!(named("unknown", None, "wanted")?.is_empty());
+    let latest = listed(&database, "discord")?[0].activity;
+    assert_eq!(named("discord", Some(latest), "wanted")?, [wanted("agent")]);
     Ok(())
 }
 

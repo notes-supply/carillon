@@ -2,7 +2,7 @@
 use crate::InterfaceError;
 use anyhow::Result;
 use carillon_installation::loopback;
-use carillon_protocol::conversations::{ConversationPage, Transcript};
+use carillon_protocol::conversations::{ConversationPage, ConversationSummary, Transcript};
 use carillon_protocol::model::{
     CommandCatalog, ConversationQuery, Delivery, DeliveryAck, DeliveryOutcome,
     DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
@@ -154,6 +154,30 @@ impl CoreClient {
             "read conversations from core",
         )
         .await
+    }
+
+    /// This provider's conversations with `audience_id`, one for each agent
+    /// the audience has talked to, so none when core has no such
+    /// conversation. A provider that knows a conversation by its audience
+    /// alone finds its agent here.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn conversations_of(
+        &self,
+        audience_id: &str,
+    ) -> Result<Vec<ConversationSummary>, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/conversations"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.query_pairs_mut()
+            .append_pair("audience_id", audience_id);
+        let page: ConversationPage = core_json(
+            self.request(Method::GET, url),
+            "read a conversation's agent from core",
+        )
+        .await?;
+        Ok(page.conversations)
     }
 
     /// A page of the turns of this provider's conversation of `agent_id`
