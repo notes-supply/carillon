@@ -408,6 +408,13 @@ fn instances(config: &LoadedConfig) -> Vec<&str> {
 /// registered. Anything else is a choice for the operator.
 fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     if let Some(explicit) = explicit {
+        let mut entries = config.value.providers.iter();
+        let program = entries
+            .find(|entry| entry.id == explicit)
+            .map(|entry| &entry.program);
+        if let Some(program) = program.filter(|program| *program != Bundled::Discord.program()) {
+            bail!("{explicit} is not a Discord instance: its program is \"{program}\"");
+        }
         return Ok(explicit);
     }
     match instances(config).as_slice() {

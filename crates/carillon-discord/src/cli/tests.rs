@@ -741,6 +741,11 @@ fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
         config.provider_config_path("chat")?,
     )?;
     assert_eq!(instance(&config, None)?, "discord-a");
+    let foreign = instance(&config, Some("chat".to_owned())).err();
+    assert_eq!(
+        foreign.map(|refusal| refusal.to_string()).as_deref(),
+        Some("chat is not a Discord instance: its program is \"example\"")
+    );
 
     let second = Provider {
         id: "discord-b".to_owned(),
