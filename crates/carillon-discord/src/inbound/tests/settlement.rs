@@ -25,11 +25,11 @@ use crate::{
         Downloads,
         tests::{Serve, attachment, serve_cdn},
     },
-    client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation, DiscordRoute},
     conversations::{IncomingMessage, Participation, tests::discord_config},
     gateway::Dispatch,
     inbound::{QueuedMessage, Settlements, lanes},
+    test_client as core_client,
 };
 
 /// What the fake core does with each event, and what it saw.

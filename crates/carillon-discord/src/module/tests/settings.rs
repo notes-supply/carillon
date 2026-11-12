@@ -141,7 +141,7 @@ async fn answer(State(runtime): State<Shared>, Json(request): Json<SettingsReque
 async fn core(
     runtime: &Shared,
 ) -> anyhow::Result<(
-    crate::client::CoreClient,
+    carillon_interface::CoreClient,
     tokio::task::JoinHandle<std::io::Result<()>>,
 )> {
     let router = Router::new()
@@ -150,14 +150,11 @@ async fn core(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    Ok((
-        crate::client::test_client(format!("http://{address}"))?,
-        server,
-    ))
+    Ok((crate::test_client(format!("http://{address}"))?, server))
 }
 
 async fn invoke(
-    core: &crate::client::CoreClient,
+    core: &carillon_interface::CoreClient,
     source: crate::conversations::InteractionSource,
     markers: &ActivityMarkers,
 ) -> anyhow::Result<Reply> {
@@ -234,7 +231,7 @@ fn option(reply: &Reply, custom_id: &str, label: &str) -> anyhow::Result<String>
 }
 
 async fn click(
-    core: &crate::client::CoreClient,
+    core: &carillon_interface::CoreClient,
     reply: &Reply,
     picker: &str,
     label: &str,
@@ -376,7 +373,7 @@ async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyh
 
 #[tokio::test]
 async fn route_lines_draw_while_core_is_unreachable() -> anyhow::Result<()> {
-    let core = crate::client::test_client("http://127.0.0.1:1".to_owned())?;
+    let core = crate::test_client("http://127.0.0.1:1".to_owned())?;
     let reply = invoke(&core, source("401", None), &ActivityMarkers::default()).await?;
     assert_eq!(
         reply.content,
@@ -450,7 +447,7 @@ async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow:
         )
         .with_state(runtime.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let client = crate::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
     let drawn = click(&client, &drawn, "pick", "Model").await?;
@@ -513,7 +510,7 @@ async fn a_runtime_that_goes_out_on_the_change_is_named_once() -> anyhow::Result
         )
         .with_state(runtime.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let client = crate::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
     let drawn = click(&client, &drawn, "pick", "Model").await?;

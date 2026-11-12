@@ -10,14 +10,14 @@
 
 use std::{
     io,
-    os::unix::fs::DirBuilderExt as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use carillon_installation::config::MIB;
+use carillon_interface::{Batch, Staging};
 use carillon_protocol::model::{StagedAttachments, StagedFile};
 use reqwest::{StatusCode, Url, redirect};
 use tokio::{
@@ -51,7 +51,7 @@ pub(crate) struct Refusal(pub(crate) String);
 pub(crate) struct Downloads {
     client: reqwest::Client,
     cdn: Cdn,
-    staging: PathBuf,
+    staging: Staging,
     policy: AttachmentPolicy,
     active: Arc<Semaphore>,
     room: Arc<Semaphore>,
@@ -122,20 +122,16 @@ pub(crate) fn display_name(name: &str) -> String {
 /// The files of one message, downloaded under generated names, with the
 /// staging room they hold. Dropping it removes them and then frees the room.
 pub(crate) struct Staged {
-    directory: PathBuf,
+    batch: Option<Batch>,
     pub(crate) manifest: StagedAttachments,
     room: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        let (directory, room) = (std::mem::take(&mut self.directory), self.room.take());
+        let (batch, room) = (self.batch.take(), self.room.take());
         let remove = move || {
-            if let Err(error) = std::fs::remove_dir_all(&directory)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                warn!(%error, "staged attachments could not be removed; the provider removes them at startup");
-            }
+            drop(batch);
             drop(room);
         };
         match tokio::runtime::Handle::try_current() {
@@ -157,18 +153,7 @@ impl Downloads {
     /// Prepare `staging`, removing what a previous instance left there.
     /// Call only once this instance owns the provider's state.
     pub(crate) fn open(staging: PathBuf, policy: AttachmentPolicy) -> Result<Self> {
-        match std::fs::remove_dir_all(&staging) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("clear {}", staging.display()));
-            }
-        }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&staging)
-            .with_context(|| format!("create {}", staging.display()))?;
+        let staging = Staging::open(staging)?;
         Ok(Self {
             // Never redirect, and never send the bot token: CDN downloads
             // use a client of their own.
@@ -261,35 +246,29 @@ impl Downloads {
         .await
         .map_err(|_| late())?
         .map_err(|_| late())?;
-        let directory = self.staging.join(uuid::Uuid::now_v7().simple().to_string());
-        let mut staged = Staged {
-            manifest: StagedAttachments {
-                batch: directory
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                files: Vec::with_capacity(plan.attachments.len()),
-            },
-            directory,
-            room: Some(room),
-        };
-        let unavailable = |error: io::Error| {
+        let batch = self.staging.batch().map_err(|error| {
             warn!(%error, "attachment staging failed");
             Refusal(
                 "Carillon could not store these attachments for checking, so this message was not accepted."
                     .to_owned(),
             )
+        })?;
+        let destinations: Vec<_> = (0..plan.attachments.len())
+            .map(|ordinal| batch.file(ordinal))
+            .collect();
+        let mut staged = Staged {
+            manifest: StagedAttachments {
+                batch: batch.name().to_owned(),
+                files: Vec::with_capacity(plan.attachments.len()),
+            },
+            batch: Some(batch),
+            room: Some(room),
         };
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&staged.directory)
-            .map_err(unavailable)?;
         let _active = timeout_at(deadline, self.active())
             .await
             .map_err(|_| late())?;
-        for (ordinal, file) in plan.attachments.iter().enumerate() {
-            let destination = staged.directory.join(ordinal.to_string());
-            timeout_at(deadline, self.fetch_file(http, plan, file, &destination))
+        for (file, destination) in plan.attachments.iter().zip(&destinations) {
+            timeout_at(deadline, self.fetch_file(http, plan, file, destination))
                 .await
                 .map_err(|_| late())??;
             staged.manifest.files.push(StagedFile {

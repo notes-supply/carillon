@@ -19,7 +19,6 @@ use crate::{
 use crate::{
     InterfaceError,
     activity::{CardRecords, activity_monitor},
-    client::CoreClient,
     config::{self, DiscordConfig, FileChange, Settings, Writer, state_directory},
     controls,
     conversations::{
@@ -49,9 +48,9 @@ use axum::{
 };
 use carillon_discord_module::contract::{CardRequest, Reply};
 use carillon_installation::config::{
-    LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, attachment_store,
-    read_token_file, token_matches,
+    LoadedConfig, attachment_staging, attachment_store, read_token_file,
 };
+use carillon_interface::{CoreClient, Deliveries, Started, authorize_operator, bearer, start};
 use carillon_protocol::model::{
     Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, Job, TurnState,
 };
@@ -89,12 +88,6 @@ struct SimulateResponse {
     pub messages: Vec<Composed>,
 }
 
-impl IntoResponse for InterfaceError {
-    fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
-    }
-}
-
 #[derive(Clone)]
 struct DiscordState {
     /// The settings serving. Each message or interaction keeps the snapshot
@@ -110,6 +103,7 @@ struct DiscordState {
     module: Arc<Module>,
     /// Absent in deterministic mode, where no Discord application exists.
     connection: Option<Connection>,
+    simulation_claims: Option<Arc<Deliveries>>,
     downloads: Arc<Downloads>,
 }
 
@@ -144,26 +138,17 @@ pub(crate) struct ServeOptions<'a> {
 }
 
 pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Result<()> {
-    let provider = config
-        .provider(options.provider_id, ProviderRole::Interface)?
-        .clone();
-    // Disabled on purpose, the provider ends successfully, so its service is
-    // not restarted, before it reads credentials or touches any state.
-    if !provider.enabled {
-        info!(provider = %provider.id, "Discord interface provider is disabled; not serving");
+    let Some(Started {
+        provider,
+        listener,
+        core,
+        health,
+    }) = start(&config, options.provider_id, options.token_file).await?
+    else {
         return Ok(());
-    }
+    };
     let discord = DiscordConfig::load(&config, &provider.id)?;
     let bot_token_file = discord.bot_token_path(&config.root);
-    let token = read_token_file(options.token_file)?;
-    if !token_matches(&provider.token_hash, &token) {
-        bail!("Discord interface provider token does not match configuration");
-    }
-    // Establish instance exclusivity before touching provider state or claims.
-    let address = provider.listen_address()?;
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("bind Discord interface provider to {address}"))?;
     let participation = Arc::new(Participation::load(
         state_directory(&config, &provider.id).join("participation.json"),
     )?);
@@ -174,13 +159,9 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         )
         .await?,
     );
-    let core = CoreClient::new(
-        format!("http://{}", config.value.core.listen),
-        provider.id.clone(),
-        token,
-    )?;
+    let deliveries = core.deliveries();
     let reconciled = loop {
-        match core.reconcile().await {
+        match deliveries.reconcile().await {
             Ok(reconciled) => break reconciled,
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
@@ -189,19 +170,13 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
             Err(failure) => bail!("delivery reconciliation rejected: {}", failure.message),
         }
     };
-    let health = Health {
-        id: provider.id.clone(),
-        role: provider.role.as_str().to_owned(),
-        version: RELEASE_VERSION.to_owned(),
-        status: "ready".to_owned(),
-    };
     // This instance owns the provider's state: staging left by an earlier
     // one is abandoned and removed.
     let downloads = Arc::new(Downloads::open(
         attachment_staging(&config.value.data_dir, &provider.id),
         discord.attachments,
     )?);
-    let state = DiscordState {
+    let mut state = DiscordState {
         settings: Settings::new(discord),
         installation: Arc::new(config),
         health,
@@ -209,10 +184,12 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         participation,
         module,
         connection: None,
+        simulation_claims: None,
         downloads,
     };
     info!(url = %provider.url, deterministic = options.deterministic, "Discord interface provider ready");
     if options.deterministic {
+        state.simulation_claims = Some(Arc::new(deliveries));
         axum::serve(listener, discord_router(state, true)).await?;
         return Ok(());
     }
@@ -222,7 +199,16 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     );
     let discord_token = read_token_file(&bot_token_file)?;
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
-    connect(state, listener, http, discord_token, reconciled, cards).await
+    connect(
+        state,
+        listener,
+        http,
+        discord_token,
+        reconciled,
+        cards,
+        deliveries,
+    )
+    .await
 }
 
 async fn connect(
@@ -232,6 +218,7 @@ async fn connect(
     discord_token: String,
     reconciled: DeliveryReconciliation,
     cards: Option<CardRecords>,
+    deliveries: Deliveries,
 ) -> Result<()> {
     // Identity applies at a restart only, so the settings serving now say it.
     let identity = state.settings.current();
@@ -247,7 +234,6 @@ async fn connect(
         reactions: reactions.clone(),
         lanes: Lanes::new(messages.clone()),
     });
-    let delivery_state = state.clone();
     let stopping = CancellationToken::new();
     let (settled, settlements) = mpsc::unbounded_channel();
     let ingress = Arc::new(Ingress {
@@ -278,9 +264,9 @@ async fn connect(
     // Deliveries outlast whatever ends the provider: a claimed one is still
     // sent and its outcome recorded.
     let mut deliveries = tokio::spawn(delivery_loop(
-        delivery_state.core,
+        deliveries,
         reactions.clone(),
-        delivery_state.participation,
+        state.participation.clone(),
         attachment_store(&state.installation.value.data_dir),
         delivering,
         stopping.clone(),
@@ -400,14 +386,6 @@ async fn discord_health(State(state): State<DiscordState>) -> Json<Health> {
     Json(state.health)
 }
 
-fn bearer(headers: &HeaderMap) -> &str {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or_default()
-}
-
 /// Deterministic endpoints act for the interface itself and require its
 /// credential.
 fn authorize_interface(state: &DiscordState, headers: &HeaderMap) -> Result<(), InterfaceError> {
@@ -420,18 +398,18 @@ fn authorize_interface(state: &DiscordState, headers: &HeaderMap) -> Result<(), 
     Ok(())
 }
 
-/// Operator actions need the operator credential, not the interface's.
-fn authorize_operator(state: &DiscordState, headers: &HeaderMap) -> Result<(), InterfaceError> {
-    if !token_matches(
-        &state.installation.value.core.operator_token_hash,
-        bearer(headers),
-    ) {
-        return Err(InterfaceError {
-            status: StatusCode::FORBIDDEN,
-            message: "Discord operator endpoints require the operator credential".to_owned(),
-        });
-    }
-    Ok(())
+fn simulated_claims<'a>(
+    state: &'a DiscordState,
+    headers: &HeaderMap,
+) -> Result<&'a Deliveries, InterfaceError> {
+    authorize_interface(state, headers)?;
+    state
+        .simulation_claims
+        .as_deref()
+        .ok_or_else(|| InterfaceError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "simulation requires deterministic mode".to_owned(),
+        })
 }
 
 async fn discord_operation(
@@ -439,7 +417,7 @@ async fn discord_operation(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let bytes = axum::body::to_bytes(body, 6 * 1024 * 1024)
         .await
         .map_err(|_| InterfaceError {
@@ -488,7 +466,7 @@ async fn settings_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Json<config::Status>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let root = &state.installation.root;
     Ok(Json(state.settings.status(
         || read_settings(&state),
@@ -505,7 +483,7 @@ async fn apply_settings(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Response, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let applying = state.clone();
     let applied = tokio::spawn(async move {
         let state = &applying;
@@ -582,7 +560,7 @@ async fn change_settings(
     headers: HeaderMap,
     body: Result<Json<FileChange>, JsonRejection>,
 ) -> Result<Response, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let Json(change) = body.map_err(|rejection| InterfaceError {
         status: StatusCode::BAD_REQUEST,
         message: rejection.body_text(),
@@ -654,7 +632,7 @@ async fn module_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Json<Status>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
+    authorize_operator(&state.installation.value, &headers)?;
     let declared = match read_settings(&state) {
         Ok(file) => state
             .module
@@ -671,7 +649,7 @@ async fn simulate(
     headers: HeaderMap,
     Json(request): Json<IncomingMessage>,
 ) -> Result<Response, InterfaceError> {
-    authorize_interface(&state, &headers)?;
+    let claims = simulated_claims(&state, &headers)?;
     let settings = state.settings.current();
     let Some(plan) = admit_message(
         &settings,
@@ -740,7 +718,7 @@ async fn simulate(
         state.participation.answered(&person, &message);
     }
     let native_ref = format!("local:{}", resolved.event.event_id);
-    let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
+    let delivery = settle_own_delivery(claims, &receipt, native_ref).await?;
     let messages = match &delivery {
         Some(delivery) => compose(
             &attachment_store(&state.installation.value.data_dir),
@@ -806,7 +784,7 @@ async fn summary(state: &DiscordState, job: Job) -> Option<Embed> {
 /// running is waited for; a finished one, whose simulation may have stopped
 /// waiting before its answer, is settled if still pending.
 async fn settle_own_delivery(
-    core: &CoreClient,
+    claims: &Deliveries,
     receipt: &EventReceipt,
     native_ref: String,
 ) -> Result<Option<Delivery>, InterfaceError> {
@@ -814,7 +792,7 @@ async fn settle_own_delivery(
     let delivery = if matches!(receipt.state, TurnState::Queued | TurnState::Running) {
         let delivery = timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(delivery) = core.claim_turn_delivery(turn).await? {
+                if let Some(delivery) = claims.claim_turn(turn).await? {
                     return Ok::<_, InterfaceError>(delivery);
                 }
                 sleep(Duration::from_millis(25)).await;
@@ -827,10 +805,11 @@ async fn settle_own_delivery(
         })??;
         Some(delivery)
     } else {
-        core.claim_turn_delivery(turn).await?
+        claims.claim_turn(turn).await?
     };
     if let Some(delivery) = &delivery {
-        core.acknowledge_delivery(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
+        claims
+            .acknowledge(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
             .await?;
     }
     Ok(delivery)

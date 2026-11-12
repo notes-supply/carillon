@@ -327,7 +327,7 @@ fn calls() -> anyhow::Result<(tempfile::TempDir, super::InteractionCalls)> {
     Ok((
         installation,
         super::InteractionCalls::new(
-            crate::client::test_client("http://127.0.0.1:1".to_owned())?,
+            crate::test_client("http://127.0.0.1:1".to_owned())?,
             writer,
             crate::channels::Routing::Routed(route()),
             None,
@@ -437,7 +437,7 @@ async fn submitting(
     );
     let reactions =
         crate::delivery::Reactions::new(http.clone(), crate::config::Settings::new(config));
-    let core = crate::client::test_client(format!("http://{address}"))?;
+    let core = crate::test_client(format!("http://{address}"))?;
     let (_installation, writer) = crate::config::tests::writer()?;
     let calls = super::InteractionCalls::new(
         core.clone(),
@@ -463,7 +463,7 @@ async fn submitting(
 /// Lanes served by the provider's own dispatcher, in which no message of
 /// the conversation is waiting.
 fn serving_lanes(
-    core: crate::client::CoreClient,
+    core: carillon_interface::CoreClient,
     http: Arc<twilight_http::Client>,
 ) -> anyhow::Result<crate::inbound::lanes::Lanes> {
     let directory = tempfile::tempdir()?;

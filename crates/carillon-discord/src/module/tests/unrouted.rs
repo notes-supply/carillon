@@ -9,7 +9,7 @@ async fn a_refused_settings_command_makes_no_core_call() -> anyhow::Result<()> {
         async { StatusCode::SERVICE_UNAVAILABLE }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let core = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let core = crate::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let config = crate::conversations::tests::discord_config(
         crate::config::DiscordActivation::Always,
@@ -54,7 +54,7 @@ async fn an_unrouted_channel_offers_its_agent_alone_and_reaches_no_runtime() -> 
         async { StatusCode::SERVICE_UNAVAILABLE }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let core = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let core = crate::test_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let config = crate::conversations::tests::discord_config(
         crate::config::DiscordActivation::Always,

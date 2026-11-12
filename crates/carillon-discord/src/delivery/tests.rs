@@ -1,9 +1,9 @@
 use super::{Feedback, OUTCOMES, Reactions, delivery_loop, discord_chunks};
 use crate::{
     activity::Delivering,
-    client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation},
     conversations::tests::{discord_config, participation},
+    test_client as core_client,
 };
 use anyhow::Context as _;
 use axum::{
@@ -153,7 +153,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core,
+            core.deliveries(),
             Reactions::new(http.clone(), crate::config::Settings::new(config)),
             participation(directory.path())?,
             std::path::PathBuf::new(),
@@ -221,7 +221,7 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
     tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             Reactions::new(
                 http.clone(),
                 crate::config::Settings::new(discord_config(
@@ -421,7 +421,7 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
     let run = |stopping: &tokio_util::sync::CancellationToken| {
         let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(delivery_loop(
-            core.clone(),
+            core.deliveries(),
             Reactions::new(
                 http.clone(),
                 crate::config::Settings::new(discord_config(
@@ -495,7 +495,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             Reactions::new(
                 http.clone(),
                 crate::config::Settings::new(discord_config(
@@ -592,7 +592,7 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             reactions.clone(),
             participation(directory.path())?,
             std::path::PathBuf::new(),

@@ -1414,7 +1414,7 @@ async function testConfigurationRefusals() {
     await rename(token, `${token}-saved`);
     await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
     try {
-      assertDisabledExit("discord", /Discord interface provider is disabled/u);
+      assertDisabledExit("discord", /interface provider discord-private is disabled/u);
       await writeFile(configPath(), withoutDiscord.replaceAll('"discord-private"', '"operator"'));
       assertStartupRefused("discord", /provider ID operator is reserved/u);
       assert.deepEqual(await readFile(database), previousDatabase);

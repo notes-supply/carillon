@@ -81,7 +81,7 @@ fn following(discord: &Substitute, records: &Path, reactions: &Reactions) -> Pro
     let (delivering, heard) = mpsc::unbounded_channel();
     let stopping = CancellationToken::new();
     let delivered = delivery_loop(
-        discord.client.clone(),
+        discord.client.deliveries(),
         reactions.clone(),
         unread_participation(records),
         PathBuf::new(),

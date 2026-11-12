@@ -62,7 +62,7 @@ async fn deliver(
     let ended = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             reactions.clone(),
             participation(directory.path())?,
             std::path::PathBuf::new(),

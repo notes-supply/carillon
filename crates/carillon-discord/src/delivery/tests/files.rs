@@ -174,7 +174,7 @@ async fn upload_refusing(
     let ended = tokio::time::timeout(
         Duration::from_secs(10),
         delivery_loop(
-            core_client(format!("http://{address}"))?,
+            core_client(format!("http://{address}"))?.deliveries(),
             reactions.clone(),
             participation(records)?,
             store.to_path_buf(),

@@ -17,6 +17,7 @@ base64 = "0.22.1"
 carillon-discord-module = { path = "../carillon-discord-module" }
 carillon-protocol = { path = "../carillon-protocol" }
 carillon-installation = { path = "../carillon-installation" }
+carillon-interface = { path = "../carillon-interface" }
 carillon-wasm = { path = "../carillon-wasm" }
 clap.workspace = true
 emojis = "0.9.1"
@@ -26,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
-tokio-util = { version = "0.7.19", features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

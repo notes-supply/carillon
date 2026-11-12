@@ -129,6 +129,11 @@ ingress, maps platform conversations to Carillon audiences, submits events,
 claims deliveries and sends them. Interfaces fail closed before any runtime
 work.
 
+What every interface does with core is in the
+[shared interface boundary](../../crates/carillon-interface/README.md): the
+client of core, submission, staging and the start. An interface the registry
+does not list ends at once, as a disabled one does.
+
 The Discord provider (`carillon-discord`) admits messages and interactions by
 guild, user and route, each route a channel, by ID, and the agent that
 answers there. Allowlisted people's direct messages to the bot have a route

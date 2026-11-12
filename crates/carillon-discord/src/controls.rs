@@ -7,7 +7,8 @@ use carillon_protocol::turns::ControlAction;
 use tracing::{debug, warn};
 use twilight_model::gateway::GatewayReaction;
 
-use crate::{client::CoreClient, config::DiscordConfig, conversations::admit_identity};
+use crate::{config::DiscordConfig, conversations::admit_identity};
+use carillon_interface::CoreClient;
 
 /// The control a reaction asks for: one the settings name, added by an
 /// allowlisted person in the guild or their routed direct messages, never

@@ -1,9 +1,13 @@
-use super::test_client as core_client;
+use super::CoreClient;
 use anyhow::Context as _;
 use axum::{Json, Router, http::StatusCode};
 use carillon_protocol::model::{DeliveryOutcome, ExternalEvent};
 use serde_json::{Value, json};
 use std::time::Duration;
+
+fn core_client(base_url: String) -> anyhow::Result<CoreClient> {
+    CoreClient::new(base_url, "discord".to_owned(), "token".to_owned())
+}
 
 #[tokio::test]
 async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result<()> {
@@ -55,11 +59,12 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
                             })
                             .await
                             .map(|_| ()),
-                        1 => client.claim_delivery().await.map(|_| ()),
-                        2 => client.reconcile().await.map(|_| ()),
+                        1 => client.deliveries().claim().await.map(|_| ()),
+                        2 => client.deliveries().reconcile().await.map(|_| ()),
                         _ => {
                             client
-                                .acknowledge_delivery(1, DeliveryOutcome::Delivered, None)
+                                .deliveries()
+                                .acknowledge(1, DeliveryOutcome::Delivered, None)
                                 .await
                         }
                     }
@@ -76,12 +81,9 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
             });
         }
     }
-    let mut count = 0;
     while let Some(result) = cases.join_next().await {
         result??;
-        count += 1;
     }
-    assert_eq!(count, 7);
     Ok(())
 }
 

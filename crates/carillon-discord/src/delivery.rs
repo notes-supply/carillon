@@ -1,11 +1,11 @@
 //! Native delivery and feedback. Core remains the owner of delivery claims/outcomes.
 use crate::{
     activity::Delivering,
-    client::CoreClient,
     config::{DiscordConfig, DiscordEmoji, Settings},
     conversations::{Participation, Sender},
 };
 use anyhow::{Context, Result, anyhow, bail};
+use carillon_interface::Deliveries;
 use carillon_protocol::{
     model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState},
     turns::{ControlAction, Silence},
@@ -557,7 +557,7 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 /// of its outcome once core recorded it, without waiting for whoever
 /// receives it.
 pub(crate) async fn delivery_loop(
-    core: CoreClient,
+    deliveries: Deliveries,
     reactions: Reactions,
     participation: Arc<Participation>,
     store: PathBuf,
@@ -565,7 +565,7 @@ pub(crate) async fn delivery_loop(
     stopping: CancellationToken,
 ) -> Result<()> {
     while !stopping.is_cancelled() {
-        let delivery = match core.claim_delivery().await {
+        let delivery = match deliveries.claim().await {
             Ok(Some(delivery)) => delivery,
             Ok(None) => {
                 let _ = timeout(Duration::from_millis(500), stopping.cancelled()).await;
@@ -578,7 +578,7 @@ pub(crate) async fn delivery_loop(
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to claim Discord delivery");
                 tokio::select! {
-                    reconciled = reconcile_after_claim_failure(&core, &reactions) => reconciled?,
+                    reconciled = reconcile_after_claim_failure(&deliveries, &reactions) => reconciled?,
                     () = stopping.cancelled() => break,
                 }
                 continue;
@@ -605,8 +605,8 @@ pub(crate) async fn delivery_loop(
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
         loop {
-            match core
-                .acknowledge_delivery(delivery.id, outcome, native_ref.clone())
+            match deliveries
+                .acknowledge(delivery.id, outcome, native_ref.clone())
                 .await
             {
                 Ok(()) => break,
@@ -632,9 +632,12 @@ pub(crate) async fn delivery_loop(
 /// A failed claim response is ambiguous: core may have committed the claim
 /// before disconnecting. Reconciliation preserves this instance's claim so
 /// polling can recover it, while surfacing claims abandoned by older instances.
-async fn reconcile_after_claim_failure(core: &CoreClient, reactions: &Reactions) -> Result<()> {
+async fn reconcile_after_claim_failure(
+    deliveries: &Deliveries,
+    reactions: &Reactions,
+) -> Result<()> {
     loop {
-        match core.reconcile().await {
+        match deliveries.reconcile().await {
             Ok(reconciled) => {
                 for target in reconciled.feedback_target_ids {
                     reactions.outcome(&target, Feedback::Uncertain).await;

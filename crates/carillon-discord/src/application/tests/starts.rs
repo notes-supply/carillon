@@ -74,6 +74,7 @@ async fn a_start_that_fails_before_its_gateway_keeps_the_recorded_session() -> a
         "test-only".to_owned(),
         reconciled,
         None,
+        core_client("http://127.0.0.1:1".to_owned())?.deliveries(),
     )
     .await
     .err()
@@ -149,6 +150,7 @@ async fn a_start_marks_what_an_earlier_instance_left_unfinished_uncertain() -> a
             feedback_target_ids: vec!["300:400".to_owned()],
         },
         None,
+        core_client("http://127.0.0.1:1".to_owned())?.deliveries(),
     ));
     let seen = |request: &str| {
         requests

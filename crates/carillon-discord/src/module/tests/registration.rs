@@ -383,7 +383,7 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let (_installation, writer) = crate::config::tests::writer()?;
     let calls = super::super::InteractionCalls::new(
-        crate::client::test_client(core)?,
+        crate::test_client(core)?,
         writer,
         crate::channels::Routing::Routed(route()),
         None,

@@ -8,7 +8,6 @@
 use crate::{
     InterfaceError,
     attachments::{Downloads, Refusal},
-    client::CoreClient,
     config::DiscordConfig,
     conversations::{
         IncomingMessage, MessagePlan, Participation, admit_message, discord_parent_channel,
@@ -20,6 +19,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use axum::http::StatusCode;
+use carillon_interface::{CoreClient, settled, submit_event_with_retry};
 use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent};
 use serde_json::Value;
 use std::{future::pending, sync::Arc, time::Duration};
@@ -588,28 +588,6 @@ pub(crate) async fn known_receipt(core: &CoreClient, event_id: &str) -> Option<E
     })
 }
 
-/// What core settles for one of this provider's events: its receipt once
-/// accepted, `None` when core does not hold it. A capture still running is
-/// waited for, and an unreachable core is waited out; a refusal to answer
-/// is returned.
-async fn settled(
-    core: &CoreClient,
-    event_id: &str,
-) -> Result<Option<EventReceipt>, InterfaceError> {
-    loop {
-        match core.event_status(event_id).await {
-            Ok(EventStatus::Accepted(receipt)) => return Ok(Some(receipt)),
-            Ok(EventStatus::Unknown) => return Ok(None),
-            Ok(EventStatus::Capturing) => {}
-            Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, %event_id, "waiting to ask core about a Discord event");
-            }
-            Err(failure) => return Err(failure),
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-}
-
 /// Submit staged files until core accepts or refuses them. Retries hold no
 /// slot for active work while they wait, and no attempt starts once the
 /// deadline has passed or the provider is stopping, even one that waited
@@ -670,30 +648,6 @@ fn refusal(failure: &InterfaceError) -> Refusal {
         }
         .to_owned(),
     )
-}
-
-/// Submit `event` until core accepts or refuses it. No attempt starts once
-/// the provider is `stopping`, whether or not this call made one: `None`
-/// then, as core has not answered. An attempt under way runs to its end,
-/// within the client's own bound.
-pub(crate) async fn submit_event_with_retry(
-    core: &CoreClient,
-    stopping: &CancellationToken,
-    event: &ExternalEvent,
-) -> Option<Result<EventReceipt, InterfaceError>> {
-    loop {
-        // However the wait before it ended, a stop by then starts no attempt.
-        if stopping.is_cancelled() {
-            return None;
-        }
-        match core.submit_event(event).await {
-            Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                stopping.run_until_cancelled(sleep(RETRY)).await;
-            }
-            outcome => return Some(outcome),
-        }
-    }
 }
 
 #[cfg(test)]
