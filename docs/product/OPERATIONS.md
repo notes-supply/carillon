@@ -34,15 +34,19 @@ Without Discord options, the installer asks at the terminal:
    or both (`--runtime pi` and `--runtime t3` answer it). Pi runs Carillon's
    assistant, the agent with Discord's context and Carillon's resources. T3
    runs T3 Code channels.
-2. **T3** asks for its address and a token (`t3 auth session issue --label
+2. **The interfaces.** Where people talk to Carillon. This release bundles
+   Discord (`--interface discord` answers it). An installation needs at
+   least one.
+3. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), and the projects T3 Code channels
    work in: each becomes an agent that is plain T3 Code through Discord.
    Then it asks each agent's model.
-3. **Pi** opens when an agent runs on it: sign in with `/login`, then
+4. **Pi** opens when an agent runs on it: sign in with `/login`, then
    leave with Ctrl+D. Setup checks that Pi is signed in and offers to open
    it again until it is. Then it asks the model of each Pi agent that has
    none yet.
-4. **Discord.** The bot token, not shown as you type. Setup learns the bot
+5. **Each interface** is set up by its own program. Discord asks for the
+   bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
    servers and text channels by name (with the ID where names repeat), who
@@ -51,7 +55,7 @@ Without Discord options, the installer asks at the terminal:
    checks that the bot may answer that way in each channel, and asks again
    until it may. Then who it answers: the bot application's owners, and
    anyone else by Discord user ID. Only those people can talk to the agent.
-5. Carillon starts.
+6. Carillon starts.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
@@ -69,8 +73,11 @@ without creating anything until that thread exists, then use it. Returning to th
 original thread. A conversation without a T3 thread yet starts in the current
 project. Work already running in another project continues there.
 
-An explicit `--runtime` adds that runtime to an existing installation.
-Pi sign-in is skipped when no agent runs on Pi.
+An explicit `--runtime` adds that runtime to an existing installation, and
+an explicit `--interface` adds that interface. A rerun sets up every
+interface `carillon.toml` registers, each with its own program:
+`carillon-PROGRAM setup --provider ID`. Pi sign-in is skipped when no agent
+runs on Pi.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a
@@ -78,15 +85,23 @@ runtime you didn't choose ends at once) and links `~/.local/bin/carillon`.
 It never replaces an unrelated program there. If `~/.local/bin` isn't on
 your `PATH`, run `~/.local/bin/carillon` instead of `carillon`, or add that
 directory to your `PATH`. With Pi, `--workspace` sets the assistant's
-folder (default: your home). `--base-port` moves the loopback ports
-(default 43800, up to 43803).
+folder (default: your home).
+
+Core listens on `--base-port` (default 43800). Each bundled program has its
+own port above it, the same in every installation: Discord +1, Pi +2 and T3
++3. Port +4 is kept for the web interface. Setup never changes an address
+`carillon.toml` already has. When another provider holds a program's port,
+setup refuses and names that provider: give it another `url` in
+`carillon.toml`, then run setup again. An installation that an earlier
+release set up with T3 alone has T3 on Pi's port, so adding Pi meets this.
 
 To start Carillon at boot without logging in, an administrator can run
 `loginctl enable-linger USER`.
 
 ### Without questions
 
-With the Discord options, the installer asks nothing:
+With the Discord options, the installer asks nothing and registers Discord
+as the interface:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh |
@@ -139,7 +154,7 @@ carillon logs -f core        # or discord, runtime-pi, runtime-t3; without a nam
 carillon recent              # recent turns
 carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
-carillon settings            # each routed channel's settings, one line each
+carillon settings            # each interface's routed channels, one line each
 ```
 
 An enabled runtime with no assigned agents is `idle`. Core does not probe it,
@@ -243,7 +258,8 @@ the installation has it, also when you keep the saved bot and settings.
 The terminal shows the same pages:
 
 ```sh
-carillon settings                              # one line per routed channel
+carillon settings                              # each interface's routed channels
+carillon settings --interface discord-private CHANNEL_ID
 carillon settings CHANNEL_ID                   # that channel's page
 carillon settings CHANNEL_ID thinking=high     # change lines, left to right
 carillon settings CHANNEL_ID reset model       # take the agent's model again
@@ -252,6 +268,14 @@ carillon settings dm agent=assistant           # who answers direct messages
 carillon settings --agent assistant            # the agent's own values
 carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 ```
+
+A channel belongs to an interface, which `--interface ID` names. Leave it
+out while only one interface is enabled. With more, the command refuses
+and lists them. Only the named interface is asked, so another interface
+that is down doesn't block a change. The listing prints each interface's ID
+with its channels under it. An interface that doesn't answer says so in
+place of its channels, and the listing fails only when none answers.
+`carillon settings --interface ID` lists one interface's channels.
 
 A key names a line, such as `model`, `thinking` or `agent`. A value is a
 choice's ID or name: `listens=mention` or `listens=always`, `replies=thread`
@@ -267,8 +291,10 @@ Carillon's next turn in that thread.
 ## Configuration
 
 `carillon.toml` is the registry: core's address, the agent, and each
-provider with its role, address, credential hash and expected version.
-Unknown fields make the file invalid. Each provider keeps its own settings in
+provider with its role, program, address, credential hash and expected
+version. `program` names the program that serves the provider: `discord`,
+`runtime-pi` or `runtime-t3`, or `NAME` for a `carillon-NAME` you installed
+separately. Every provider needs it. Unknown fields make the file invalid. Each provider keeps its own settings in
 `providers/ID.toml`.
 
 Setup, `carillon init`, `carillon update` and `carillon provider` change
@@ -920,18 +946,46 @@ carillon update carillon-VERSION-linux-x86_64.tar.gz
 
 Before stopping anything, update unpacks the archive inside the installation,
 checks it against its `MANIFEST` and has the new release check your registry,
-database, Discord settings and the custom module they enable. It then drains,
+database, and the settings of every Discord provider with the custom module
+they enable. `carillon discord check` runs that last check by hand: without
+`--provider` it checks every provider whose program is `discord`, and passes
+when there is none. It then drains,
 stops, swaps the application directory atomically, and starts what was
-running. In `carillon.toml`, it sets the `version` of each provider the
-release bundles (`discord-private`, `runtime-pi` and `runtime-t3`) and leaves
-the rest of the file as it was. A provider you installed separately keeps its
-version. Update keeps credentials, provider settings, state, sessions and
+running. In `carillon.toml`, it sets the `version` of each provider whose
+`program` the release bundles (`discord`, `runtime-pi` and `runtime-t3`),
+whatever its ID, and leaves the rest of the file as it was. A provider you
+installed separately keeps its version. Update keeps credentials, provider settings, state, sessions and
 logs. A refusal changes nothing. If a later step fails, the message says what
 changed; rerun the same update until it succeeds before starting services.
 There's no downgrade: restore a backup made before the update instead.
 
 Maintenance commands take a lock per installation (`.maintenance.lock`) and
 one on the owner's user units, and refuse while another holds them.
+
+### Updating from 0.1.0-beta.9
+
+Releases after 0.1.0-beta.9 need `program` on every provider in
+`carillon.toml`, and 0.1.0-beta.9 rejects a file that has it. So this one
+update can't finish through `carillon update`. Run it first anyway: it
+changes nothing, stops nothing, and prints these steps with the lines for
+your providers.
+
+1. Stop Carillon with the release it has: `carillon stop`. Stop before you
+   edit, because 0.1.0-beta.9's services don't restart on the edited file.
+2. Add a line to each provider in `carillon.toml`. A standard installation
+   needs `program = "discord"` under `id = "discord-private"`,
+   `program = "runtime-pi"` under `id = "runtime-pi"`, and
+   `program = "runtime-t3"` under `id = "runtime-t3"` when it has T3.
+3. Unpack the new release and run its installer:
+
+   ```sh
+   tar -xzf carillon-VERSION-linux-x86_64.tar.gz
+   CARILLON_HOME=~/.carillon carillon-VERSION/install.sh --update
+   ```
+
+4. Start Carillon: `carillon start`.
+
+Later updates use `carillon update` again.
 
 ### When update refuses the database format
 

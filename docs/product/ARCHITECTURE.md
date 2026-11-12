@@ -230,7 +230,12 @@ The Discord provider's operator API also runs typed operations
 Discord's permissions; message operations also reach allowlisted people's
 direct messages. The [`discord-pi`](../../packages/discord-pi/README.md)
 tools expose them to the Pi runtime's agents, and its skill and
-`carillon discord call` to other local agents. Uncertain writes are
+`carillon discord call` to other local agents. The tools are a default only
+when a provider with `program = "discord"` is enabled, and they reach that
+provider, never the conversation's own interface. A Discord conversation
+uses its own provider and knows its message's origin. A conversation on
+another interface uses the only Discord provider and has no origin, so the
+agent names the channel. Uncertain writes are
 reported, not retried.
 
 ## Runtime providers
@@ -363,7 +368,11 @@ The Discord provider composes a channel's page from its own route lines and
 the runtime's lines, which it reads through core's `POST /v1/settings`.
 Core relays only for the interface that owns the channel, or for the
 operator, who may also name an agent. The provider serves the same pages to
-`carillon settings` on its operator API. A runtime that does not answer
+`carillon settings` on its operator API. The operator names a channel's
+interface, or has only one enabled, and `carillon settings` asks that
+interface alone: a channel ID means what its interface says, and no other
+interface has to answer. The listing asks each enabled interface for its
+channels. A runtime that does not answer
 leaves the route lines on the page, still editable, so a channel can move
 off a broken runtime. A re-route shows the new agent's runtime lines. In a
 channel of the guild with no route, the page has only the Agent line and no
@@ -379,8 +388,8 @@ the turns a runtime opens included.
 ## Configuration
 
 `carillon.toml` declares providers by stable ID and role, with each one's
-address, credential hash, expected version and whether it's enabled, with
-the largest file an interface uploads, and the agents: each one's ID, name,
+program, address, credential hash, expected version and whether it's
+enabled, with the largest file an interface uploads, and the agents: each one's ID, name,
 runtime, workspace and, for Carillon's assistant on Pi, resources. Each
 provider owns `providers/ID.toml`, where a runtime keeps its own settings for
 its agents. Both files reject unknown fields. Setup, init, update and the
@@ -390,9 +399,23 @@ as the Discord provider changes its own file: one editor in
 tables of a list by ID, so the owner's comments, order, quoting and line
 endings stay.
 
-Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
-both. Pi runs Carillon's assistant whenever it is chosen. Each provider's
-own program sets up its part: Pi signs in through its own interface, and
+`program` names the program that serves a provider, `carillon-<program>`,
+and every entry has one. A file without it is refused with the lines to
+add, and nothing migrates it. `Bundled` in `carillon-installation` is the
+one list of the programs a release ships: `discord`, `runtime-pi` and
+`runtime-t3`. It owns each one's standard ID, role, version and port above
+core's (Discord +1, Pi +2, T3 +3, with +4 kept for the web interface).
+Initialization, setup, version stamping on update, Discord's choice of its
+instance and Pi's choice of Discord provider all read it. Registering a
+program never changes an address the file already has, and it refuses when
+another provider holds the program's port. An entry whose program the
+release doesn't bundle keeps the version its owner wrote.
+
+Setup registers the interfaces and the runtimes chosen. An installation
+needs at least one interface, and none has to be Discord. Pi runs
+Carillon's assistant whenever it is chosen. Each provider's own program
+sets up its part, and setup runs `carillon-<program> setup --provider <id>`
+for every interface entry: Pi signs in through its own interface, and
 setup then asks the model of each Pi agent that has none; the T3
 runtime makes an agent for each T3 project T3 Code channels work in, and
 their settings; and the Discord provider learns the bot from its token and
@@ -405,7 +428,7 @@ assistant while keeping T3's settings and honours `--workspace`. A
 registered runtime may have no agents, such as T3 beside Pi with no project
 chosen. Core reports that runtime as idle, and its service exits
 successfully without serving.
-The user target wants every bundled runtime's unit; one the registry doesn't
+The user target wants every bundled program's unit; one the registry doesn't
 list ends at once, as a disabled one does.
 
 Services load their files at start. An explicit apply re-reads a file and
