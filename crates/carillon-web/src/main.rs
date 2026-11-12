@@ -29,10 +29,7 @@ use carillon_interface::instance;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::{
-    channels::SignInCode,
-    serve::{ServeOptions, serve},
-};
+use crate::{channels::SignInCode, serve::serve};
 
 /// The `program` of a registry entry this program serves.
 const PROGRAM: &str = "web";
@@ -119,15 +116,11 @@ async fn run() -> Result<()> {
             token_file,
             site,
         } => {
-            let options = ServeOptions {
-                provider_id: provider,
-                token_file,
-                site: match site {
-                    Some(site) => site,
-                    None => release_site()?,
-                },
+            let site = match site {
+                Some(site) => site,
+                None => release_site()?,
             };
-            serve(LoadedConfig::load(&config)?, options).await
+            serve(LoadedConfig::load(&config)?, &provider, &token_file, site).await
         }
         Command::Open { print, provider } => {
             let loaded = installation()?;
@@ -152,36 +145,32 @@ fn release_site() -> Result<PathBuf> {
 }
 
 /// Posts to the running provider's operator API with the operator's
-/// credential.
+/// credential, and answers its URL with what it said.
 async fn operator(
     loaded: &LoadedConfig,
-    url: &str,
+    provider: &str,
     action: &str,
-) -> Result<reqwest::Result<reqwest::Response>> {
-    Ok(loopback::client()
+) -> Result<(String, reqwest::Response)> {
+    let url = &loaded.provider(provider, ProviderRole::Interface)?.url;
+    let response = loopback::client()
         .timeout(Duration::from_secs(10))
         .build()?
         .post(format!("{url}/v1/{action}"))
         .bearer_auth(loaded.credential("operator")?)
         .send()
-        .await)
-}
-
-async fn accepted(response: reqwest::Response) -> Result<reqwest::Response> {
+        .await
+        .with_context(|| format!("the web provider does not answer at {url}"))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         bail!("the web provider refused the request ({status}): {body}");
     }
-    Ok(response)
+    Ok((url.clone(), response))
 }
 
 async fn open(loaded: &LoadedConfig, provider: &str, print: bool) -> Result<()> {
-    let url = &loaded.provider(provider, ProviderRole::Interface)?.url;
-    let response = operator(loaded, url, "sign-in")
-        .await?
-        .with_context(|| format!("the web provider does not answer at {url}"))?;
-    let SignInCode { code } = accepted(response).await?.json().await?;
+    let (url, response) = operator(loaded, provider, "sign-in").await?;
+    let SignInCode { code } = response.json().await?;
     // The code travels in the fragment, which no server or log receives.
     let link = format!("{url}/#sign-in={code}");
     if !print
@@ -198,11 +187,7 @@ async fn open(loaded: &LoadedConfig, provider: &str, print: bool) -> Result<()> 
 }
 
 async fn sign_out(loaded: &LoadedConfig, provider: &str) -> Result<()> {
-    let url = &loaded.provider(provider, ProviderRole::Interface)?.url;
-    let response = operator(loaded, url, "sign-out")
-        .await?
-        .with_context(|| format!("the web provider does not answer at {url}"))?;
-    accepted(response).await?;
+    operator(loaded, provider, "sign-out").await?;
     println!("Every browser is signed out of Carillon's web chat.");
     Ok(())
 }

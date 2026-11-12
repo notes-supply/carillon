@@ -42,19 +42,13 @@ impl Site {
 
 pub(crate) const INDEX: &str = "index.html";
 
-/// The media type of a page file, by its extension.
+/// The media type of a page file, by its extension. The directory is
+/// flat and has no hidden file.
 fn media_type(name: &str) -> Option<&'static str> {
-    let (stem, extension) = name.rsplit_once('.')?;
-    let plain = |part: &str| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    };
-    if !plain(stem) || stem.starts_with('.') {
+    if name.starts_with('.') || name.contains('/') {
         return None;
     }
-    Some(match extension {
+    Some(match name.rsplit_once('.')?.1 {
         "html" => "text/html; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",

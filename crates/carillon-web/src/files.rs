@@ -98,16 +98,10 @@ async fn stored(web: &Web, path: &str) -> Option<(File, Option<&'static str>)> {
     if !file.metadata().await.ok()?.is_file() {
         return None;
     }
-    let mut start = [0; 12];
-    let mut read = 0;
-    while read < start.len() {
-        match file.read(&mut start[read..]).await.ok()? {
-            0 => break,
-            more => read += more,
-        }
-    }
+    let mut start = Vec::new();
+    (&mut file).take(12).read_to_end(&mut start).await.ok()?;
     file.rewind().await.ok()?;
-    let raster = match &start[..read] {
+    let raster = match start.as_slice() {
         [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', ..] => Some("image/png"),
         [0xff, 0xd8, 0xff, ..] => Some("image/jpeg"),
         [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Some("image/gif"),

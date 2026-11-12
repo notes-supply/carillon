@@ -330,8 +330,8 @@ workspace = "work"
                 version: "0.0.0".to_owned(),
                 status: "ready".to_owned(),
             },
-            browser: Browser::open(browser::key_file(&data_dir, "web"), AUTHORITY.to_owned())?,
             staging: Staging::open(staging)?,
+            browser: Browser::open(browser::key_file(&data_dir, "web"), AUTHORITY.to_owned())?,
             site: Site {
                 custom: data_dir.join("components/web/site"),
                 release,

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     browser::refusal,
     files::{self, FileView},
-    identity::{ConversationId, EventId, agent_of, known},
+    identity::{ConversationId, EventId, agent_of, canonical},
     markdown::render,
     send,
     serve::Web,
@@ -131,7 +131,7 @@ struct Conversations {
 
 #[derive(Serialize)]
 struct Conversation {
-    id: ConversationId,
+    id: String,
     agent_id: String,
     /// The first line of the first message, empty when it had only files.
     title: String,
@@ -150,8 +150,8 @@ impl Conversation {
     /// `None` for a conversation the page did not make, whose audience is
     /// no UUID.
     fn of(summary: ConversationSummary) -> Option<Self> {
-        Some(Self {
-            id: ConversationId::parse(&summary.audience_id)?,
+        canonical(&summary.audience_id).then_some(Self {
+            id: summary.audience_id,
             agent_id: summary.agent_id,
             title: summary.title,
             started_at: summary.started_at,
@@ -302,14 +302,10 @@ async fn turns(
     Path(id): Path<ConversationId>,
     Query(Before { before }): Query<Before<String>>,
 ) -> Result<Json<Turns>, InterfaceError> {
-    let conversation = known(&web.core, id).await?;
+    let agent_id = agent_of(&web, &id, None).await?;
     let page = web
         .core
-        .transcript(
-            &conversation.agent_id,
-            &conversation.audience_id,
-            before.as_deref(),
-        )
+        .transcript(&agent_id, id.as_str(), before.as_deref())
         .await?;
     let before = page
         .turns
@@ -455,9 +451,9 @@ async fn commands(
     Query(Chosen { agent }): Query<Chosen>,
 ) -> Result<Json<Commands>, InterfaceError> {
     let query = ConversationQuery {
-        agent_id: agent_of(&web, id, agent).await?,
-        channel_id: id.to_string(),
-        audience_id: Some(id.to_string()),
+        agent_id: agent_of(&web, &id, agent).await?,
+        channel_id: id.as_str().to_owned(),
+        audience_id: Some(id.as_str().to_owned()),
     };
     let catalog = web.core.commands(&query).await?;
     Ok(Json(Commands {

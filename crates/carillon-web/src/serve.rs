@@ -1,6 +1,9 @@
 //! The provider process: one router behind one gate, and an ordered stop.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result, bail};
 use axum::{
@@ -47,27 +50,27 @@ pub(crate) struct Web {
     pub(crate) stopping: CancellationToken,
 }
 
-pub(crate) struct ServeOptions {
-    pub(crate) provider_id: String,
-    pub(crate) token_file: PathBuf,
-    /// The release's copy of the page.
-    pub(crate) site: PathBuf,
-}
-
-pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result<()> {
+/// Serves provider `provider_id` of `config` with the page in `site`, the
+/// release's copy, until it is asked to stop.
+pub(crate) async fn serve(
+    config: LoadedConfig,
+    provider_id: &str,
+    token_file: &Path,
+    site: PathBuf,
+) -> Result<()> {
     let Some(Started {
         provider,
         listener,
         core,
         health,
-    }) = start(&config, &options.provider_id, &options.token_file).await?
+    }) = start(&config, provider_id, token_file).await?
     else {
         return Ok(());
     };
-    if !options.site.join(INDEX).is_file() {
+    if !site.join(INDEX).is_file() {
         bail!(
             "the web page is not at {}; name its directory with --site",
-            options.site.display()
+            site.display()
         );
     }
     let data_dir = &config.value.data_dir;
@@ -87,7 +90,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result
         staging,
         site: Site {
             custom: component_directory(data_dir, &provider.id).join("site"),
-            release: options.site,
+            release: site,
         },
         user: std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))

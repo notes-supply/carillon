@@ -54,12 +54,6 @@ fn malformed(error: &MultipartError) -> InterfaceError {
     )
 }
 
-/// What the page sent, with its files staged in the batch.
-struct Staged {
-    text: String,
-    files: Vec<StagedFile>,
-}
-
 /// Reads the request's parts: `text`, then any number of `file`. A part
 /// past core's limits is not kept, and the rest of the body is still read
 /// before the refusal is given: a browser that is answered while it
@@ -68,11 +62,8 @@ async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
     mut parts: Multipart,
-) -> Result<Staged, InterfaceError> {
-    let mut staged = Staged {
-        text: String::new(),
-        files: Vec::new(),
-    };
+) -> Result<(String, Vec<StagedFile>), InterfaceError> {
+    let (mut text, mut files) = (String::new(), Vec::new());
     let mut total = 0_u64;
     let mut refused = None;
     while let Some(mut part) = parts
@@ -82,10 +73,10 @@ async fn stage(
     {
         match part.name() {
             Some("text") => {
-                staged.text = part.text().await.map_err(|error| malformed(&error))?;
+                text = part.text().await.map_err(|error| malformed(&error))?;
             }
             Some("file") => {
-                if staged.files.len() >= limits.max_files as usize {
+                if files.len() >= limits.max_files as usize {
                     refused.get_or_insert_with(|| {
                         too_large(format!(
                             "A message carries at most {} files.",
@@ -93,11 +84,14 @@ async fn stage(
                         ))
                     });
                 }
-                let name = part.file_name().unwrap_or_default().trim().to_owned();
+                let name = match part.file_name().map(str::trim) {
+                    Some(name) if !name.is_empty() => name.to_owned(),
+                    _ => "file".to_owned(),
+                };
                 let content_type = part.content_type().map(str::to_owned);
                 let mut file = match refused {
                     None => Some(
-                        File::create(batch.file(staged.files.len()))
+                        File::create(batch.file(files.len()))
                             .await
                             .context("stage a file")?,
                     ),
@@ -124,12 +118,8 @@ async fn stage(
                     file.flush().await.context("stage a file")?;
                 }
                 total += size;
-                staged.files.push(StagedFile {
-                    name: if name.is_empty() {
-                        "file".to_owned()
-                    } else {
-                        name
-                    },
+                files.push(StagedFile {
+                    name,
                     size,
                     content_type,
                 });
@@ -142,10 +132,7 @@ async fn stage(
             }
         }
     }
-    match refused {
-        Some(refused) => Err(refused),
-        None => Ok(staged),
-    }
+    refused.map_or(Ok((text, files)), Err)
 }
 
 async fn chunk(part: &mut Field<'_>) -> Result<Option<axum::body::Bytes>, InterfaceError> {
@@ -173,9 +160,9 @@ pub(crate) async fn send(
             "A message is sent as multipart form data.",
         )
     })?;
-    let agent_id = agent_of(&web, id, agent).await?;
+    let agent_id = agent_of(&web, &id, agent).await?;
     let batch = web.staging.batch().context("stage a message's files")?;
-    let Staged { text, files } = stage(&web.registry.value.core.attachments, &batch, parts).await?;
+    let (text, files) = stage(&web.registry.value.core.attachments, &batch, parts).await?;
     if text.trim().is_empty() && files.is_empty() {
         return Err(refusal(
             StatusCode::BAD_REQUEST,
@@ -186,9 +173,9 @@ pub(crate) async fn send(
         event_id: event_id.as_str().to_owned(),
         agent_id,
         user_id: web.user.clone(),
-        audience_id: id.to_string(),
-        channel_id: id.to_string(),
-        delivery_target_id: id.to_string(),
+        audience_id: id.as_str().to_owned(),
+        channel_id: id.as_str().to_owned(),
+        delivery_target_id: id.as_str().to_owned(),
         feedback_target_id: event_id.as_str().to_owned(),
         content: text,
         native: if command {

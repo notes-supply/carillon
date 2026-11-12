@@ -14,60 +14,36 @@
 //! The provider stores none of it. A conversation exists in core from its
 //! first admitted message.
 
-use std::fmt;
-
 use axum::http::StatusCode;
-use carillon_interface::{CoreClient, InterfaceError};
-use carillon_protocol::conversations::ConversationSummary;
-use serde::{Deserialize, Serialize};
+use carillon_interface::InterfaceError;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{browser::refusal, serve::Web};
 
-/// A UUID as the page writes it: lowercase with hyphens, so one
-/// conversation has one name.
-fn canonical(text: &str) -> Option<Uuid> {
-    let uuid = Uuid::try_parse(text).ok()?;
-    (uuid.hyphenated().to_string() == text).then_some(uuid)
+/// Whether `text` is a UUID as the page writes one: lowercase with
+/// hyphens, so one conversation has one name.
+pub(crate) fn canonical(text: &str) -> bool {
+    Uuid::try_parse(text).is_ok_and(|uuid| uuid.hyphenated().to_string() == text)
 }
 
 /// A conversation: its audience, channel and delivery target in core.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub(crate) struct ConversationId(Uuid);
-
-impl ConversationId {
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        canonical(text).map(Self)
-    }
-}
-
-impl TryFrom<String> for ConversationId {
-    type Error = &'static str;
-
-    fn try_from(text: String) -> Result<Self, Self::Error> {
-        Self::parse(&text).ok_or("a conversation is a lowercase UUID")
-    }
-}
-
-impl fmt::Display for ConversationId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.hyphenated().fmt(formatter)
-    }
-}
-
-impl From<ConversationId> for String {
-    fn from(id: ConversationId) -> Self {
-        id.to_string()
-    }
-}
+#[derive(Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) struct ConversationId(String);
 
 /// A message's event ID, `m-<uuid>`: the page mints it before the first
 /// attempt and sends it again with every retry, and core answers a repeat
 /// with the first receipt.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct EventId(String);
+
+impl ConversationId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl EventId {
     pub(crate) fn as_str(&self) -> &str {
@@ -75,73 +51,61 @@ impl EventId {
     }
 }
 
-impl TryFrom<String> for EventId {
+impl TryFrom<String> for ConversationId {
     type Error = &'static str;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
-        match text.strip_prefix("m-").and_then(canonical) {
-            Some(_) => Ok(Self(text)),
-            None => Err("a message is `m-` and a lowercase UUID"),
+        if canonical(&text) {
+            Ok(Self(text))
+        } else {
+            Err("a conversation is a lowercase UUID")
         }
     }
 }
 
-/// The conversation as core has it, or `None` before its first message.
-/// Core keys a conversation by its agent too, so it answers an audience
-/// with one conversation for each agent. The page gives an audience one
-/// agent for good, so more than one is refused.
-pub(crate) async fn find(
-    core: &CoreClient,
-    id: ConversationId,
-) -> Result<Option<ConversationSummary>, InterfaceError> {
-    let mut found = core.conversations_of(&id.to_string()).await?;
-    if found.len() > 1 {
-        return Err(refusal(
-            StatusCode::CONFLICT,
-            &format!("Conversation {id} has more than one agent, which the web chat never makes."),
-        ));
+impl TryFrom<String> for EventId {
+    type Error = &'static str;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        if text.strip_prefix("m-").is_some_and(canonical) {
+            Ok(Self(text))
+        } else {
+            Err("a message is `m-` and a lowercase UUID")
+        }
     }
-    Ok(found.pop())
 }
 
-/// The conversation, which must exist.
-pub(crate) async fn known(
-    core: &CoreClient,
-    id: ConversationId,
-) -> Result<ConversationSummary, InterfaceError> {
-    find(core, id).await?.ok_or_else(|| {
-        refusal(
-            StatusCode::NOT_FOUND,
-            &format!("Carillon has no web conversation {id}."),
-        )
-    })
-}
-
-/// The agent a message to conversation `id` goes to. A conversation core
-/// has keeps its agent, and naming another is refused. One core does not
-/// have yet takes the agent `named`, which must be configured.
+/// The agent of conversation `id`. Core keys a conversation by its agent
+/// too, so it answers an audience with one conversation for each agent.
+/// The page gives an audience one agent for good: a conversation core has
+/// keeps its agent, naming another is refused, and more than one is
+/// nothing the page made. A conversation core does not have yet takes the
+/// agent `named` with its first message, which must be configured.
 pub(crate) async fn agent_of(
     web: &Web,
-    id: ConversationId,
+    id: &ConversationId,
     named: Option<String>,
 ) -> Result<String, InterfaceError> {
-    match (find(&web.core, id).await?, named) {
-        (Some(existing), Some(named)) if existing.agent_id != named => Err(refusal(
+    let mut found = web.core.conversations_of(id.as_str()).await?;
+    let existing = found.pop().map(|conversation| conversation.agent_id);
+    match (existing, named) {
+        (Some(_), _) if !found.is_empty() => Err(refusal(
             StatusCode::CONFLICT,
-            &format!(
-                "This conversation is with {}, and a conversation keeps its agent.",
-                existing.agent_id
-            ),
+            "This conversation has more than one agent, which the web chat never makes.",
         )),
-        (Some(existing), _) => Ok(existing.agent_id),
+        (Some(existing), Some(named)) if existing != named => Err(refusal(
+            StatusCode::CONFLICT,
+            &format!("This conversation is with {existing}, and a conversation keeps its agent."),
+        )),
+        (Some(existing), _) => Ok(existing),
         (None, Some(named)) if web.registry.value.agent(&named).is_ok() => Ok(named),
         (None, Some(named)) => Err(refusal(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("Carillon has no agent {named}."),
         )),
         (None, None) => Err(refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "A new conversation's first message names its agent.",
+            StatusCode::NOT_FOUND,
+            "Carillon has no such web conversation. A first message names its agent.",
         )),
     }
 }

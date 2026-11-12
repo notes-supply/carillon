@@ -547,7 +547,7 @@ async fn commands_are_those_of_the_conversations_own_agent() -> Result<()> {
         }]})
     );
     let unnamed = fixture.get(&commands(""), &token).await?;
-    assert_eq!(unnamed.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(unnamed.status, StatusCode::NOT_FOUND);
 
     fixture
         .core()

@@ -12,9 +12,7 @@
 //! key voids them all and the key itself never leaves this process.
 
 use std::{
-    fs::DirBuilder,
     io,
-    os::unix::fs::DirBuilderExt as _,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -72,15 +70,9 @@ pub(crate) fn refusal(status: StatusCode, message: &str) -> InterfaceError {
 }
 
 impl Browser {
-    /// Reads the key, creating it when there is none.
+    /// Reads the key, creating it when there is none, in a directory that
+    /// exists.
     pub(crate) fn open(key_file: PathBuf, authority: String) -> Result<Self> {
-        if let Some(directory) = key_file.parent() {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .with_context(|| format!("create {}", directory.display()))?;
-        }
         let key = match std::fs::read_to_string(&key_file) {
             Ok(key) if !key.trim().is_empty() => key.trim().to_owned(),
             Ok(_) => replace_key(&key_file)?,

@@ -187,7 +187,7 @@ async fn a_conversation_keeps_the_agent_of_its_first_message() -> Result<()> {
     let token = fixture.sign_in().await?;
     let hello = [Part::Text("hello")];
     for (query, status, said) in [
-        ("", StatusCode::UNPROCESSABLE_ENTITY, "names its agent"),
+        ("", StatusCode::NOT_FOUND, "names its agent"),
         (
             "?agent=nobody",
             StatusCode::UNPROCESSABLE_ENTITY,
