@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-# Cargo embeds this identity in the core and Discord binaries. A supplied version
+# Cargo embeds this identity in the core, Discord and web binaries. A supplied version
 # is an assertion, not an independent label for differently versioned artifacts.
 VERSION=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 [ "${1:-$VERSION}" = "$VERSION" ] || {
@@ -72,7 +72,8 @@ printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 cp -R packages/runtime-pi/skills "$STAGE/lib/pi-skills"
 
-cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
+cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" \
+  --bin carillon --bin carillon-discord --bin carillon-web
 # The Discord modules run in the provider's Wasm sandbox; they are data, not
 # native binaries, and are built for the wasm32 target regardless of host.
 # The example custom module ships built, to try without a toolchain; its
@@ -90,6 +91,10 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   packages/runtime-t3/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-t3"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
+install -m 0755 "target/$TARGET/release/carillon-web" "$STAGE/bin/carillon-web"
+# The web chat's page ships as the files it is written in, which the provider
+# reads from lib/web beside its bin on each request.
+cp -R crates/carillon-web/site "$STAGE/lib/web"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm "$STAGE/lib/carillon_discord_module.wasm"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm "$STAGE/lib/examples/card-colours.wasm"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"

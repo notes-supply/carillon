@@ -1,0 +1,23 @@
+[Unit]
+Description=Carillon web chat interface provider
+After=carillon-core.service
+PartOf=carillon.target
+
+[Service]
+Type=simple
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+ExecStart="@CARILLON_HOME@/app/bin/carillon-web" serve --config "@CARILLON_HOME@/carillon.toml" --provider web --token-file "@CARILLON_HOME@/credentials/web.token"
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/web.log
+StandardError=append:@CARILLON_HOME@/logs/web.log
+
+[Install]
+WantedBy=carillon.target

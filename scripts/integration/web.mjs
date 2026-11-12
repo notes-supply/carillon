@@ -1,14 +1,14 @@
 /**
  * The web provider with a real core and deterministic Pi, driven as a
- * browser drives it: sign in, send, read, control, restart. Nothing
- * registers a web provider yet, so its entry in `carillon.toml` is written
- * here, and a stand-in for the user service manager runs the three
- * services, so `carillon restart` stops and starts them as it does an
+ * browser drives it: sign in, send, read, control, restart. The
+ * installation has the web chat alone, registered as setup registers it. A
+ * stand-in for the user service manager runs the three services from this
+ * checkout, so `carillon restart` stops and starts them as it does an
  * installation's.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -118,32 +118,12 @@ function raw(path, headers) {
 
 async function install() {
   await mkdir(workspace, { recursive: true });
-  const created = ["--interface", "discord", "--workspace", workspace, "--base-port", basePort];
+  const created = ["--interface", "web", "--workspace", workspace, "--base-port", basePort];
   execFileSync(binary, ["--home", installation, "init", ...created.map(String)], { env });
-  carillon("provider", "discord-private", "disable");
-  carillon("provider", "runtime-pi", "enable");
-  const token = randomUUID();
-  const hash = createHash("sha256").update(token).digest("hex");
-  const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim().split(" ")[1];
-  await writeFile(join(installation, "credentials/web.token"), `${token}\n`, { mode: 0o600 });
   // Captures here must not depend on the host's free space.
   await writeFile(
     join(installation, "carillon.toml"),
-    `
-[core.attachments]
-free_space_mib = 0
-
-[[providers]]
-id = "web"
-role = "interface"
-program = "web"
-version = "${version}"
-url = "${origin}"
-token_hash = "${hash}"
-enabled = true
-max_upload_mib = 1024
-delivery = "retained"
-`,
+    "\n[core.attachments]\nfree_space_mib = 0\n",
     { flag: "a" },
   );
   // The units name their installation, which `carillon restart` checks.
@@ -182,7 +162,12 @@ stop() {
     [ -f "$pids/$name" ] || continue
     pid=$(cat "$pids/$name")
     kill "$pid" 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
+    waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+      waited=$((waited + 1))
+      [ "$waited" -lt 600 ] || { echo "$name did not stop within 30 seconds" >&2; exit 1; }
+      sleep 0.05
+    done
     rm -f "$pids/$name"
   done
 }

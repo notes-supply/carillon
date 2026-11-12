@@ -8,8 +8,8 @@ export RUST_LOG=carillon=info
 # Everyday operation of installed releases through the owner's PATH entry point:
 # installation resolution, service control, logs, provider commands, and
 # configuration-preserving updates with their refusals and failures. The user
-# service manager is substituted by one that runs the packaged services with
-# deterministic Discord and Pi, so health checks exercise the real programs.
+# service manager is substituted by test-manager.sh, which runs the packaged
+# services as their units say, so health checks exercise the real programs.
 RELEASE=$(realpath -e -- "${1:?release directory required}")
 VERSION=${RELEASE##*/carillon-}
 BASE_PORT=$((${CARILLON_TEST_BASE_PORT:-44800} + 30))
@@ -28,79 +28,12 @@ export HOME XDG_CONFIG_HOME PATH MANAGER TRACE
 unset CARILLON_HOME CARILLON_MAINTENANCE_LOCK CARILLON_SKIP_SYSTEMD_RELOAD
 mkdir -p "$HOME/workspace" "$COMMANDS" "$MANAGER"
 
-cat >"$COMMANDS/systemctl" <<'SYSTEMCTL'
-#!/bin/sh
-set -eu
-printf '%s\n' "$*" >>"$TRACE"
-units=$XDG_CONFIG_HOME/systemd/user
-running() { [ -s "$MANAGER/pids" ]; }
-start() {
-  [ "${FAKE_START:-ok}" != fail ] || exit 1
-  root=$(sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service")
-  bin=$root/app/bin
-  config=$root/carillon.toml
-  env CARILLON_HOME="$root" PI_CODING_AGENT_DIR="$root/pi" "$bin/carillon-runtime-pi" \
-    --config "$config" --provider runtime-pi --token-file "$root/credentials/runtime-pi.token" \
-    --state-dir "$root/pi" --deterministic >>"$root/logs/runtime-pi.log" 2>&1 &
-  echo "$!" >>"$MANAGER/pids"
-  env CARILLON_HOME="$root" "$bin/carillon" core --config "$config" >>"$root/logs/core.log" 2>&1 &
-  echo "$!" >>"$MANAGER/pids"
-  if [ "${FAKE_START:-ok}" != no-discord ]; then
-    env CARILLON_HOME="$root" "$bin/carillon" discord serve --config "$config" \
-      --provider discord-private --token-file "$root/credentials/discord-private.token" \
-      --module "$root/app/lib/carillon_discord_module.wasm" --deterministic \
-      >>"$root/logs/discord.log" 2>&1 &
-    echo "$!" >>"$MANAGER/pids"
-  fi
-}
-stop() {
-  [ "${FAKE_STOP:-ok}" != fail ] || exit 1
-  if [ "${FAKE_STOP:-ok}" = hold ]; then
-    # Pause inside the service manager, then record which installation the
-    # units named when the stop acted.
-    : >"$MANAGER/holding"
-    waited=0
-    while [ ! -e "$MANAGER/release" ] && [ "$waited" -lt 400 ]; do
-      waited=$((waited + 1))
-      sleep 0.05
-    done
-    sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service" >"$MANAGER/stopped"
-  fi
-  if [ "${FAKE_STOP:-ok}" = break-installer ]; then
-    # Make the already checked installer unrunnable once services are down.
-    root=$(sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service")
-    chmod a-x "$root"/.update-*/carillon-*/install.sh
-  fi
-  running || return 0
-  for pid in $(cat "$MANAGER/pids"); do kill "$pid" 2>/dev/null || true; done
-  for pid in $(cat "$MANAGER/pids"); do
-    while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
-  done
-  rm -f "$MANAGER/pids"
-}
-case "$*" in
-  '--user show --property=ActiveState --value carillon.target')
-    if running; then echo active; else echo inactive; fi ;;
-  # Whether the target or any of its services runs, as setup asks; with
-  # FAKE_MEMBER, a service in that state follows the target's.
-  '--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service')
-    if running; then echo active; else echo inactive; fi
-    [ -z "${FAKE_MEMBER:-}" ] || printf '\n%s\n' "$FAKE_MEMBER" ;;
-  # The services that are part of the target, which a stop names so that it
-  # returns once they, not only the target, have stopped.
-  '--user show --property=ConsistsOf --value carillon.target')
-    echo 'carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' ;;
-  '--user start carillon.target') running || start ;;
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service') stop ;;
-  # The test's own cleanup stops whatever is left.
-  '--user stop carillon.target') stop ;;
-  '--user daemon-reload') [ "${FAKE_RELOAD:-ok}" != fail ] || exit 1 ;;
-  '--user disable --now carillon.target') stop ;;
-  '--user enable carillon.target') ;;
-  *) exit 2 ;;
-esac
-SYSTEMCTL
-chmod 0755 "$COMMANDS/systemctl"
+cp "$(dirname -- "$0")/test-manager.sh" "$COMMANDS/systemctl"
+# What Carillon asks of the service manager names the units the release ships.
+SERVICES='carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service'
+RUNNING='--user show --property=ActiveState --value carillon.target'
+PARTS='--user show --property=ConsistsOf --value carillon.target'
+STOP="--user stop carillon.target $SERVICES"
 
 cleanup() {
   result=$?
@@ -212,33 +145,33 @@ grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
 # A restart drains core first, then stops the target with its services.
 carillon restart >"$TEST_ROOT/restart.log"
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart.log" >/dev/null
-expect_trace '--user show --property=ActiveState --value carillon.target' \
-  '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
+expect_trace "$RUNNING" \
+  "$PARTS" \
+  "$STOP" \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
 # A runtime that is not running holds nothing a restart loses, as one that
 # is disabled or serves no agent does not run: the restart goes ahead and
 # starts it again.
-kill "$(head -n 1 "$MANAGER/pids")"
+kill "$(sed -n 3p "$MANAGER/pids")"
 carillon restart >"$TEST_ROOT/restart-exited.log"
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart-exited.log" >/dev/null
-expect_trace '--user show --property=ActiveState --value carillon.target' \
-  '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
+expect_trace "$RUNNING" \
+  "$PARTS" \
+  "$STOP" \
   '--user start carillon.target'
 # A runtime that cannot say whether a restart loses anything keeps the
 # services running and stops nothing. Refused when its time is up, the
 # command asks nothing more of core: the pause lapses within its lease and
 # the workers resume. Forced, the restart goes ahead and says what it
 # interrupts.
-frozen=$(head -n 1 "$MANAGER/pids")
+frozen=$(sed -n 3p "$MANAGER/pids")
 kill -STOP "$frozen"
 refuse undrained carillon restart --timeout 10
 grep -F 'core did not drain within 10 seconds' "$TEST_ROOT/undrained.log" >/dev/null
 grep -F 'runtime-pi is not ready to restart: it did not say whether it can restart' \
   "$TEST_ROOT/undrained.log" >/dev/null
-expect_trace '--user show --property=ActiveState --value carillon.target'
+expect_trace "$RUNNING"
 attempt=0
 until carillon registry >"$TEST_ROOT/resumed.log" &&
   ! grep -F 'Maintenance holds the workers paused' "$TEST_ROOT/resumed.log" >/dev/null; do
@@ -268,11 +201,33 @@ grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked.l
 running
 printf 'operations passed: entry point, resolution, start/drained restart, logs, provider commands, Discord module, lock\n'
 
+# The web chat is added to this running installation with one command, which
+# asks nothing. When the service manager fails the restart, the entry stays
+# for the next one and the command says so; run again, it restarts Carillon
+# drained. Everything below runs with the web chat registered and no browser
+# reading it.
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+refuse add-web-unstopped env FAKE_STOP=fail carillon setup --interface web
+grep -F "web is in carillon.toml and starts at the next \`carillon restart\`" \
+  "$TEST_ROOT/add-web-unstopped.log" >/dev/null
+running
+rm -f "$TRACE"
+carillon setup --interface web </dev/null >"$TEST_ROOT/add-web.log"
+grep -F 'so it restarts now' "$TEST_ROOT/add-web.log" >/dev/null
+grep -Fx "  web: ready ($VERSION)" "$TEST_ROOT/add-web.log" >/dev/null
+grep -Fx "\`carillon web open\` opens the web chat in your browser." "$TEST_ROOT/add-web.log" >/dev/null
+expect_trace "$RUNNING" "$PARTS" "$STOP" '--user start carillon.target'
+diff "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml" >"$TEST_ROOT/registry.diff" || true
+! grep '^<' "$TEST_ROOT/registry.diff" >/dev/null || fail 'adding the web chat changed another entry'
+grep -Fx '> delivery = "retained"' "$TEST_ROOT/registry.diff" >/dev/null
+"$(dirname -- "$0")/test-web-chat.sh" 'hello from the page' "$TEST_ROOT/web-headers"
+printf 'web chat added passed: one command on a running installation, restarted drained, answered\n'
+
 # Setup over this installation while it runs would leave its services running
 # the replaced release, so it is refused before it asks or writes anything:
 # with options or guided, with registration's reload skipped, and while only
 # one of its services runs.
-ACTIVE='--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service'
+ACTIVE="--user show --property=ActiveState --value $SERVICES carillon.target"
 app_inode=$(stat -c %i "$INSTALLATION/app")
 snapshot
 for setup in options guided skip-reload member; do
@@ -349,7 +304,7 @@ for archive in link:'unsupported entry' relabelled:'not version 9.9.9' broken:'r
   refuse "refused-${archive%%:*}" carillon update "$TEST_ROOT/${archive%%:*}.tar.gz"
   grep -F "${archive#*:}" "$TEST_ROOT/refused-${archive%%:*}.log" >/dev/null
   grep -F 'nothing was changed' "$TEST_ROOT/refused-${archive%%:*}.log" >/dev/null
-  expect_trace '--user show --property=ActiveState --value carillon.target'
+  expect_trace "$RUNNING"
   [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
   running
   [ ! -e "$TEST_ROOT/escape" ]
@@ -389,7 +344,7 @@ for state in schema:"is not in the format of Carillon $VERSION. To cross to this
   refuse "incompatible-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
   grep -F "${state#*:}" "$TEST_ROOT/incompatible-${state%%:*}.log" >/dev/null
   grep -F 'nothing was changed' "$TEST_ROOT/incompatible-${state%%:*}.log" >/dev/null
-  expect_trace '--user show --property=ActiveState --value carillon.target'
+  expect_trace "$RUNNING"
   [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
   running
   assert_preserved
@@ -446,7 +401,7 @@ for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
   refuse "incompatible-t3-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
   grep -F "${state#*:}" "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
   grep -F 'nothing was changed' "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
-  expect_trace '--user show --property=ActiveState --value carillon.target'
+  expect_trace "$RUNNING"
   [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
   running
   assert_preserved
@@ -493,9 +448,9 @@ carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
 grep -Fx 'runtime-t3 is not in carillon.toml; nothing to check' "$TEST_ROOT/update.log" >/dev/null
 grep -F "custom Discord module $EXAMPLE, as this release ships it, is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
-expect_trace '--user show --property=ActiveState --value carillon.target' \
-  '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
+expect_trace "$RUNNING" \
+  "$PARTS" \
+  "$STOP" \
   '--user daemon-reload' '--user enable carillon.target' '--user start carillon.target'
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/update.log" >/dev/null
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = next ]
@@ -520,7 +475,7 @@ printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = 
   "$(printf '%064d' 0)" >>"$INSTALLATION/carillon.toml"
 snapshot
 carillon update "$TEST_ROOT/final.tar.gz" | grep -F 'services remain stopped as before' >/dev/null
-expect_trace '--user show --property=ActiveState --value carillon.target' \
+expect_trace "$RUNNING" \
   '--user daemon-reload' '--user enable carillon.target'
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = final ]
 stopped

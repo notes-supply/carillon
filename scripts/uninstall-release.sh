@@ -70,9 +70,10 @@ is_managed_app "$APP" || {
 unit_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
 }
+OWN_LINE="Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\""
 OWN_UNITS=1
 if [ -f "$UNIT_DIR/carillon-core.service" ] &&
-  ! grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" "$UNIT_DIR/carillon-core.service"
+  ! grep -Fqx "$OWN_LINE" "$UNIT_DIR/carillon-core.service"
 then
   OWN_UNITS=0
   echo "Carillon's user units run another installation; leaving them registered."
@@ -89,18 +90,16 @@ if [ "$OWN_UNITS" -eq 1 ] && ! systemctl --user disable --now carillon.target; t
     [ "$active_state" = inactive ] || exit 1
 fi
 if [ "$OWN_UNITS" -eq 1 ]; then
-  for unit in \
-    carillon.target \
-    carillon-core.service \
-    carillon-runtime-pi.service \
-    carillon-runtime-t3.service \
-    carillon-discord.service
-  do
-    rm -f "$UNIT_DIR/$unit"
+  # A service is this installation's when it names it, as the core unit does
+  # above, whichever release registered it. Its link goes first: disabling
+  # the target removes links to it, not one that a unit enabled by hand left
+  # in the target's wants directory.
+  for unit in "$UNIT_DIR"/carillon-*.service; do
+    if [ -f "$unit" ] && grep -Fqx "$OWN_LINE" "$unit"; then
+      rm -f -- "$UNIT_DIR/carillon.target.wants/${unit##*/}" "$unit"
+    fi
   done
-  # Disabling the target removes links to it, not a link a unit enabled by
-  # hand left inside the target's wants directory.
-  rm -f "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service"
+  rm -f -- "$UNIT_DIR/carillon.target"
   [ ! -d "$UNIT_DIR/carillon.target.wants" ] ||
     rmdir --ignore-fail-on-non-empty -- "$UNIT_DIR/carillon.target.wants"
   [ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
