@@ -266,8 +266,13 @@ pub(super) async fn wait_until_healthy(
     timeout: Duration,
 ) -> Result<Vec<Health>> {
     let deadline = Instant::now() + timeout;
+    let log = config.root.join("logs/core.log");
+    let core = config.value.core.listen;
+    let unreached = |error: &reqwest::Error| error.is_connect() || error.is_timeout();
     loop {
-        let failure = match status(config).await {
+        let report: Result<StatusReport> =
+            operator_get(config, operator_url(config, "/v1/status")?).await;
+        let failure = match report {
             Ok(report) => {
                 let unavailable: Vec<_> = report
                     .providers
@@ -280,7 +285,11 @@ pub(super) async fn wait_until_healthy(
                 }
                 anyhow::anyhow!("unavailable: {}", unavailable.join(", "))
             }
-            Err(error) => error,
+            Err(error) if error.downcast_ref().is_some_and(unreached) => error.context(format!(
+                "core at {core} did not answer; its log, {}, says why",
+                log.display()
+            )),
+            Err(error) => error.context(format!("core at {core} did not report its status")),
         };
         if Instant::now() >= deadline {
             return Err(failure.context(format!(

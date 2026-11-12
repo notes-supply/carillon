@@ -137,6 +137,45 @@ async fn stalled_providers_are_reported_within_the_operator_timeout() -> Result<
 }
 
 #[tokio::test]
+async fn a_core_that_does_not_answer_is_reported_with_where_its_log_is() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    fs::write(
+        directory.path().join("credentials/operator.token"),
+        "test-operator",
+    )?;
+    let waited = crate::application::operations::wait_until_healthy(&state.config, Duration::ZERO)
+        .await
+        .err()
+        .context("a core nothing serves was healthy")?;
+    let expected = format!(
+        "core at 127.0.0.1:1 did not answer; its log, {}/logs/core.log, says why",
+        directory.path().display()
+    );
+    assert!(format!("{waited:#}").contains(&expected), "{waited:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_core_that_refuses_the_operator_is_not_reported_as_silent() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    fs::write(directory.path().join("credentials/operator.token"), "wrong")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+    let refuse = Router::new().route("/v1/status", get(|| async { StatusCode::FORBIDDEN }));
+    tokio::spawn(async move { axum::serve(listener, refuse).await });
+    let waited = crate::application::operations::wait_until_healthy(&state.config, Duration::ZERO)
+        .await
+        .err()
+        .context("a core that refused the operator was healthy")?;
+    let waited = format!("{waited:#}");
+    assert!(waited.contains("403 Forbidden"), "{waited}");
+    assert!(!waited.contains("did not answer"), "{waited}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_health_mismatches_keep_configured_identity_unavailable() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
