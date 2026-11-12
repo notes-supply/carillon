@@ -36,9 +36,9 @@ sources = ["package.json", "packages/*/package.json", "pnpm-lock.yaml", "pnpm-wo
 outputs = ["node_modules/.pnpm/lock.yaml"]
 
 [tasks.format]
-description = "Format Rust, TypeScript, JavaScript and JSON"
+description = "Format Rust, TypeScript, JavaScript, JSON and the web page"
 depends = ["install"]
-run = ["cargo fmt --all", "oxfmt '**/*.{ts,mjs,json}'"]
+run = ["cargo fmt --all", "oxfmt '**/*.{ts,mjs,js,json,css,html}'"]
 
 [tasks.check]
 description = "Run static checks and Rust/TypeScript tests"
@@ -73,9 +73,11 @@ run = [
 description = "Check formatting, typed lint, types and TypeScript tests"
 depends = ["install"]
 run = [
-  "oxfmt --check '**/*.{ts,mjs,json}'",
-  "oxlint packages --deny-warnings --report-unused-disable-directives-severity error",
+  "oxfmt --check '**/*.{ts,mjs,js,json,css,html}'",
+  "oxlint packages crates/carillon-web --deny-warnings --report-unused-disable-directives-severity error",
   "tsc --noEmit",
+  # The web page's modules are plain JavaScript, checked against the DOM.
+  "tsc --noEmit -p crates/carillon-web",
   "knip --no-progress",
   "vitest run",
 ]

@@ -3,19 +3,76 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Carillon</title>
+    <link rel="icon" href="icon.svg" />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
   </head>
   <body>
-    <h1>Carillon</h1>
-    <p id="status"></p>
-    <ul id="conversations"></ul>
-    <form id="send">
-      <select name="agent" aria-label="Agent"></select>
-      <input name="text" aria-label="Message" autocomplete="off" />
-      <input name="file" type="file" multiple aria-label="Files" />
-      <button>Send</button>
-    </form>
-    <ol id="turns"></ol>
-    <script type="module" src="app.js"></script>
+    <div class="app in-room" id="app" hidden>
+      <nav class="rail" aria-label="Conversations">
+        <header class="rail-head">
+          <h1 class="wordmark">Carillon</h1>
+          <a class="button" id="new" href="#">New conversation</a>
+        </header>
+        <ol class="chats" id="chats"></ol>
+        <p class="rail-note" id="no-chats" hidden>
+          No conversations yet. The ones you start are listed here, latest first.
+        </p>
+        <button class="button" id="more-chats" type="button" hidden>
+          Show earlier conversations
+        </button>
+        <footer class="rail-note" id="custom" hidden>
+          This page is your own copy, served from the web provider's
+          <code>site</code> folder in place of the release's.
+        </footer>
+      </nav>
+      <main class="room">
+        <header class="room-head">
+          <button class="button back" id="back" type="button">Conversations</button>
+          <h2 id="title"></h2>
+          <span class="with" id="with"></span>
+        </header>
+        <p class="notice" id="notice" role="status" hidden></p>
+        <div class="transcript" id="transcript">
+          <div class="column">
+            <button class="button" id="earlier" type="button" hidden>Show earlier turns</button>
+            <ol class="turns" id="turns"></ol>
+            <p class="invitation" id="invitation" hidden>
+              Write below to start this conversation. Attach files by choosing, dropping or pasting
+              them. Type <code>/</code> to run one of the agent's commands.
+            </p>
+          </div>
+        </div>
+        <div class="composer-edge">
+          <div class="column">
+            <p class="error" id="error" role="alert" hidden></p>
+            <ul class="commands" id="commands" role="listbox" aria-label="Commands" hidden></ul>
+            <form class="composer" id="composer">
+              <ul class="files" id="attached" aria-label="Files to send" hidden></ul>
+              <textarea
+                id="text"
+                rows="1"
+                placeholder="Write to Carillon"
+                aria-label="Message"
+              ></textarea>
+              <div class="composer-foot">
+                <button class="button" id="attach" type="button">Attach files</button>
+                <input id="file" type="file" multiple hidden />
+                <select id="agent" aria-label="Agent for this conversation" hidden></select>
+                <span class="hint">Enter sends. Shift+Enter starts a new line.</span>
+                <button class="button primary" id="send">Send</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </main>
+    </div>
+    <main class="door" id="door" hidden>
+      <h1 class="wordmark">Carillon</h1>
+      <p id="door-why" role="status"></p>
+    </main>
+    <noscript>Carillon's chat needs JavaScript.</noscript>
   </body>
 </html>

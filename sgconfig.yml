@@ -3,4 +3,4 @@ ruleDirs:
 testConfigs:
   - testDir: lint/ast-grep/tests
 languageGlobs:
-  typescript: ["*.mjs"]
+  typescript: ["*.mjs", "*.js"]

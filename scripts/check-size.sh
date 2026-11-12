@@ -13,7 +13,7 @@ next=$(mktemp)
 trap 'rm -f "$next"' EXIT
 
 status=0
-git ls-files -z -- '*.rs' '*.ts' '*.mjs' '*.sh' | xargs -0 wc -l | awk '$2 != "total"' |
+git ls-files -z -- '*.rs' '*.ts' '*.mjs' '*.js' '*.css' '*.html' '*.sh' | xargs -0 wc -l | awk '$2 != "total"' |
   awk -v limit="$LIMIT" -v budget="$BUDGET" -v out="$next" -v update="$update" '
     FILENAME == budget { allowed[$2] = $1; next }
     {

@@ -45,6 +45,10 @@ it("follows inputs across languages", () => {
     "release",
     "ts",
   ]);
+  // The web page's modules, styles and markup are formatted, linted and typed.
+  for (const file of ["app.js", "style.css", "index.html"])
+    expect(lanes([`crates/carillon-web/site/${file}`])).toEqual(["lint", "release", "rust", "ts"]);
+  expect(lanes(["crates/carillon-web/site/literata.woff2"])).toEqual(["lint", "release", "rust"]);
   // TypeScript formatting covers JSON anywhere.
   expect(lanes(["crates/carillon-discord-module/fixtures/cards.json"])).toEqual([
     "lint",
