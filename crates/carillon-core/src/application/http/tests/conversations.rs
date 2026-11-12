@@ -79,7 +79,7 @@ async fn an_interface_reads_its_own_conversations_and_no_other_caller_reads_any(
     accept(&state, "elsewhere", "another chat").await?;
     let named = format!("{LIST}?audience_id=web%20chat%2F1");
     let page: ConversationPage = exactly(read(&state, "test-interface", own, &named).await?)?;
-    assert_eq!(page.conversations, [conversation.clone()]);
+    assert_eq!(page.conversations, std::slice::from_ref(conversation));
     let unknown = format!("{LIST}?audience_id=unknown");
     let page: ConversationPage = exactly(read(&state, "test-interface", own, &unknown).await?)?;
     assert!(page.conversations.is_empty());
