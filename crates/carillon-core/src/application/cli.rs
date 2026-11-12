@@ -33,7 +33,7 @@ use super::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
         operator_url, print_health, registry_status, status, wait_until_healthy,
     },
-    settings::settings,
+    settings::{Named, settings},
     setup::{Options as SetupOptions, init, setup},
     update::update,
 };
@@ -187,8 +187,9 @@ and applies when Carillon restarts.")]
     },
     /// Show one turn's state, output or failure explanation.
     Inspect { turn_id: String },
-    /// List the routed channels, or show and change one channel's settings,
-    /// or with `--agent` an agent's own, which its channels inherit.
+    /// List each interface's routed channels, or show and change one
+    /// channel's settings, or with `--agent` an agent's own, which its
+    /// channels inherit.
     #[command(after_help = "\
 Changes apply left to right, each to the page read just before it, and
 the first one refused stops the rest, naming its key and those already
@@ -198,13 +199,17 @@ ID or name. `reset <key>` returns a line to what it inherits. An unknown
 key or value lists what the line accepts.
 
   carillon settings
-  carillon settings 300 thinking=high
+  carillon settings --interface discord-private 300 thinking=high
   carillon settings 300 reset model
   carillon settings --agent assistant model=openai-codex/gpt-6.1-sol")]
     Settings {
         /// The agent whose own settings to show or change.
         #[arg(long, value_name = "ID")]
         agent: Option<String>,
+        /// The interface the channel belongs to. It may be left out while
+        /// only one interface is enabled.
+        #[arg(long, value_name = "ID", conflicts_with = "agent")]
+        interface: Option<String>,
         /// The channel's ID, unless `--agent` names an agent, then the
         /// changes: `key=value` or `reset <key>`.
         #[arg(value_name = "CHANNEL] [CHANGE")]
@@ -323,8 +328,13 @@ pub(crate) async fn run() -> Result<()> {
             print_recent(&load(&home()?)?, event_id.as_deref(), limit).await?;
         }
         Command::Inspect { turn_id } => print_inspection(&load(&home()?)?, &turn_id).await?,
-        Command::Settings { agent, words } => {
-            print!("{}", settings(&load(&home()?)?, agent, &words).await?);
+        Command::Settings {
+            agent,
+            interface,
+            words,
+        } => {
+            let named = agent.map_or(Named::Interface(interface), Named::Agent);
+            print!("{}", settings(&load(&home()?)?, named, &words).await?);
         }
         Command::Backup { output } => {
             let home = home()?;

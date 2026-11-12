@@ -1,7 +1,9 @@
 //! `carillon settings`: the settings pages interfaces and runtimes own, at
-//! the terminal. It lists the routed channels, prints one channel's or one
-//! agent's page, and applies changes left to right, each drawn from the
-//! page read just before it. Owners decide; this draws what they answer.
+//! the terminal. It lists each interface's routed channels, prints one
+//! channel's or one agent's page, and applies changes left to right, each
+//! drawn from the page read just before it. A channel belongs to the
+//! interface the operator names, and no other interface is asked about it.
+//! Owners decide; this draws what they answer.
 
 use std::{fmt::Write as _, time::Duration};
 
@@ -13,7 +15,7 @@ use carillon_installation::{
 use carillon_protocol::settings::{
     Change, Choice, Page, RuntimePart, RuntimeSettings, Setting, SettingsRequest, Subject, Value,
 };
-use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::{Deserialize, de::DeserializeOwned};
 
 use super::operations::operator_url;
@@ -36,6 +38,11 @@ impl Edit {
     }
 }
 
+pub(super) enum Named {
+    Agent(String),
+    Interface(Option<String>),
+}
+
 /// Where a page is read and changed.
 enum Owner {
     /// The page an interface provider serves for one of its channels.
@@ -51,11 +58,11 @@ struct Operator {
 }
 
 /// What `carillon settings` prints: with no channel or agent named, one
-/// line per routed channel; else the named page once `words`, after the
-/// channel, have changed it.
+/// line per routed channel under its interface; else the named page once
+/// `words`, after the channel, have changed it.
 pub(super) async fn settings(
     config: &LoadedConfig,
-    agent: Option<String>,
+    named: Named,
     words: &[String],
 ) -> Result<String> {
     let operator = Operator {
@@ -66,21 +73,22 @@ pub(super) async fn settings(
             .build()?,
         token: config.credential("operator")?,
     };
-    let (owner, edits, mut page) = if let Some(agent_id) = agent {
-        let edits = edits(words)?;
-        let owner = Owner::Agent {
-            relay: operator_url(config, "/v1/settings")?,
-            agent_id,
-        };
-        let page = owner.page(&operator, None).await?;
-        (owner, edits, page)
-    } else if let Some((channel, words)) = words.split_first() {
-        let edits = edits(words)?;
-        let (owner, page) = served(config, &operator, channel).await?;
-        (owner, edits, page)
-    } else {
-        return channels(config, &operator).await;
+    let (owner, words) = match (named, words.split_first()) {
+        (Named::Agent(agent_id), _) => {
+            let relay = operator_url(config, "/v1/settings")?;
+            (Owner::Agent { relay, agent_id }, words)
+        }
+        (Named::Interface(interface), Some((channel, words))) => {
+            let provider = addressed(config, interface.as_deref())?;
+            let page = endpoint(provider, &["v1", "channels", channel, "settings"])?;
+            (Owner::Channel(page), words)
+        }
+        (Named::Interface(interface), None) => {
+            return channels(config, interface.as_deref(), &operator).await;
+        }
     };
+    let edits = edits(words)?;
+    let mut page = owner.page(&operator, None).await?;
     for (applied, edit) in edits.iter().enumerate() {
         let next = match change(&page, edit) {
             // An owner's refusal need not say which line it refused.
@@ -339,39 +347,67 @@ fn endpoint(provider: &Provider, path: &[&str]) -> Result<Url> {
     Ok(url)
 }
 
-/// The page of `channel` from the interface provider that routes it.
-async fn served(
+fn addressed<'a>(config: &'a LoadedConfig, named: Option<&str>) -> Result<&'a Provider> {
+    let enabled: Vec<&Provider> = interfaces(config).collect();
+    let ids = || {
+        let ids: Vec<&str> = enabled
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
+        ids.join(", ")
+    };
+    match (named, enabled.as_slice()) {
+        (Some(id), _) => (enabled.iter().copied())
+            .find(|provider| provider.id == id)
+            .with_context(|| format!("{id} is not an enabled interface of: {}", ids())),
+        (None, [only]) => Ok(only),
+        (None, []) => bail!("carillon.toml enables no interface"),
+        (None, _) => bail!(
+            "name the channel's interface with --interface, one of: {}",
+            ids()
+        ),
+    }
+}
+
+/// The routed channels of each enabled interface provider, or of `named`
+/// alone, one line each under their interface's ID. An interface that does
+/// not list its channels says so in their place; when none lists any, that
+/// is the failure.
+async fn channels(
     config: &LoadedConfig,
+    named: Option<&str>,
     operator: &Operator,
-    channel: &str,
-) -> Result<(Owner, Page)> {
-    for provider in interfaces(config) {
-        let url = endpoint(provider, &["v1", "channels", channel, "settings"])?;
-        let response = operator.send(operator.client.get(url.clone())).await?;
-        if response.status() == StatusCode::NOT_FOUND {
-            continue;
-        }
-        let page = answer(response).await?;
-        return Ok((Owner::Channel(url), page));
-    }
-    bail!("no interface routes channel {channel}; `carillon settings` lists the routed channels")
-}
-
-/// Every routed channel of every enabled interface provider, one line each.
-async fn channels(config: &LoadedConfig, operator: &Operator) -> Result<String> {
-    let mut pages = Vec::new();
-    for provider in interfaces(config) {
+) -> Result<String> {
+    let providers: Vec<&Provider> = match named {
+        Some(_) => vec![addressed(config, named)?],
+        None => interfaces(config).collect(),
+    };
+    let mut text = String::new();
+    let mut failures = Vec::new();
+    for provider in &providers {
         let url = endpoint(provider, &["v1", "channels"])?;
-        let listed: Vec<Page> = answer(operator.send(operator.client.get(url)).await?)
-            .await
-            .with_context(|| format!("{} did not list its channels", provider.id))?;
-        pages.extend(listed);
+        let listed = match operator.send(operator.client.get(url)).await {
+            Ok(response) => answer::<Vec<Page>>(response).await,
+            Err(failure) => Err(failure),
+        };
+        let _ = writeln!(text, "{}", provider.id);
+        match listed {
+            Ok(pages) => text.push_str(&summary(&pages)),
+            Err(failure) => {
+                let failure = format!("{} did not list its channels: {failure:#}", provider.id);
+                let _ = writeln!(text, "  ⚠ {failure}");
+                failures.push(failure);
+            }
+        }
     }
-    Ok(summary(&pages))
+    if !failures.is_empty() && failures.len() == providers.len() {
+        bail!("{}", failures.join("\n"));
+    }
+    Ok(text)
 }
 
-/// One line per page: its subject's ID, its title and the values that
-/// apply there, then why its runtime's lines are missing, if they are.
+/// One indented line per page: its subject's ID, its title and the values
+/// that apply there, then why its runtime's lines are missing, if they are.
 fn summary(pages: &[Page]) -> String {
     let width = |text: fn(&Page) -> &str| {
         pages
@@ -386,7 +422,7 @@ fn summary(pages: &[Page]) -> String {
     for page in pages {
         let values: Vec<String> = page.settings().filter_map(Setting::value_name).collect();
         let mut line = format!(
-            "{:<id_width$}{:<title_width$}{}",
+            "  {:<id_width$}{:<title_width$}{}",
             subject_id(page),
             page.title,
             values.join(", ")
