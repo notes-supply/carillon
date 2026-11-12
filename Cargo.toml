@@ -9,6 +9,7 @@ members = [
     "crates/carillon-installation",
     "crates/carillon-interface",
     "crates/carillon-wasm",
+    "crates/carillon-web",
     "examples/card-colours",
 ]
 

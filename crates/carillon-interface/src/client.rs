@@ -2,6 +2,7 @@
 use crate::InterfaceError;
 use anyhow::Result;
 use carillon_installation::loopback;
+use carillon_protocol::conversations::{ConversationPage, Transcript};
 use carillon_protocol::model::{
     CommandCatalog, ConversationQuery, Delivery, DeliveryAck, DeliveryOutcome,
     DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
@@ -129,6 +130,58 @@ impl CoreClient {
         let page: JobPage =
             core_json(self.request(Method::GET, url), "read named jobs from core").await?;
         Ok(page.jobs)
+    }
+
+    /// A page of this provider's conversations, the latest active first:
+    /// those whose activity marker is below `before`, the `next` of the page
+    /// read last.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn conversations(
+        &self,
+        before: Option<i64>,
+    ) -> Result<ConversationPage, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/conversations"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        if let Some(before) = before {
+            url.query_pairs_mut()
+                .append_pair("before", &before.to_string());
+        }
+        core_json(
+            self.request(Method::GET, url),
+            "read conversations from core",
+        )
+        .await
+    }
+
+    /// A page of the turns of this provider's conversation of `agent_id`
+    /// with `audience_id`, oldest first: its newest, or those before the
+    /// turn `before`. A conversation core does not have reads as empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal or a transient failure.
+    pub async fn transcript(
+        &self,
+        agent_id: &str,
+        audience_id: &str,
+        before: Option<&str>,
+    ) -> Result<Transcript, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/conversations"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| InterfaceError::protocol("core URL cannot have a path".to_owned()))?
+            .extend([agent_id, audience_id]);
+        if let Some(before) = before {
+            url.query_pairs_mut().append_pair("before", before);
+        }
+        core_json(
+            self.request(Method::GET, url),
+            "read a conversation from core",
+        )
+        .await
     }
 
     /// Asks core to relay a person's control of the running turn `event_id`
@@ -336,10 +389,7 @@ async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T,
             InterfaceError::protocol("The runtime gave an unusable answer.".to_owned())
         });
     }
-    let detail = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
-        .filter(|detail| !detail.is_empty());
+    let detail = refusal_words(&body);
     warn!(%status, detail, "settings or command call was rejected");
     Err(InterfaceError {
         status,
@@ -359,15 +409,21 @@ async fn core_send(
     if status.is_success() {
         return Ok(response);
     }
-    let detail = response.text().await.unwrap_or_default();
+    let body = response.bytes().await.unwrap_or_default();
     Err(InterfaceError {
         status,
-        message: if detail.is_empty() {
-            format!("{action}: core responded with {status}")
-        } else {
-            format!("{action}: {detail}")
-        },
+        message: refusal_words(&body)
+            .unwrap_or_else(|| format!("{action}: core responded with {status}")),
     })
+}
+
+/// What a refusal says for a person to read: its `error`, as core and the
+/// runtimes write one.
+fn refusal_words(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .filter(|detail| !detail.is_empty())
 }
 
 async fn core_json<T: DeserializeOwned>(

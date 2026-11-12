@@ -192,8 +192,8 @@ async fn failures_worth_repeating_are_told_from_final_ones() -> anyhow::Result<(
             (status, transient)
         );
         assert_eq!(
-            failure.message,
-            "submit event to core: {\"error\":\"refused\"}"
+            failure.message, "refused",
+            "a refusal carries core's own words, which an interface may show"
         );
     }
     fake.lock().await.submitted.clear();
