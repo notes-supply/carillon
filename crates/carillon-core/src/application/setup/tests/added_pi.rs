@@ -54,7 +54,7 @@ impl Fixture {
     fn run(&self, workspace: bool) -> anyhow::Result<std::process::Output> {
         let named = ("CARILLON_TEST_SETUP_WORKSPACE", self.workspace.as_os_str());
         let variables = if workspace { &[named][..] } else { &[] };
-        rerun(CHILD, self.directory.path(), &self.home, variables)
+        run_child(CHILD, self.directory.path(), &self.home, variables)
     }
 }
 
@@ -75,9 +75,7 @@ pub(super) fn fake_providers(directory: &Path, interfaces: &[&str]) -> anyhow::R
     Ok(())
 }
 
-/// Runs the ignored test `test` as setup's process, with the fake programs
-/// in `directory` first on its path and `variables` in its environment.
-pub(super) fn rerun(
+pub(super) fn run_child(
     test: &str,
     directory: &Path,
     home: &Path,

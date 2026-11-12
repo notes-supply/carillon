@@ -1,11 +1,6 @@
 #!/bin/sh
 set -eu
 
-# One message through the web chat, as a browser sends it: sign in with the
-# link `carillon web open` prints, send TEXT in a new conversation and wait
-# for the deterministic model's answer. The signed-in request header is left
-# in HEADERS, for a caller that goes on to sign out.
-# usage: test-web-chat.sh TEXT HEADERS
 text=${1:?text required}
 headers=${2:?headers file required}
 link=$(carillon web open --print)

@@ -288,11 +288,7 @@ pub(crate) async fn run() -> Result<()> {
             "{}",
             init(&home()?, workspace.as_deref(), base_port, &interface)?.display()
         ),
-        Command::Setup { options, wait } => {
-            let home = home()?;
-            let added = setup(&home, options, &mut Terminal)?;
-            serve_added(&home, &added, &wait).await?;
-        }
+        Command::Setup { options, wait } => set_up(&home()?, options, &wait).await?,
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
@@ -459,10 +455,16 @@ async fn restart(home: &Path, config: &LoadedConfig, timeout: Duration, force: b
     services.control(Action::Start).await
 }
 
-/// Has a running Carillon serve the interfaces setup `added`. Core takes a
-/// new provider only when it starts, so the services restart, drained as
-/// `carillon restart` drains them. A stopped Carillon stays stopped.
-async fn serve_added(home: &Path, added: &[Bundled], wait: &Wait) -> Result<()> {
+/// Runs setup, then has a running Carillon serve the interfaces it was told
+/// to add to an installation that existed. Core takes a new provider only
+/// when it starts.
+async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
+    let added = if home.join("carillon.toml").exists() {
+        options.interfaces.clone()
+    } else {
+        Vec::new()
+    };
+    setup(home, options, &mut Terminal)?;
     if added.is_empty() {
         return Ok(());
     }

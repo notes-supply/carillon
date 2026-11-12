@@ -5,8 +5,7 @@
 //! as Discord's asks for the bot and who answers in which channel. Each
 //! provider's program owns its part; setup only asks the questions that
 //! choose between them and runs them in order. A rerun keeps what is
-//! already set up when asked to. Told only `--interface`, a rerun adds that
-//! interface and asks about nothing else.
+//! already set up when asked to.
 
 use std::{
     collections::BTreeMap,
@@ -86,9 +85,6 @@ struct Project {
     workspace: PathBuf,
 }
 
-/// Returns the interfaces it added to an existing installation, which a
-/// running Carillon serves only once it restarts.
-///
 /// # Errors
 ///
 /// Returns an error when a question goes unanswered, a provider's program
@@ -97,7 +93,7 @@ pub(super) fn setup(
     home: &Path,
     mut options: Options,
     questions: &mut impl Questions,
-) -> Result<Vec<Bundled>> {
+) -> Result<()> {
     let config_path = home.join("carillon.toml");
     let existing = config_path.exists();
     let only_interfaces = options.runtimes.is_empty() && options.workspace.is_none();
@@ -106,7 +102,7 @@ pub(super) fn setup(
         for interface in &options.interfaces {
             set_up_interface(home, interface.program(), interface.id())?;
         }
-        return Ok(options.interfaces);
+        return Ok(());
     }
     let runtimes = runtimes(home, &options)?;
     let runtimes = if runtimes.is_empty() {
@@ -160,14 +156,9 @@ pub(super) fn setup(
             set_up_interface(home, &interface.program, &interface.id)?;
         }
     }
-    Ok(if existing {
-        options.interfaces.clone()
-    } else {
-        Vec::new()
-    })
+    Ok(())
 }
 
-/// Has `program` set up the interface entry `id`, asking what it needs.
 fn set_up_interface(home: &Path, program: &str, id: &str) -> Result<()> {
     let finished = Command::new(provider_binary(program)?)
         .args(["setup", "--provider", id])

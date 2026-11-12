@@ -90,10 +90,8 @@ if [ "$OWN_UNITS" -eq 1 ] && ! systemctl --user disable --now carillon.target; t
     [ "$active_state" = inactive ] || exit 1
 fi
 if [ "$OWN_UNITS" -eq 1 ]; then
-  # A service is this installation's when it names it, as the core unit does
-  # above, whichever release registered it. Its link goes first: disabling
-  # the target removes links to it, not one that a unit enabled by hand left
-  # in the target's wants directory.
+  # Disabling the target removes links to it, not one that a unit enabled by
+  # hand left in the target's wants directory.
   for unit in "$UNIT_DIR"/carillon-*.service; do
     if [ -f "$unit" ] && grep -Fqx "$OWN_LINE" "$unit"; then
       rm -f -- "$UNIT_DIR/carillon.target.wants/${unit##*/}" "$unit"

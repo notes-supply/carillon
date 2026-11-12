@@ -6,6 +6,10 @@ use serde::Deserialize;
 
 use crate::config::{DEFAULT_UPLOAD_MIB, DeliveryMode, ProviderRole, RELEASE_VERSION};
 
+/// Core's own default limit on one file: a browser fetches an answer's files
+/// from this machine, so the web chat takes whatever core keeps.
+const WEB_UPLOAD_MIB: u64 = 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bundled {
     Web,
@@ -47,8 +51,7 @@ impl Bundled {
         }
     }
 
-    /// How its entry says an answer reaches people. A web chat's people read
-    /// answers from core's record; Discord sends each one itself.
+    /// How its entry says an answer reaches people.
     #[must_use]
     pub const fn delivery(self) -> DeliveryMode {
         match self {
@@ -57,13 +60,11 @@ impl Bundled {
         }
     }
 
-    /// Its entry's `max_upload_mib`: Discord's own limit, and far more for
-    /// the web chat, whose files a browser fetches from this machine. A
-    /// runtime's entry has none.
+    /// Its entry's `max_upload_mib`.
     #[must_use]
     pub const fn max_upload_mib(self) -> Option<u64> {
         match self {
-            Self::Web => Some(1024),
+            Self::Web => Some(WEB_UPLOAD_MIB),
             Self::Discord => Some(DEFAULT_UPLOAD_MIB),
             Self::Pi | Self::T3 => None,
         }

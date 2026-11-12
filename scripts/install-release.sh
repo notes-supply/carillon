@@ -2,6 +2,12 @@
 set -eu
 umask 077
 
+# Setup without `--interface web` or the Discord options asks for everything
+# at the terminal (`carillon setup`); with either it writes the registry, and
+# Discord's settings from its options, and asks nothing. An update publishes
+# the application and service definitions, expects the providers it bundles
+# in carillon.toml and creates the core database an installation lacks; it
+# rewrites no other configuration, credentials or state.
 usage() {
   echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
   echo "       install.sh --interface web [--base-port PORT] [--workspace PATH]    (the web chat alone; asks nothing)" >&2
@@ -10,12 +16,6 @@ usage() {
   exit 2
 }
 
-# Setup without `--interface web` or the Discord options asks for everything
-# at the terminal (`carillon setup`); with either it writes the registry, and
-# Discord's settings from its options, and asks nothing. An update publishes
-# the application and service definitions, expects the providers it bundles in carillon.toml
-# and creates the core database an installation lacks; it rewrites no other
-# configuration, credentials or state.
 MODE=setup
 CHECK=0
 case "$#:$*" in
@@ -162,10 +162,8 @@ if [ "$MODE" = setup ] && [ -f "$UNIT_DIR/carillon-core.service" ] &&
   grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" \
     "$UNIT_DIR/carillon-core.service"
 then
-  # The units this release ships, whose names hold no spaces.
-  # shellcheck disable=SC2046
-  states=$(systemctl --user show --property=ActiveState --value \
-    $(cd "$SOURCE/systemd" && LC_ALL=C ls)) || {
+  # Every unit this release ships, by its file's name.
+  states=$(cd "$SOURCE/systemd" && systemctl --user show --property=ActiveState --value -- *) || {
     echo "cannot tell whether Carillon at $CARILLON_HOME is running; nothing was changed" >&2
     exit 1
   }
@@ -209,9 +207,8 @@ if [ "$GUIDED" -eq 1 ]; then
 fi
 # Unattended setup keeps an installation's registry, credentials and durable
 # state: init creates a new installation, or starts one carried without state
-# fresh on this release. Options that name Discord register Discord, and
-# `--interface web` the web chat. Only the Discord provider's own settings
-# file is (re)written from the arguments.
+# fresh on this release. Only the Discord provider's own settings file is
+# (re)written from the arguments.
 if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
   set --
   [ -z "$WEB" ] || set -- "$@" --interface web
@@ -286,12 +283,11 @@ sync -f -- "$CARILLON_HOME"
 # application expects it.
 [ "$MODE" = setup ] || "$APP/bin/carillon" --home "$CARILLON_HOME" init >/dev/null
 if [ "$MODE" = setup ]; then
-  # Guided setup names its own token file; otherwise the token goes here by hand.
+  # Discord's unattended options name no token, which goes here by hand.
   [ -z "$DISCORD" ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
     install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
   chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
     "$CARILLON_HOME/logs"
-  # The web chat alone has no provider settings file.
   find "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers" "$CARILLON_HOME/credentials" \
     -maxdepth 1 -type f \( -name '*.toml' -o -name '*.token' \) -exec chmod 0600 {} +
 fi

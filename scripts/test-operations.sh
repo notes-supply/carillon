@@ -5,11 +5,6 @@ set -eu
 # invoking shell's logging filter. This affects only the test's child services.
 export RUST_LOG=carillon=info
 
-# Everyday operation of installed releases through the owner's PATH entry point:
-# installation resolution, service control, logs, provider commands, and
-# configuration-preserving updates with their refusals and failures. The user
-# service manager is substituted by test-manager.sh, which runs the packaged
-# services as their units say, so health checks exercise the real programs.
 RELEASE=$(realpath -e -- "${1:?release directory required}")
 VERSION=${RELEASE##*/carillon-}
 BASE_PORT=$((${CARILLON_TEST_BASE_PORT:-44800} + 30))
@@ -29,7 +24,6 @@ unset CARILLON_HOME CARILLON_MAINTENANCE_LOCK CARILLON_SKIP_SYSTEMD_RELOAD
 mkdir -p "$HOME/workspace" "$COMMANDS" "$MANAGER"
 
 cp "$(dirname -- "$0")/test-manager.sh" "$COMMANDS/systemctl"
-# What Carillon asks of the service manager names the units the release ships.
 SERVICES='carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service'
 RUNNING='--user show --property=ActiveState --value carillon.target'
 PARTS='--user show --property=ConsistsOf --value carillon.target'
@@ -201,11 +195,6 @@ grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked.l
 running
 printf 'operations passed: entry point, resolution, start/drained restart, logs, provider commands, Discord module, lock\n'
 
-# The web chat is added to this running installation with one command, which
-# asks nothing. When the service manager fails the restart, the entry stays
-# for the next one and the command says so; run again, it restarts Carillon
-# drained. Everything below runs with the web chat registered and no browser
-# reading it.
 cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
 refuse add-web-unstopped env FAKE_STOP=fail carillon setup --interface web
 grep -F "web is in carillon.toml and starts at the next \`carillon restart\`" \
@@ -227,7 +216,7 @@ printf 'web chat added passed: one command on a running installation, restarted 
 # the replaced release, so it is refused before it asks or writes anything:
 # with options or guided, with registration's reload skipped, and while only
 # one of its services runs.
-ACTIVE="--user show --property=ActiveState --value $SERVICES carillon.target"
+ACTIVE="--user show --property=ActiveState --value -- $(cd "$RELEASE/systemd" && set -- * && echo "$*")"
 app_inode=$(stat -c %i "$INSTALLATION/app")
 snapshot
 for setup in options guided skip-reload member; do

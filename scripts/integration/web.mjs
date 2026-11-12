@@ -1,11 +1,3 @@
-/**
- * The web provider with a real core and deterministic Pi, driven as a
- * browser drives it: sign in, send, read, control, restart. The
- * installation has the web chat alone, registered as setup registers it. A
- * stand-in for the user service manager runs the three services from this
- * checkout, so `carillon restart` stops and starts them as it does an
- * installation's.
- */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";

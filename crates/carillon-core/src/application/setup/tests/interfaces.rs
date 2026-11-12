@@ -78,7 +78,7 @@ fn each_enabled_interface_is_set_up_by_its_own_program_with_its_own_id() -> anyh
     }
     added_pi::fake_providers(directory.path(), &["discord", "example"])?;
 
-    let output = added_pi::rerun(added_pi::CHILD, directory.path(), &home, &[])?;
+    let output = added_pi::run_child(added_pi::CHILD, directory.path(), &home, &[])?;
     assert!(output.status.success(), "{output:?}");
     for (program, arguments) in [
         ("discord", "setup --provider discord-private\n"),
@@ -112,12 +112,9 @@ fn setup_adding_an_interface_child() -> anyhow::Result<()> {
         interfaces: vec![interface],
         ..options()
     };
-    assert_eq!(setup(Path::new(&home), named, &mut Unasked)?, [interface]);
-    Ok(())
+    setup(Path::new(&home), named, &mut Unasked)
 }
 
-/// The walk would refuse the disabled runtime and set the other interface
-/// up again.
 #[test]
 fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> anyhow::Result<()> {
     let cases = [
@@ -139,13 +136,14 @@ fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> 
         let home = directory.path().join("home");
         let agents = vec![assistant(directory.path())];
         let config_path = initialize(&home, 44_000, &[has, Bundled::Pi], agents)?;
-        set_provider(&config_path, "runtime-pi", false)?;
+        let refused_by_a_full_walk = "runtime-pi";
+        set_provider(&config_path, refused_by_a_full_walk, false)?;
         let before = std::fs::read_to_string(&config_path)?;
         added_pi::fake_providers(directory.path(), &["discord", "web"])?;
 
         let named = ("CARILLON_TEST_SETUP_INTERFACE", adds.name().as_ref());
         for _ in 0..2 {
-            let output = added_pi::rerun(ADD, directory.path(), &home, &[named])?;
+            let output = added_pi::run_child(ADD, directory.path(), &home, &[named])?;
             assert!(output.status.success(), "{output:?}");
         }
         let (id, program) = (adds.id(), adds.program());

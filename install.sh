@@ -47,8 +47,6 @@ done
 systemctl --user show-environment >/dev/null 2>&1 ||
   fail "no systemd user manager answers for $(id -un); log in to this account directly (not with su), or have an administrator run: loginctl enable-linger $(id -un)"
 
-# Without its Discord options or `--interface web`, the release's installer asks at
-# the terminal.
 unattended=0
 for argument in "$@"; do
   case "$argument" in --guild-id | --bot-user-id | --user-id | --route | --interface) unattended=1 ;; esac

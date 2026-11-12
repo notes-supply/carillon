@@ -3,8 +3,6 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-# Cargo embeds this identity in the core, Discord and web binaries. A supplied version
-# is an assertion, not an independent label for differently versioned artifacts.
 VERSION=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 [ "${1:-$VERSION}" = "$VERSION" ] || {
   echo "requested release version $1 differs from the Carillon crate version $VERSION" >&2
@@ -92,8 +90,6 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
 install -m 0755 "target/$TARGET/release/carillon-web" "$STAGE/bin/carillon-web"
-# The web chat's page ships as the files it is written in, which the provider
-# reads from lib/web beside its bin on each request.
 cp -R crates/carillon-web/site "$STAGE/lib/web"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm "$STAGE/lib/carillon_discord_module.wasm"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm "$STAGE/lib/examples/card-colours.wasm"
@@ -117,8 +113,6 @@ install -m 0644 "$PHOTON/photon_rs_bg.wasm" "$STAGE/bin/"
 # at bun-v1.4.4), Pi's, and notices for the Rust crates and npm packages.
 install -m 0644 LICENSE "$STAGE/licenses/Apache-2.0.txt"
 install -m 0644 licenses/pi-coding-agent.txt licenses/bun.md licenses/MIT.txt "$STAGE/licenses/"
-# What the page ships that is another's, such as a typeface, has its licence
-# beside it as a text file, which the provider never serves.
 find crates/carillon-web/site -maxdepth 1 -name '*.txt' -exec install -m 0644 {} "$STAGE/licenses/" \;
 cargo about generate --locked --fail -c licenses/about.toml licenses/rust.hbs -o "$STAGE/licenses/rust.txt"
 node scripts/npm-notices.mjs "$STAGE" >"$STAGE/licenses/npm.txt"

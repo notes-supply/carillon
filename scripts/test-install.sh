@@ -60,12 +60,8 @@ done
   printf '%s\n' "release must contain exactly the target and five service units" >&2
   exit 1
 }
-# The target wants every bundled runtime and interface; one an installation
-# did not choose finds itself absent from the registry and ends at once.
 grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service' \
   "$RELEASE/systemd/carillon.target" >/dev/null
-# The page ships as the files it is written in, and a licence beside them is
-# among the release's notices too.
 diff -r "$ROOT/crates/carillon-web/site" "$RELEASE/lib/web"
 find "$ROOT/crates/carillon-web/site" -maxdepth 1 -name '*.txt' | while read -r notice; do
   cmp "$notice" "$RELEASE/licenses/${notice##*/}"
