@@ -169,7 +169,7 @@ These statuses mean the same on every route:
 
 | Status | Meaning | What the page does |
 | --- | --- | --- |
-| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token the request carried, if it is still the one stored, and ask the person to run `carillon web open`. |
+| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token the request carried, if it is still the one stored, and ask the person to run `carillon web open`. If another token is stored by then, make the request again with that one. |
 | 403, 421 | The request did not come from the page's own origin, or named another host. | Nothing. A page loaded from the provider never sees these. |
 | 503 | Carillon cannot answer now: core is away, as it is for a moment at every restart, or it failed, or the provider is stopping. | Keep what is on screen and try again. The body is always the same sentence. |
 
@@ -242,7 +242,9 @@ characters. It is empty when that message had only files.
 Poll the first page of this list, about once a second while the page is
 visible. Stop while it is hidden, and poll at once when it shows again.
 After a 503 or a failed fetch, wait longer each time, up to about ten
-seconds.
+seconds. An answer the page cannot read or draw is a failed poll too. Keep
+polling, and tell the person when it goes on: a page left open across an
+upgrade may need a reload.
 
 Compare each conversation's `activity` and `at_work` with the values you
 saw last. `activity` rises with every message, every turn the runtime opens
@@ -252,10 +254,17 @@ and every turn's end. `at_work` counts the turns queued or running.
   answer. Do not read its turns again.
 - When either changed in the open conversation, read its newest page of
   turns again and replace the turns it holds by `id`. A turn that has ended
-  does not change, so older pages you loaded stay as they are.
+  does not change, so older pages you loaded stay as they are until their
+  [file links](#files) age.
 - A conversation that changes moves to the top of the list. An open
   conversation that is not on the first page has therefore not changed. Do
   not take its absence for a deletion.
+- Lay the first page over the conversations you hold by `id`, and keep the
+  ones it does not list: those a new conversation pushed off it, and those
+  of later pages you loaded. `next` of the last page you read still says
+  where earlier ones continue. When every conversation on the first page is
+  new or changed, more than a page may have changed. Start again from that
+  page and its `next`.
 
 A turn going from queued to running, and its progress, change neither
 number. For those, [read the live turns](#read-live-turns) on screen.
@@ -344,7 +353,12 @@ A file has a `name`, a `size` in bytes, a `type` and a `url`.
   as a download link.
 - A link is the same for a whole UTC day, so the browser keeps the images it
   fetched. It works until the end of the next UTC day. After that it is 403.
-  Read the turns again for a new link.
+  Read the turns again for a new link. The page does so on each new UTC day:
+  it reads the newest page of turns again and drops the earlier pages a
+  person loaded, so "Show earlier turns" reads them again. It never takes
+  those from under a person scrolled up among them. They go once the person
+  is back at the conversation's end, so their links stop working only for
+  someone who stays scrolled up through a second UTC day.
 - A sign-out voids every link at once: the next request for one is 403. The
   bytes a browser already cached or saved remain with that browser.
 - A file core no longer has is 404.

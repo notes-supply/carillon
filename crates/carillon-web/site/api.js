@@ -6,6 +6,8 @@
  * provider looks.
  */
 
+import { superseded } from "./model.js";
+
 /** @typedef {{ status: number, body: string, token: string | null }} Answer */
 
 const TOKEN = "token";
@@ -17,6 +19,16 @@ export const token = {
   set: (value) => localStorage.setItem(TOKEN, value),
   drop: () => localStorage.removeItem(TOKEN),
 };
+
+/**
+ * An answer to the token the browser has now. A 401 to a token replaced
+ * while its request was on its way is asked again with the one stored.
+ * @param {Answer} answer
+ * @param {() => Promise<Answer>} again
+ */
+function current(answer, again) {
+  return superseded(answer.status, answer.token, token.get()) ? again() : answer;
+}
 
 /**
  * @param {string} path
@@ -35,7 +47,8 @@ export async function ask(path, method = "GET", json) {
       },
       ...(json === undefined ? {} : { body: JSON.stringify(json) }),
     });
-    return { status: response.status, body: await response.text(), token: carried };
+    const answer = { status: response.status, body: await response.text(), token: carried };
+    return current(answer, () => ask(path, method, json));
   } catch {
     return { status: 0, body: "", token: carried };
   }
@@ -57,8 +70,10 @@ export function put(path, form, progress) {
     request.setRequestHeader("authorization", `Bearer ${carried ?? ""}`);
     request.upload.onprogress = (event) => progress(event.loaded, event.total, false);
     request.upload.onload = (event) => progress(event.loaded, event.total, true);
-    request.onload = () =>
-      resolve({ status: request.status, body: request.responseText, token: carried });
+    request.onload = () => {
+      const answer = { status: request.status, body: request.responseText, token: carried };
+      resolve(current(answer, () => put(path, form, progress)));
+    };
     request.onerror = request.onabort = () => resolve({ status: 0, body: "", token: carried });
     request.send(form);
   });

@@ -3,6 +3,7 @@ import { ask, data, put, token } from "./api.js";
 import {
   AWAY,
   SIGNED_OUT,
+  UNREADABLE,
   awaiting,
   changed,
   dropsToken,
@@ -17,6 +18,7 @@ import {
   pressed,
   reading,
   refusal,
+  relisted,
   since,
   titleOf,
   unfinished,
@@ -26,7 +28,7 @@ import {
 import { attachedFile, chat, el, pendingItem, phrase, turnBody, turnHead } from "./view.js";
 
 /** @import { Answer } from "./api.js" */
-/** @import { Asked, Command, Control, Conversation, Limits, Live, Page, Pending, Turn } from "./model.js" */
+/** @import { Asked, Command, Control, Conversation, Limits, Listing, Live, Page, Pending, Turn } from "./model.js" */
 
 /**
  * @template {HTMLElement} T
@@ -79,14 +81,10 @@ let session = {
   limits: { files: 0, file_bytes: 0, message_bytes: 0 },
   custom_site: false,
 };
-/** @type {Conversation[]} */
-let listed = [];
-/** @type {Conversation[]} */
-let older = [];
-/** @type {number | null} */
-let next = null;
+/** @type {Listing} */
+let rail = { conversations: [], next: null };
 /**
- * @type {{ id: string, page: Page, loaded: boolean, stale: boolean, inCore: boolean, listedAtRead: Conversation | undefined, readAt: number }}
+ * @type {{ id: string, page: Page, loaded: boolean, stale: boolean, inCore: boolean, listedAtRead: Conversation | undefined, readAt: number, aged: boolean }}
  */
 let open = {
   id: "",
@@ -96,6 +94,7 @@ let open = {
   inCore: false,
   listedAtRead: undefined,
   readAt: 0,
+  aged: false,
 };
 /** @type {Map<string, Live>} */
 let live = new Map();
@@ -180,7 +179,11 @@ const pause = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(
 
 async function tick() {
   clearTimeout(timer);
-  const answered = await poll(polls.begin());
+  const answered = await poll(polls.begin()).catch((/** @type {unknown} */ error) => {
+    console.error(error);
+    if (failures > 0) say(UNREADABLE);
+    return false;
+  });
   if (answered === undefined || signedOut) return;
   failures = answered ? 0 : failures + 1;
   if (answered) say("");
@@ -197,13 +200,14 @@ async function poll(read) {
   const answer = await read("/api/conversations");
   if (answer === undefined) return undefined;
   if (!okOrNotice(answer)) return false;
-  /** @type {{ conversations: Conversation[], next: number | null }} */
+  /** @type {Listing} */
   const first = data(answer);
-  listed = first.conversations;
-  if (older.length === 0) next = first.next;
+  rail = relisted(rail, first);
   drawRail();
-  const current = listed.find(({ id }) => id === open.id);
-  if (open.inCore && linksAged(open.readAt, now())) open.stale = true;
+  const current = first.conversations.find(({ id }) => id === open.id);
+  if (open.inCore && linksAged(open.readAt, now())) [open.stale, open.aged] = [true, true];
+  // Earlier turns go at the end of the conversation, never from under a person reading them.
+  if (open.aged && followEnd) open.stale = true;
   if (open.stale || changed(open.listedAtRead, current)) {
     const turns = await readTurns(current, read);
     if (turns !== true) return turns;
@@ -231,7 +235,8 @@ async function readTurns(current, read) {
   const inCore = answer.status !== 404;
   if (inCore) {
     if (!okOrNotice(answer)) return false;
-    open.page = merge(open.page, data(answer));
+    open.page = merge(open.page, data(answer), open.aged && followEnd);
+    open.aged &&= !followEnd;
   }
   Object.assign(open, { inCore, listedAtRead: current, stale: false, loaded: true, readAt: now() });
   drawRail();
@@ -254,7 +259,7 @@ function keepingFocus(container, attribute, redraw) {
 }
 
 function drawRail() {
-  const all = [...listed, ...older.filter((old) => !listed.some(({ id }) => id === old.id))];
+  const all = rail.conversations;
   for (const { id, activity } of all)
     if (!activityWhenLooked.has(id) || (id === open.id && !document.hidden))
       activityWhenLooked.set(id, activity);
@@ -274,7 +279,7 @@ function drawRail() {
     );
   }
   page.noChats.hidden = all.length > 0;
-  page.moreChats.hidden = next === null;
+  page.moreChats.hidden = rail.next === null;
   const current = all.find(({ id }) => id === open.id);
   if (current !== undefined && !openInRail)
     page.chats.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
@@ -394,6 +399,7 @@ function show(id, minted) {
     inCore: false,
     listedAtRead: undefined,
     readAt: 0,
+    aged: false,
   };
   live = new Map();
   drawn.clear();
@@ -624,13 +630,17 @@ async function showEarlier() {
 }
 
 async function showMore() {
+  const { next } = rail;
   if (next === null) return;
   const answer = await chatPages.begin()(`/api/conversations?before=${String(next)}`);
-  if (answer === undefined || !okOrNotice(answer)) return;
-  /** @type {{ conversations: Conversation[], next: number | null }} */
+  // A poll meanwhile may have replaced the list this page continues.
+  if (answer === undefined || rail.next !== next || !okOrNotice(answer)) return;
+  /** @type {Listing} */
   const more = data(answer);
   const shown = page.chats.children.length;
-  [older, next] = [[...older, ...more.conversations], more.next];
+  const held = new Set(rail.conversations.map(({ id }) => id));
+  const rest = more.conversations.filter(({ id }) => !held.has(id));
+  rail = { conversations: [...rail.conversations, ...rest], next: more.next };
   drawRail();
   const first = page.chats.children[shown]?.firstElementChild;
   if (first instanceof HTMLElement) first.focus();

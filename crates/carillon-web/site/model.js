@@ -6,6 +6,7 @@
  */
 
 /** @typedef {{ id: string, agent_id: string, title: string, started_at: number, active_at: number, activity: number, at_work: number }} Conversation */
+/** @typedef {{ conversations: Conversation[], next: number | null }} Listing Conversations, latest first, and where earlier ones continue. */
 /** @typedef {{ name: string, size: number, type: string, url: string }} FileLink */
 /** @typedef {{ kind: "person", event_id: string, text: string, command: boolean, files: FileLink[] } | { kind: "runtime", label: string | null }} From */
 /** @typedef {"steer" | "interrupt" | "stop"} Control */
@@ -59,6 +60,30 @@ export function changed(seen, listed) {
 }
 
 /**
+ * The polled first page laid over the conversations held. One it no longer
+ * lists has not changed, so it stays, after those the page lists, and
+ * earlier ones still continue where they did. A first page on which every
+ * conversation is new or changed may leave a gap, because more than a page
+ * may have changed, so it replaces them all, as the whole list does.
+ * @param {Listing} held
+ * @param {Listing} first
+ * @returns {Listing}
+ */
+export function relisted(held, first) {
+  const polled = new Map(first.conversations.map(({ id, activity }) => [id, activity]));
+  const whole = first.next === null;
+  const gap = !held.conversations.some(({ id, activity }) => polled.get(id) === activity);
+  if (whole || gap) return first;
+  return {
+    conversations: [
+      ...first.conversations,
+      ...held.conversations.filter(({ id }) => !polled.has(id)),
+    ],
+    next: held.next,
+  };
+}
+
+/**
  * Whether a conversation has something the person has not looked at: its
  * activity is past what it was when they last had it open, or when the page
  * first listed it.
@@ -72,16 +97,19 @@ export function unread(looked, listed) {
 /**
  * The newest page of turns laid over the turns held: each turn it has
  * replaces the held one of the same ID. A page that shares no turn with
- * those held leaves a gap, so it replaces them all.
+ * those held leaves a gap, so it replaces them all. So does a page read
+ * once the file links of those held have aged: the earlier turns go, and
+ * the person reads them again with links that work.
  * @param {Page} held
  * @param {Page} page
+ * @param {boolean} aged
  * @returns {Page}
  */
-export function merge(held, page) {
+export function merge(held, page, aged) {
   const fresh = new Set(page.turns.map((turn) => turn.id));
   const whole = page.before === null;
   const gap = !held.turns.some((turn) => fresh.has(turn.id));
-  if (whole || gap) return page;
+  if (whole || gap || aged) return page;
   return {
     turns: [...held.turns.filter((turn) => !fresh.has(turn.id)), ...page.turns],
     before: held.before,
@@ -167,6 +195,19 @@ export function dropsToken(status, carried, stored) {
 }
 
 /**
+ * Whether an answer says nothing of this browser: a 401 to a request whose
+ * token is no longer the stored one, as when every browser was signed out
+ * and another tab signed in again meanwhile. The request is made again with
+ * the stored token.
+ * @param {number} status
+ * @param {string | null} carried The token the request carried.
+ * @param {string | null} stored
+ */
+export function superseded(status, carried, stored) {
+  return status === 401 && stored !== null && carried !== stored;
+}
+
+/**
  * What an answer's status means for the page. Status 0 is a request that
  * got no answer: the provider is not running.
  * @param {number} status
@@ -179,6 +220,8 @@ export function reading(status) {
 }
 
 export const AWAY = "Carillon is not answering. Trying again.";
+export const UNREADABLE =
+  "This page could not read what Carillon answered. It is trying again. If this stays, reload the page.";
 export const SIGNED_OUT =
   "This browser is signed out. Run `carillon web open` in a terminal to sign it in.";
 
