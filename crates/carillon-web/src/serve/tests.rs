@@ -18,7 +18,7 @@ use crate::fixture::{
 };
 
 /// One route of each class the provider serves.
-const ROUTES: [(Method, &str); 11] = [
+const ROUTES: [(Method, &str); 13] = [
     (Method::GET, "/"),
     (Method::GET, "/app.js"),
     (Method::GET, "/health"),
@@ -35,6 +35,11 @@ const ROUTES: [(Method, &str); 11] = [
         "/api/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/control",
     ),
     (Method::POST, "/v1/sign-in"),
+    (Method::GET, "/v1/channels"),
+    (
+        Method::PUT,
+        "/v1/channels/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/settings",
+    ),
     (Method::GET, "/files/capture/0?name=a&exp=1&sig=00"),
 ];
 
@@ -240,7 +245,13 @@ async fn a_sign_in_code_works_once_and_for_two_minutes() -> Result<()> {
 async fn an_operator_route_takes_only_the_operator_credential() -> Result<()> {
     let fixture = Fixture::new().await?;
     let browser = fixture.sign_in().await?;
-    for path in ["/v1/sign-in", "/v1/sign-out", "/v1/unknown"] {
+    for path in [
+        "/v1/sign-in",
+        "/v1/sign-out",
+        "/v1/channels",
+        "/v1/channels/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/settings",
+        "/v1/unknown",
+    ] {
         for refused in [
             None,
             Some(INTERFACE_TOKEN),
