@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, put},
 };
 use carillon_interface::InterfaceError;
 use carillon_protocol::{
@@ -23,6 +24,7 @@ use crate::{
     files::{self, FileView},
     identity::{ConversationId, known},
     markdown::render,
+    send,
     serve::Web,
 };
 
@@ -31,6 +33,11 @@ pub(crate) fn routes() -> Router<Arc<Web>> {
         .route("/session", get(session))
         .route("/conversations", get(conversations))
         .route("/conversations/{id}/turns", get(turns))
+        // A message's files are bounded part by part as they are staged.
+        .route(
+            "/conversations/{id}/messages/{event_id}",
+            put(send::send).layer(DefaultBodyLimit::disable()),
+        )
 }
 
 #[derive(Deserialize)]

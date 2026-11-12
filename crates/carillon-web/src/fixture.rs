@@ -22,7 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use carillon_installation::config::{LoadedConfig, attachment_staging, hash_token};
-use carillon_interface::CoreClient;
+use carillon_interface::{CoreClient, Staging};
 use carillon_protocol::{
     conversations::{ConversationPage, ConversationSummary, Transcript},
     model::{
@@ -34,7 +34,8 @@ use carillon_protocol::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Notify};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::{
@@ -64,6 +65,9 @@ pub(crate) struct Core {
     pub(crate) settings: Vec<SettingsRequest>,
     /// Each request's path and query.
     pub(crate) asked: Vec<String>,
+    /// A submission waits here before core reads its files, as a capture
+    /// that takes a while does.
+    pub(crate) hold: Option<Arc<Notify>>,
     staging: PathBuf,
 }
 
@@ -112,6 +116,10 @@ async fn transcript(
 }
 
 async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> Response {
+    let hold = locked(&core).hold.clone();
+    if let Some(hold) = hold {
+        hold.notified().await;
+    }
     let mut core = locked(&core);
     let staged = event.attachments.iter().flat_map(|attachments| {
         (0..attachments.files.len()).map(|ordinal| {
@@ -305,7 +313,7 @@ workspace = "work"
         let data_dir = registry.value.data_dir.clone();
         let staging = attachment_staging(&data_dir, "web");
         let core = Arc::new(Mutex::new(Core {
-            staging,
+            staging: staging.clone(),
             ..Core::default()
         }));
         let fake = fake(&core);
@@ -323,10 +331,13 @@ workspace = "work"
                 status: "ready".to_owned(),
             },
             browser: Browser::open(browser::key_file(&data_dir, "web"), AUTHORITY.to_owned())?,
+            staging: Staging::open(staging)?,
             site: Site {
                 custom: data_dir.join("components/web/site"),
                 release,
             },
+            user: "owner".to_owned(),
+            stopping: CancellationToken::new(),
             registry,
         });
         Ok(Self {

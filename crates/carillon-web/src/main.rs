@@ -10,6 +10,7 @@ mod files;
 mod fixture;
 mod identity;
 mod markdown;
+mod send;
 mod serve;
 mod site;
 

@@ -14,10 +14,13 @@ use axum::{
     response::{IntoResponse as _, Response},
     routing::{get, post},
 };
-use carillon_installation::config::{LoadedConfig, component_directory};
-use carillon_interface::{CoreClient, InterfaceError, Started, authorize_operator, bearer, start};
+use carillon_installation::config::{LoadedConfig, attachment_staging, component_directory};
+use carillon_interface::{
+    CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
+};
 use carillon_protocol::model::Health;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
@@ -36,7 +39,12 @@ pub(crate) struct Web {
     pub(crate) registry: LoadedConfig,
     pub(crate) health: Health,
     pub(crate) browser: Browser,
+    pub(crate) staging: Staging,
     pub(crate) site: Site,
+    /// The installing user's login name, the `user_id` of every message.
+    pub(crate) user: String,
+    /// Cancelled when the provider is asked to stop.
+    pub(crate) stopping: CancellationToken,
 }
 
 pub(crate) struct ServeOptions {
@@ -63,6 +71,10 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result
         );
     }
     let data_dir = &config.value.data_dir;
+    // This instance owns the provider's state: staging left by an earlier
+    // one is abandoned and removed.
+    let staging = Staging::open(attachment_staging(data_dir, &provider.id))?;
+    let stopping = CancellationToken::new();
     let authority = provider
         .url
         .strip_prefix("http://")
@@ -72,21 +84,29 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions) -> Result
         core,
         health,
         browser: Browser::open(browser::key_file(data_dir, &provider.id), authority)?,
+        staging,
         site: Site {
             custom: component_directory(data_dir, &provider.id).join("site"),
             release: options.site,
         },
+        user: std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "owner".to_owned()),
+        stopping: stopping.clone(),
         registry: config,
     });
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     info!(url = %provider.url, "web interface provider ready");
+    // A stop ends the wait for core of any message being submitted, then the
+    // server answers the requests it has and closes.
     axum::serve(listener, router(web))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = terminate.recv() => {}
                 _ = interrupt.recv() => {}
             }
+            stopping.cancel();
         })
         .await?;
     Ok(())

@@ -22,7 +22,7 @@ use carillon_protocol::conversations::ConversationSummary;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::browser::refusal;
+use crate::{browser::refusal, serve::Web};
 
 /// A UUID as the page writes it: lowercase with hyphens, so one
 /// conversation has one name.
@@ -62,6 +62,30 @@ impl From<ConversationId> for String {
     }
 }
 
+/// A message's event ID, `m-<uuid>`: the page mints it before the first
+/// attempt and sends it again with every retry, and core answers a repeat
+/// with the first receipt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(try_from = "String")]
+pub(crate) struct EventId(String);
+
+impl EventId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EventId {
+    type Error = &'static str;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        match text.strip_prefix("m-").and_then(canonical) {
+            Some(_) => Ok(Self(text)),
+            None => Err("a message is `m-` and a lowercase UUID"),
+        }
+    }
+}
+
 /// The conversation as core has it, or `None` before its first message.
 /// Core keys a conversation by its agent too, so it answers an audience
 /// with one conversation for each agent. The page gives an audience one
@@ -91,4 +115,33 @@ pub(crate) async fn known(
             &format!("Carillon has no web conversation {id}."),
         )
     })
+}
+
+/// The agent a message to conversation `id` goes to. A conversation core
+/// has keeps its agent, and naming another is refused. One core does not
+/// have yet takes the agent `named`, which must be configured.
+pub(crate) async fn agent_of(
+    web: &Web,
+    id: ConversationId,
+    named: Option<String>,
+) -> Result<String, InterfaceError> {
+    match (find(&web.core, id).await?, named) {
+        (Some(existing), Some(named)) if existing.agent_id != named => Err(refusal(
+            StatusCode::CONFLICT,
+            &format!(
+                "This conversation is with {}, and a conversation keeps its agent.",
+                existing.agent_id
+            ),
+        )),
+        (Some(existing), _) => Ok(existing.agent_id),
+        (None, Some(named)) if web.registry.value.agent(&named).is_ok() => Ok(named),
+        (None, Some(named)) => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("Carillon has no agent {named}."),
+        )),
+        (None, None) => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A new conversation's first message names its agent.",
+        )),
+    }
 }
