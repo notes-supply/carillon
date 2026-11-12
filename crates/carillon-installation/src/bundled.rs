@@ -1,14 +1,11 @@
 //! The programs a release bundles, and what an installation's registry says
-//! of the provider each serves. Initialization, setup, updates and the
-//! providers' own commands all read this one list.
+//! of the provider each serves.
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
 use crate::config::{ProviderRole, RELEASE_VERSION};
 
-/// A program this release bundles. `carillon-<program>` serves every
-/// registry entry that names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bundled {
     Discord,
@@ -84,7 +81,6 @@ impl Bundled {
         program.strip_prefix("runtime-").unwrap_or(program)
     }
 
-    /// The bundled program a registry entry's `program` names, if any.
     #[must_use]
     pub fn of(program: &str) -> Option<Self> {
         Self::ALL
@@ -93,7 +89,7 @@ impl Bundled {
     }
 
     /// The bundled programs of `role`, in the order setup offers them.
-    pub fn of_role(role: ProviderRole) -> impl Iterator<Item = Self> + Clone {
+    pub fn of_role(role: ProviderRole) -> impl Iterator<Item = Self> {
         Self::ALL
             .into_iter()
             .filter(move |bundled| bundled.role() == role)

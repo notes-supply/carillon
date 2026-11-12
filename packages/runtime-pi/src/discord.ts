@@ -13,12 +13,10 @@ export function defaultExtensions(config: Registry): string[] {
 }
 
 /**
- * What the Discord tools learn of `conversation`, as `DiscordClient` reads
- * it: host data, never the model's. They reach a Discord provider with the
- * operator credential's file, never the conversation's own interface when
- * that is another program's. A Discord conversation reaches its own provider
- * and knows its message's origin. Any other reaches the only Discord
- * provider, without an origin, so the agent names the channel it means.
+ * What the Discord tools learn of `conversation`: host data, never the
+ * model's. A Discord conversation reaches its own provider and knows its
+ * message's origin. Any other reaches the only Discord provider, without an
+ * origin, so the agent names the channel it means.
  */
 export function discordContext(
   config: Registry,
