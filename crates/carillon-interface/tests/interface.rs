@@ -192,8 +192,8 @@ async fn failures_worth_repeating_are_told_from_final_ones() -> anyhow::Result<(
             (status, transient)
         );
         assert_eq!(
-            failure.message,
-            "submit event to core: {\"error\":\"refused\"}"
+            failure.message, "refused",
+            "a refusal carries core's own words, which an interface may show"
         );
     }
     fake.lock().await.submitted.clear();
@@ -377,5 +377,48 @@ fn each_request_stages_under_a_fresh_batch_that_goes_with_it() -> anyhow::Result
     drop(first);
     assert_eq!(std::fs::read_dir(&incoming)?.count(), 1);
     assert!(second.file(0).exists());
+    Ok(())
+}
+
+#[test]
+fn only_an_unambiguous_instance_of_a_program_is_inferred() -> anyhow::Result<()> {
+    use carillon_interface::{instance, instances};
+
+    let directory = tempfile::tempdir()?;
+    let address = SocketAddr::from(([127, 0, 0, 1], 45_401));
+    let mut config = installation(directory.path(), address, true)?;
+    assert_eq!(instance(&config, "web", None)?, "web");
+    // A name the registry lacks is the operator's to be told of by what uses it.
+    assert_eq!(
+        instance(&config, "web", Some("chosen".to_owned()))?,
+        "chosen"
+    );
+    let foreign = instance(&config, "web", Some("runtime-other".to_owned())).err();
+    assert_eq!(
+        foreign.map(|refusal| refusal.to_string()).as_deref(),
+        Some("runtime-other is not an instance of \"web\": its program is \"runtime-other\"")
+    );
+
+    let mut second = config.value.providers[0].clone();
+    "web-b".clone_into(&mut second.id);
+    second.enabled = false;
+    config.value.providers.push(second);
+    assert_eq!(instances(&config, "web"), ["web", "web-b"]);
+    let ambiguous = instance(&config, "web", None)
+        .err()
+        .context("inferred one of several instances")?;
+    assert!(ambiguous.to_string().ends_with("web, web-b"), "{ambiguous}");
+    assert_eq!(instance(&config, "web", Some("web-b".to_owned()))?, "web-b");
+
+    assert!(instances(&config, "discord").is_empty());
+    let unregistered = instance(&config, "discord", None)
+        .err()
+        .context("inferred an instance of another program")?;
+    assert!(
+        unregistered
+            .to_string()
+            .starts_with("carillon.toml registers no provider with program = \"discord\""),
+        "{unregistered}"
+    );
     Ok(())
 }

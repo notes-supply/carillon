@@ -392,6 +392,9 @@ async fn channels(
         };
         let _ = writeln!(text, "{}", provider.id);
         match listed {
+            Ok(pages) if pages.is_empty() => {
+                text.push_str("  no channels with settings of their own\n");
+            }
             Ok(pages) => text.push_str(&summary(&pages)),
             Err(failure) => {
                 let failure = format!("{} did not list its channels: {failure:#}", provider.id);

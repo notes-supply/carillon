@@ -44,7 +44,9 @@ has its agent, audience, channel and title, when it started and was last
 active, its marker and how many of its turns are at work.
 `before=<activity>` reads the page below a marker, so a conversation that
 becomes active between two reads moves to the first page and is on no
-later one. The list reads no turn and no message text, so an interface may
+later one. `audience_id=<audience>` lists only that audience's
+conversations, one for each agent it has talked to, so an interface that
+knows a conversation by its audience alone finds its agent. The list reads no turn and no message text, so an interface may
 poll it and compare each conversation's marker and count of turns at work.
 While both are unchanged the conversation has no new turn and no new
 answer, and its transcript need not be read again. A turn's state while it
@@ -203,6 +205,27 @@ keeps nothing of it. A steered or stopped turn sends nothing; its message shows
 a reaction instead. A graceful stop records the gateway
 session so the next start can resume it and have Discord replay what it
 missed. See the [Discord guide](../../crates/carillon-discord/README.md).
+
+The web provider (`carillon-web`) serves a chat page to the installing
+user's own browser on the same machine. No release registers it yet: a
+registry entry with `program = "web"` and `delivery = "retained"` runs it.
+It keeps no conversation. The page lists conversations and reads turns
+through the provider from core's history, polls the list, and asks for
+the live state of the unfinished turns on screen. A conversation is one UUID
+the page mints, which is its audience, its channel and its delivery target
+in core, and its agent is chosen with its first message and never changes.
+A message's event ID is the page's too, so a retry is the first message
+again. Uploads stream into a staging batch of the request's own. Answers
+are rendered to HTML by the provider, and files are read by signed links
+that expire. The provider's only durable file is the browser key, which it
+reads again for every request that presents a credential. `carillon web
+open` reads the key itself and signs a single-use code that expires after
+two minutes. A browser trades the code for a bearer token made from the
+key. `carillon web sign-out` replaces the key file. Neither command sends
+the provider a request. Every request must name the provider in `Host` and
+come from its own origin. A failure of core reaches the page as one
+retryable status, and what core said is logged.
+See the [web guide](../../crates/carillon-web/README.md).
 
 ### Replaceable Discord module
 
@@ -380,6 +403,9 @@ subject; choosing an agent creates the route, and no runtime is asked
 before it exists. Direct messages' page, for the operator only, works the
 same way under the channel `dm`.
 
+A web chat has no page: it is its own channel in core, sets nothing there
+and so runs its agent's model.
+
 A turn takes its channel's unit, else its agent's, when the runtime admits
 it. Core records each conversation's channel with its first admitted
 message and hands it to the runtime with every turn of the conversation,
@@ -486,3 +512,10 @@ credential, the one core presents to them. A runtime settles its own turns, even
 enabled opens turns in its own conversations. The
 Wasm sandbox bounds the Discord module's memory and time; it doesn't limit
 the owner.
+
+The web chat's address belongs to whichever local program holds the web
+provider's port. While the provider is stopped, another program on the
+machine can take the port and serve a page at the chat's own origin, which
+can read what the real page stored there. Carillon trusts the machine's
+local programs here, as its other providers do, and remote admission is the
+boundary. `carillon web sign-out` voids what such a page could have taken.

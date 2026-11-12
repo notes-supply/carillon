@@ -1,0 +1,39 @@
+[package]
+name = "carillon-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "carillon-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["multipart"] }
+carillon-installation = { path = "../carillon-installation" }
+carillon-interface = { path = "../carillon-interface" }
+carillon-protocol = { path = "../carillon-protocol" }
+clap.workspace = true
+hex.workspace = true
+hmac = "0.12.1"
+libc = "0.2.191"
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5.2", features = ["util"] }
+
+[lints]
+workspace = true

@@ -93,9 +93,13 @@ description = "Run a durable conversation with temporary SQLite and an in-proces
 run = "cargo run -p carillon-core --example conversation"
 
 [tasks."test:integration"]
-description = "Test local core, Discord, Pi and T3 runtime services together"
+description = "Test local core, Discord, web, Pi and T3 runtime services together"
 depends = ["install", "build:module"]
-run = "cargo build --locked --bin carillon --bin carillon-discord && node scripts/test-integration.mjs"
+run = [
+  "cargo build --locked --bin carillon --bin carillon-discord --bin carillon-web",
+  "node scripts/test-integration.mjs",
+  "node scripts/integration/web.mjs",
+]
 
 [tasks."test:persistence"]
 description = "Run Linux syscall fault-injection tests against packaged binaries"

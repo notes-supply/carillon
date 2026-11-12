@@ -48,7 +48,7 @@ use super::{
     about = "Self-hosted agent service",
     after_help = "Provider commands: `carillon <provider> …` runs that provider's own program, \
                   for example `carillon discord --help` for Discord settings and slash-command \
-                  modules."
+                  modules, or `carillon web open` to sign a browser in to the web chat."
 )]
 struct Cli {
     /// Installation to act on. Defaults to `CARILLON_HOME`, then the

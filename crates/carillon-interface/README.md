@@ -37,6 +37,9 @@ in `carillon-protocol`.
   `Batch`, which removes them when dropped.
 - [`operator`](src/operator.rs): `authorize_operator` checks a bearer
   against the registry's operator credential hash.
+- [`instance`](src/instance.rs): `instance` is the registry entry an
+  operator command of a program acts on: the one it names, or the only
+  entry of that program.
 
 The tests in [`tests/interface.rs`](tests/interface.rs) run the crate against
 an in-process fake of core's interface routes.

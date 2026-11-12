@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
-export const PORT_OFFSETS = { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 };
+export const PORT_OFFSETS = { core: 0, discord: 1, runtime: 2, "runtime-t3": 3, web: 4 };
 
 // The probe releases the ports before the services bind, so the block lies
 // below the kernel's ephemeral range, where outgoing connections can't take a
@@ -12,12 +12,12 @@ export const PORT_OFFSETS = { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 }
 export async function availableBasePort() {
   const range = await readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8");
   const ceiling = Number(range.trim().split(/\s+/)[0]) - 128;
-  assert.ok(ceiling > 1027, `no four free ports below the ephemeral range ${range.trim()}`);
+  assert.ok(ceiling > 1028, `no five free ports below the ephemeral range ${range.trim()}`);
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const port = 1024 + Math.floor(Math.random() * (ceiling - 1027));
+    const port = 1024 + Math.floor(Math.random() * (ceiling - 1028));
     const listeners = [];
     try {
-      for (const offset of [0, 1, 2, 3]) {
+      for (const offset of Object.values(PORT_OFFSETS)) {
         const next = createServer().listen(port + offset, "127.0.0.1");
         listeners.push(next);
         await once(next, "listening");
@@ -29,5 +29,5 @@ export async function availableBasePort() {
       await Promise.all(listeners.map((server) => new Promise((resolve) => server.close(resolve))));
     }
   }
-  throw new Error("could not find four available integration service ports");
+  throw new Error("could not find five available integration service ports");
 }
