@@ -30,11 +30,11 @@ export function phrase(words) {
   return words.split("`").map((piece, index) => (index % 2 === 1 ? el("code", "", piece) : piece));
 }
 
-/** One turn of both of the marks' animations, so a mark drawn again goes on where it was. */
-const CYCLE = 19_800;
+/** How long a mark under way takes to strike, and the ring to sound once. The stylesheet names the motions. */
+const STRIKE_MS = 1100;
+const SOUND_MS = 1800;
 
 /**
- * A row of marks, one for each call, read aloud as `label`.
  * @param {(Mark | "now" | "now sounding")[]} marks
  * @param {string} label
  */
@@ -44,14 +44,16 @@ function row(marks, label) {
   node.ariaLabel = label;
   marks.forEach((mark, index) => {
     const drawn = el("i", `mark ${mark}`);
-    drawn.style.animationDelay = `${String(-((Date.now() + index * 550) % CYCLE))}ms`;
+    // A mark drawn again goes on where it was, each a half strike after the one before it.
+    const period = mark === "running" ? 2 * STRIKE_MS : SOUND_MS;
+    drawn.style.animationDuration = `${String(mark === "running" ? STRIKE_MS : SOUND_MS)}ms`;
+    drawn.style.animationDelay = `${String(-((Date.now() + (index * STRIKE_MS) / 2) % period))}ms`;
     node.append(drawn);
   });
   return node;
 }
 
 /**
- * A moment, with the whole date for whoever asks.
  * @param {number} at
  * @param {number} now
  */
@@ -63,7 +65,6 @@ function time(at, now) {
 }
 
 /**
- * Files as links. With `inline`, a raster image is drawn in place.
  * @param {FileLink[]} list
  * @param {boolean} inline
  */
@@ -92,7 +93,6 @@ function files(list, inline) {
 }
 
 /**
- * The provider's HTML for an answer or an explanation, inserted as it is.
  * @param {string} html
  * @param {string} className
  */
@@ -147,7 +147,6 @@ function lines(lines) {
 }
 
 /**
- * The ledger of a turn at work, with its controls beside the phase.
  * @param {Ledger} shown
  * @param {(action: Control) => void} control
  */

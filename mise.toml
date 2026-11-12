@@ -76,7 +76,6 @@ run = [
   "oxfmt --check '**/*.{ts,mjs,js,json,css,html}'",
   "oxlint packages crates/carillon-web --deny-warnings --report-unused-disable-directives-severity error",
   "tsc --noEmit",
-  # The web page's modules are plain JavaScript, checked against the DOM.
   "tsc --noEmit -p crates/carillon-web",
   "knip --no-progress",
   "vitest run",

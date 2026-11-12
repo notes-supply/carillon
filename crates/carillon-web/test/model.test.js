@@ -43,7 +43,6 @@ const conversation = (fields) => ({
 });
 
 /**
- * A person's turn in the given state.
  * @param {string} id
  * @param {Turn["state"]} [state]
  * @param {string} [text]

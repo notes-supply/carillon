@@ -9,7 +9,6 @@
 
 const TOKEN = "token";
 
-/** The browser's token, which `carillon web open` signs in and a 401 voids. */
 export const token = {
   /** @param {string} value */
   set: (value) => localStorage.setItem(TOKEN, value),

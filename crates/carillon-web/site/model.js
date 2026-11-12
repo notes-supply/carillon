@@ -78,7 +78,9 @@ export function unread(looked, listed) {
  */
 export function merge(held, page) {
   const fresh = new Set(page.turns.map((turn) => turn.id));
-  if (page.before === null || !held.turns.some((turn) => fresh.has(turn.id))) return page;
+  const whole = page.before === null;
+  const gap = !held.turns.some((turn) => fresh.has(turn.id));
+  if (whole || gap) return page;
   return {
     turns: [...held.turns.filter((turn) => !fresh.has(turn.id)), ...page.turns],
     before: held.before,
@@ -107,7 +109,7 @@ export function earlier(held, older) {
 export function unfinished(turns) {
   return turns
     .filter((turn) => turn.state === "queued" || turn.state === "running")
-    .slice(-32)
+    .slice(-LIVE_READ_LIMIT)
     .map((turn) => turn.id);
 }
 
@@ -283,8 +285,6 @@ const PHASES = {
 };
 
 /**
- * A control's name, its name once pressed, and what it does to a message
- * that waits and to an answer that runs.
  * @type {Record<Control, { label: string, pressed: string, waiting: string, answering: string }>}
  */
 const CONTROLS = {
@@ -321,8 +321,10 @@ const WORK_STATES = {
   unknown: ["past", "state unknown"],
 };
 
-/** The most dots drawn for calls the runtime no longer lists. The tally has the count. */
-const PAST_MARKS = 48;
+const MAX_PAST_MARKS = 48;
+/** How many turns the provider takes in one live read. */
+const LIVE_READ_LIMIT = 32;
+const PRESSED_FOR_SECONDS = 15;
 
 /**
  * What a turn at work shows. Whether it waits or runs, and what a person
@@ -355,7 +357,7 @@ export function ledger(turn, live, asked, now) {
   if (model !== "" || filled !== "") notes.push([model, filled].filter(Boolean).join(", "));
   const waits = live?.state === "queued";
   /** @type {Mark[]} */
-  const past = Array.from({ length: Math.min(Math.max(calls - listed, 0), PAST_MARKS) });
+  const past = Array.from({ length: Math.min(Math.max(calls - listed, 0), MAX_PAST_MARKS) });
   /** @type {Line[]} */
   const finished = recent.map((call) => ({
     mark: call.ok ? "done" : "failed",
@@ -407,7 +409,8 @@ export function ledger(turn, live, asked, now) {
  * @param {number} now Unix seconds.
  */
 export function pressed(asked, live, now) {
-  if (asked === undefined || asked.state !== live?.state || now - asked.at > 15) return undefined;
+  if (asked === undefined || asked.state !== live?.state || now - asked.at > PRESSED_FOR_SECONDS)
+    return undefined;
   return asked.action;
 }
 

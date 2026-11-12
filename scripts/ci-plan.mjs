@@ -36,7 +36,6 @@ function lanesOf(path) {
   if (path.endsWith(".md")) return [];
   // Rust, including the example module the release ships built.
   if (/^(crates\/|examples\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
-    // The web page's files are checked as TypeScript is, and served by Rust.
     return /\.(json|mjs|ts|js|css|html)$/u.test(path)
       ? ["rust", "ts", "release"]
       : ["rust", "release"];

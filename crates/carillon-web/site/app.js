@@ -1,9 +1,4 @@
 // @ts-check
-/**
- * The page: what is on screen, the poll that keeps it true, and what the
- * person does. What it decides is in `model.js`, what it draws in `view.js`
- * and what it asks the provider in `api.js`.
- */
 import { ask, data, put, token } from "./api.js";
 import {
   AWAY,
@@ -32,8 +27,6 @@ import { attachedFile, chat, el, pendingItem, phrase, turnBody, turnHead } from 
 /** @import { Command, Control, Conversation, Limits, Live, Page, Pending, Turn } from "./model.js" */
 
 /**
- * An element `index.html` must have, so a copy of the page that lost one
- * says which.
  * @template {HTMLElement} T
  * @param {string} id
  * @param {new () => T} kind
@@ -84,41 +77,44 @@ let session = {
   limits: { files: 0, file_bytes: 0, message_bytes: 0 },
   custom_site: false,
 };
-/** The first page of conversations, as the last poll read it. @type {Conversation[]} */
+/** @type {Conversation[]} */
 let listed = [];
-/** The pages after it that the person asked for, and where they continue. @type {Conversation[]} */
+/** @type {Conversation[]} */
 let older = [];
 /** @type {number | null} */
 let next = null;
 /**
- * The conversation on screen. `stale` says its turns must be read, `seen`
- * is how the list had it when they last were, and `started` that core has it.
- * @type {{ id: string, page: Page, read: boolean, stale: boolean, started: boolean, seen: Conversation | undefined }}
+ * @type {{ id: string, page: Page, loaded: boolean, stale: boolean, inCore: boolean, listedAtRead: Conversation | undefined }}
  */
-let open = { id: "", page: EMPTY, read: false, stale: true, started: false, seen: undefined };
-/** The live read's turns, by ID. @type {Map<string, Live>} */
+let open = {
+  id: "",
+  page: EMPTY,
+  loaded: false,
+  stale: true,
+  inCore: false,
+  listedAtRead: undefined,
+};
+/** @type {Map<string, Live>} */
 let live = new Map();
-/** The control pressed on a turn. @type {Map<string, { action: Control, state: Live["state"] | undefined, at: number }>} */
+/** @type {Map<string, { action: Control, state: Live["state"] | undefined, at: number }>} */
 const asked = new Map();
-/** The message on its way in each conversation: one at a time. @type {Map<string, Pending>} */
+/** @type {Map<string, Pending>} */
 const pending = new Map();
-/** The files chosen for each conversation's next message. @type {Map<string, File[]>} */
+/** @type {Map<string, File[]>} */
 const attached = new Map();
-/** Why each conversation's last action was refused. @type {Map<string, string>} */
+/** @type {Map<string, string>} */
 const errors = new Map();
 /** @type {Map<string, Command[]>} */
 const commands = new Map();
-/** Each conversation's activity when the person last had it open, or when it was first listed. @type {Map<string, number>} */
-const looked = new Map();
-/** The turns drawn, so one that has not changed is left alone. @type {Map<string, { key: string, node: HTMLLIElement }>} */
+/** @type {Map<string, number>} */
+const activityWhenLooked = new Map();
+/** @type {Map<string, { key: string, node: HTMLLIElement }>} */
 const drawn = new Map();
 
 const reads = sequence();
 let [round, failures, timer, choice, railKey] = [0, 0, 0, 0, ""];
-/** The person closed the command list, until they write again. */
-let dismissed = false;
-/** The transcript follows its end until the person scrolls away from it. */
-let stick = true;
+let menuDismissed = false;
+let followEnd = true;
 let signedOut = false;
 
 /** @param {string} words */
@@ -128,12 +124,10 @@ function say(words) {
 }
 
 /**
- * Shows why a conversation's last action was refused, or with no words,
- * that nothing is wrong.
  * @param {string} id
  * @param {string} words
  */
-function fail(id, words) {
+function setError(id, words) {
   if (words === "") errors.delete(id);
   else errors.set(id, words);
   if (id !== open.id) return;
@@ -141,7 +135,7 @@ function fail(id, words) {
   page.error.hidden = words === "";
 }
 
-/** Closes the page to a browser that is not signed in. @param {string} [why] */
+/** @param {string} [why] */
 function shut(why = SIGNED_OUT) {
   signedOut = true;
   clearTimeout(timer);
@@ -152,10 +146,9 @@ function shut(why = SIGNED_OUT) {
 }
 
 /**
- * Whether a read was answered. If not, says why and keeps what is on screen.
  * @param {Answer} answer
  */
-function took(answer) {
+function okOrNotice(answer) {
   const kind = reading(answer.status);
   if (kind === "signed-out") shut();
   else if (kind !== "ok") say(refusal(answer.status, answer.body));
@@ -166,7 +159,6 @@ function kick() {
   void tick();
 }
 
-/** One poll, and the next one after it while the page is visible. */
 async function tick() {
   const mine = ++round;
   clearTimeout(timer);
@@ -179,33 +171,32 @@ async function tick() {
 
 async function poll() {
   const answer = await ask("/api/conversations");
-  if (!took(answer)) return false;
+  if (!okOrNotice(answer)) return false;
   /** @type {{ conversations: Conversation[], next: number | null }} */
   const first = data(answer);
   listed = first.conversations;
   if (older.length === 0) next = first.next;
   drawRail();
   const current = listed.find(({ id }) => id === open.id);
-  if ((open.stale || changed(open.seen, current)) && !(await readTurns(current))) return false;
+  if ((open.stale || changed(open.listedAtRead, current)) && !(await readTurns(current)))
+    return false;
   const ids = unfinished(open.page.turns);
   return ids.length === 0 || (await readLive(ids, current));
 }
 
 /**
- * Reads the open conversation's newest turns. `current` is how the list had
- * the conversation before the read began.
  * @param {Conversation | undefined} current
  */
 async function readTurns(current) {
   const ticket = reads.next();
   const answer = await ask(`/api/conversations/${open.id}/turns`);
   if (!reads.current(ticket)) return true;
-  // Core has no conversation before its first message: 404 is an empty one.
-  if (answer.status !== 404) {
-    if (!took(answer)) return false;
+  const inCore = answer.status !== 404;
+  if (inCore) {
+    if (!okOrNotice(answer)) return false;
     open.page = merge(open.page, data(answer));
   }
-  Object.assign(open, { started: answer.status !== 404, seen: current, stale: false, read: true });
+  Object.assign(open, { inCore, listedAtRead: current, stale: false, loaded: true });
   drawRail();
   drawTurns();
   drawComposer();
@@ -220,7 +211,7 @@ async function readLive(ids, current) {
   const { id } = open;
   const answer = await ask(`/api/turns?ids=${ids.join(",")}`);
   if (id !== open.id) return true;
-  if (!took(answer)) return false;
+  if (!okOrNotice(answer)) return false;
   /** @type {{ turns: Live[] }} */
   const read = data(answer);
   live = new Map(read.turns.map((turn) => [turn.id, turn]));
@@ -229,34 +220,45 @@ async function readLive(ids, current) {
   return true;
 }
 
+/**
+ * @param {HTMLElement} container
+ * @param {string} attribute What names the focused element, before the redraw and after it.
+ * @param {() => void} redraw
+ */
+function keepingFocus(container, attribute, redraw) {
+  const focused = document.activeElement;
+  const name = container.contains(focused) ? focused?.getAttribute(attribute) : null;
+  redraw();
+  const again = name == null ? null : container.querySelector(`[${attribute}="${name}"]`);
+  if (again instanceof HTMLElement) again.focus();
+}
+
 function drawRail() {
   const all = [...listed, ...older.filter((old) => !listed.some(({ id }) => id === old.id))];
   for (const { id, activity } of all)
-    if (!looked.has(id) || (id === open.id && !document.hidden)) looked.set(id, activity);
+    if (!activityWhenLooked.has(id) || (id === open.id && !document.hidden))
+      activityWhenLooked.set(id, activity);
   const moment = now();
   const rows = all.map((conversation) => ({
     conversation,
     current: conversation.id === open.id,
-    unread: unread(looked.get(conversation.id), conversation),
+    unread: unread(activityWhenLooked.get(conversation.id), conversation),
   }));
   const key = JSON.stringify([rows, Math.floor(moment / 60)]);
   if (key !== railKey) {
     railKey = key;
-    const focused = document.activeElement;
-    const hash =
-      focused instanceof HTMLAnchorElement && page.chats.contains(focused) ? focused.hash : "";
-    page.chats.replaceChildren(
-      ...rows.map((row) => chat(row.conversation, { ...row, now: moment })),
+    keepingFocus(page.chats, "href", () =>
+      page.chats.replaceChildren(
+        ...rows.map((row) => chat(row.conversation, { ...row, now: moment })),
+      ),
     );
-    const again = hash === "" ? null : page.chats.querySelector(`a[href="${hash}"]`);
-    if (again instanceof HTMLElement) again.focus();
   }
   page.noChats.hidden = all.length > 0;
   page.moreChats.hidden = next === null;
   const current = all.find(({ id }) => id === open.id);
   const name = titleOf(current, open.page.turns);
   page.title.textContent = name;
-  document.title = open.read && open.started ? name : "Carillon";
+  document.title = open.loaded && open.inCore ? name : "Carillon";
   const agent = session.agents.find(({ id }) => id === current?.agent_id);
   page.agentName.textContent =
     session.agents.length > 1 && agent !== undefined ? `with ${agent.name}` : "";
@@ -276,15 +278,12 @@ function drawTurns() {
     }
     if (entry.key !== key) {
       const { node } = entry;
-      // A turn at work is drawn again every second: keep the keyboard on its control.
-      const held = node.contains(document.activeElement)
-        ? document.activeElement?.getAttribute("data-action")
-        : undefined;
-      const body = turnBody(turn, read, control, moment, (action) => void press(turn, action));
-      node.lastElementChild?.replaceWith(body);
       entry.key = key;
-      const again = held == null ? null : node.querySelector(`[data-action="${held}"]`);
-      if (again instanceof HTMLElement) again.focus();
+      keepingFocus(node, "data-action", () =>
+        node.lastElementChild?.replaceWith(
+          turnBody(turn, read, control, moment, (action) => void press(turn, action)),
+        ),
+      );
     }
     return entry.node;
   });
@@ -298,17 +297,22 @@ function drawTurns() {
   });
   while (page.turns.children.length > nodes.length) page.turns.lastElementChild?.remove();
   page.earlier.hidden = open.page.before === null;
-  page.invitation.hidden = !open.read || nodes.length > 0;
-  // Follow the end, but begin a turn taller than the window at its top: an answer is read from its start.
-  const last = nodes.at(-1);
-  if (stick && last !== undefined)
-    page.transcript.scrollTop =
-      last.offsetHeight > page.transcript.clientHeight
-        ? last.offsetTop - page.transcript.offsetTop
-        : page.transcript.scrollHeight;
+  page.invitation.hidden = !open.loaded || nodes.length > 0;
+  if (followEnd) showNewest(nodes.at(-1));
 }
 
-/** Whether the open conversation has a message that core has not received. */
+/**
+ * Scrolls to the end of the transcript, or to the top of a newest turn
+ * taller than the window.
+ * @param {HTMLElement | undefined} newest
+ */
+function showNewest(newest) {
+  const { transcript } = page;
+  if (newest === undefined) return;
+  const tall = newest.offsetHeight > transcript.clientHeight;
+  transcript.scrollTop = tall ? newest.offsetTop - transcript.offsetTop : transcript.scrollHeight;
+}
+
 function busy() {
   const waiting = pending.get(open.id);
   return waiting !== undefined && waiting.stage !== "received";
@@ -316,8 +320,8 @@ function busy() {
 
 function drawComposer() {
   page.send.disabled = busy();
-  // The agent is chosen with a conversation's first message, and fixed while that message is on its way.
-  page.agent.hidden = !open.read || open.started || session.agents.length < 2;
+  const choosesAgent = open.loaded && !open.inCore && session.agents.length > 1;
+  page.agent.hidden = !choosesAgent;
   page.agent.disabled = busy();
   const chosen = attached.get(open.id) ?? [];
   page.attached.hidden = chosen.length === 0;
@@ -326,7 +330,7 @@ function drawComposer() {
       attachedFile(file, () => {
         const rest = chosen.filter((other) => other !== file);
         attached.set(open.id, rest);
-        fail(open.id, overLimit(rest, session.limits) ?? "");
+        setError(open.id, overLimit(rest, session.limits) ?? "");
         drawComposer();
       }),
     ),
@@ -341,13 +345,10 @@ function setText(value) {
 }
 
 /**
- * Stores a conversation's draft, given what its composer holds. Until the
- * receipt, the message on its way stays in front of it: a reload sends
- * nothing by itself, and loses nothing the person wrote.
  * @param {string} id
  * @param {string} text
  */
-function store(id, text) {
+function storeDraft(id, text) {
   const waiting = pending.get(id);
   const whole =
     waiting === undefined || waiting.stage === "received" ? text : joined(waiting.text, text);
@@ -356,20 +357,25 @@ function store(id, text) {
 }
 
 /**
- * Puts a conversation on screen. One the page has just minted is known to
- * be empty, and core is not asked about it.
  * @param {string} id
  * @param {boolean} minted
  */
 function show(id, minted) {
   reads.next();
-  open = { id, page: EMPTY, read: minted, stale: !minted, started: false, seen: undefined };
+  open = {
+    id,
+    page: EMPTY,
+    loaded: minted,
+    stale: !minted,
+    inCore: false,
+    listedAtRead: undefined,
+  };
   live = new Map();
   drawn.clear();
-  [railKey, stick, choice] = ["", true, 0];
+  [railKey, followEnd, choice] = ["", true, 0];
   const draft = localStorage.getItem(draftKey(id)) ?? "";
   setText(busy() ? since(draft, pending.get(id)?.text ?? "") : draft);
-  fail(id, errors.get(id) ?? "");
+  setError(id, errors.get(id) ?? "");
   drawRail();
   drawTurns();
   drawComposer();
@@ -378,7 +384,6 @@ function show(id, minted) {
   kick();
 }
 
-/** Opens the conversation the address names, or a new one. */
 function route() {
   const hash = location.hash.slice(1);
   if (hash.startsWith("sign-in=")) location.reload();
@@ -393,16 +398,16 @@ function send() {
   const { id } = open;
   const text = page.text.value;
   const files = attached.get(id) ?? [];
-  if (!open.read || busy() || (text.trim() === "" && files.length === 0)) return;
+  if (!open.loaded || busy() || (text.trim() === "" && files.length === 0)) return;
   const over = overLimit(files, session.limits);
   if (over !== undefined) {
-    fail(id, over);
+    setError(id, over);
     return;
   }
   /** @type {Pending} */
   const message = {
     eventId: `m-${crypto.randomUUID()}`,
-    agent: open.started ? null : page.agent.value,
+    agent: open.inCore ? null : page.agent.value,
     command: false,
     text,
     files,
@@ -412,10 +417,10 @@ function send() {
   };
   pending.set(id, message);
   attached.delete(id);
-  stick = true;
+  followEnd = true;
   setText("");
-  store(id, "");
-  fail(id, "");
+  storeDraft(id, "");
+  setError(id, "");
   drawTurns();
   drawComposer();
   drawMenu();
@@ -423,8 +428,6 @@ function send() {
 }
 
 /**
- * Sends a message until core has it or refuses it. Every attempt is the
- * same request, so core admits it once however many arrive.
  * @param {string} id
  * @param {Pending} message
  */
@@ -455,7 +458,7 @@ async function deliver(id, message) {
     const draft = localStorage.getItem(draftKey(id)) ?? "";
     if (kind === "ok") {
       message.stage = "received";
-      store(id, since(draft, message.text));
+      storeDraft(id, since(draft, message.text));
       if (id === open.id) {
         open.stale = true;
         drawComposer();
@@ -464,10 +467,9 @@ async function deliver(id, message) {
       return;
     }
     if (kind !== "away") {
-      // Refused: the message goes back before what was written since.
       pending.delete(id);
       attached.set(id, [...message.files, ...(attached.get(id) ?? [])]);
-      fail(id, refusal(answer.status, answer.body));
+      setError(id, refusal(answer.status, answer.body));
       if (id === open.id) {
         setText(draft);
         drawTurns();
@@ -494,11 +496,11 @@ async function press(turn, action) {
   const answer = await ask(`/api/messages/${turn.from.event_id}/control`, "POST", { action });
   const kind = reading(answer.status);
   if (kind === "signed-out") shut();
-  else if (kind === "ok") fail(id, "");
+  else if (kind === "ok") setError(id, "");
   else {
     asked.delete(turn.id);
     const unanswered = "Carillon did not answer. If the turn goes on, press it again.";
-    fail(id, kind === "away" ? unanswered : refusal(answer.status, answer.body));
+    setError(id, kind === "away" ? unanswered : refusal(answer.status, answer.body));
   }
   if (id === open.id) {
     open.stale = true;
@@ -521,14 +523,16 @@ async function loadCommands(id, agent) {
   if (id === open.id) drawMenu();
 }
 
-/** Draws the commands the composer's text could become, and returns them. */
+function offers() {
+  return menuDismissed ? [] : offered(page.text.value, commands.get(open.id) ?? []);
+}
+
 function drawMenu() {
-  const offers = offered(page.text.value, commands.get(open.id) ?? []);
-  choice = Math.min(choice, Math.max(offers.length - 1, 0));
-  page.menu.hidden = dismissed || offers.length === 0;
-  if (dismissed) return [];
+  const listed = offers();
+  choice = Math.min(choice, Math.max(listed.length - 1, 0));
+  page.menu.hidden = listed.length === 0;
   page.menu.replaceChildren(
-    ...offers.map((command, index) => {
+    ...listed.map((command, index) => {
       const what = [command.description, command.hint].filter(Boolean).join(" ");
       const item = el("li", "command", el("strong", "", `/${command.name}`), ` ${what}`);
       [item.role, item.ariaSelected] = ["option", String(index === choice)];
@@ -540,7 +544,6 @@ function drawMenu() {
       return item;
     }),
   );
-  return offers;
 }
 
 /** @param {Command} command */
@@ -550,11 +553,11 @@ function take(command) {
 }
 
 function wrote() {
-  dismissed = false;
+  menuDismissed = false;
   setText(page.text.value);
-  store(open.id, page.text.value);
-  if (page.text.value.startsWith("/") && open.read)
-    void loadCommands(open.id, open.started ? null : page.agent.value);
+  storeDraft(open.id, page.text.value);
+  if (page.text.value.startsWith("/") && open.loaded)
+    void loadCommands(open.id, open.inCore ? null : page.agent.value);
   drawMenu();
 }
 
@@ -563,7 +566,7 @@ function attach(files) {
   if (files.length === 0) return;
   const chosen = [...(attached.get(open.id) ?? []), ...files];
   attached.set(open.id, chosen);
-  fail(open.id, overLimit(chosen, session.limits) ?? "");
+  setError(open.id, overLimit(chosen, session.limits) ?? "");
   drawComposer();
 }
 
@@ -571,10 +574,10 @@ async function showEarlier() {
   const { id, page: held } = open;
   if (held.before === null) return;
   const answer = await ask(`/api/conversations/${id}/turns?before=${held.before}`);
-  if (id !== open.id || !took(answer)) return;
+  if (id !== open.id || !okOrNotice(answer)) return;
   const height = page.transcript.scrollHeight;
   open.page = earlier(open.page, data(answer));
-  stick = false;
+  followEnd = false;
   drawTurns();
   page.transcript.scrollTop += page.transcript.scrollHeight - height;
 }
@@ -582,7 +585,7 @@ async function showEarlier() {
 async function showMore() {
   if (next === null) return;
   const answer = await ask(`/api/conversations?before=${String(next)}`);
-  if (!took(answer)) return;
+  if (!okOrNotice(answer)) return;
   /** @type {{ conversations: Conversation[], next: number | null }} */
   const more = data(answer);
   [older, next] = [[...older, ...more.conversations], more.next];
@@ -592,15 +595,15 @@ async function showMore() {
 page.text.addEventListener("input", wrote);
 page.text.addEventListener("keydown", (event) => {
   if (event.isComposing) return;
-  const offers = drawMenu();
-  const offer = offers[choice];
+  const listed = offers();
+  const offer = listed[choice];
   const enter = event.key === "Enter" && !event.shiftKey;
   if (offer !== undefined && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
     event.preventDefault();
-    choice = (choice + (event.key === "ArrowDown" ? 1 : offers.length - 1)) % offers.length;
+    choice = (choice + (event.key === "ArrowDown" ? 1 : listed.length - 1)) % listed.length;
     drawMenu();
   } else if (offer !== undefined && event.key === "Escape") {
-    dismissed = true;
+    menuDismissed = true;
     drawMenu();
   } else if (
     offer !== undefined &&
@@ -637,11 +640,10 @@ page.earlier.addEventListener("click", () => void showEarlier());
 page.moreChats.addEventListener("click", () => void showMore());
 page.transcript.addEventListener("scroll", () => {
   const { scrollHeight, scrollTop, clientHeight } = page.transcript;
-  stick = scrollHeight - scrollTop - clientHeight < 48;
+  followEnd = scrollHeight - scrollTop - clientHeight < 48;
 });
 // An image that arrives changes the transcript's height. `load` does not bubble.
 page.turns.addEventListener("load", () => drawTurns(), true);
-// At phone width the rail and the conversation are two screens.
 page.back.addEventListener("click", () => page.app.classList.remove("in-room"));
 page.chats.addEventListener("click", () => page.app.classList.add("in-room"));
 part("new", HTMLAnchorElement).addEventListener("click", () => page.app.classList.add("in-room"));
@@ -650,16 +652,20 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(timer);
   else if (!signedOut) kick();
 });
-// `carillon web open` signed this browser in from another tab.
 window.addEventListener("storage", (event) => {
   if (signedOut && event.key === "token" && event.newValue !== null) location.reload();
 });
 
-async function start() {
+/** The sign-in code of the address, which it leaves: a code works once. */
+function takeSignInCode() {
   const code = new URLSearchParams(location.hash.slice(1)).get("sign-in");
+  if (code !== null) history.replaceState(null, "", location.pathname);
+  return code;
+}
+
+async function start() {
+  const code = takeSignInCode();
   if (code !== null) {
-    // The code works once, so it leaves the address before it is traded.
-    history.replaceState(null, "", location.pathname);
     const traded = await ask("/api/sign-in", "POST", { code });
     if (reading(traded.status) !== "ok") {
       const unanswered = "Carillon did not answer the sign-in link. Run `carillon web open` again.";

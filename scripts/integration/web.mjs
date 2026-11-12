@@ -227,11 +227,11 @@ async function testGate(token) {
   assert.match(await page.text(), /<script type="module" src="app\.js">/u);
   const policy = page.headers.get("content-security-policy");
   assert.match(policy, /default-src 'none'/u);
-  // Every file the page ships is one the provider serves, and the policy
-  // lets the page load its own reading face. The face's license is not served.
   assert.match(policy, /font-src 'self'/u);
-  for (const file of await readdir("crates/carillon-web/site")) {
-    if (file.endsWith(".txt")) continue;
+  const license = "literata-OFL.txt";
+  const served = (await readdir("crates/carillon-web/site")).filter((file) => file !== license);
+  assert.ok(served.length > 5, "the page's files were not found");
+  for (const file of served) {
     assert.equal((await fetch(`${origin}/${file}`)).status, 200, `the page's ${file}`);
   }
   assert.equal(await raw("/", { host: "rebound.example" }), 421);

@@ -107,7 +107,6 @@ mod tests {
             "<th class=\"align-left\">Day</th>",
             "<td class=\"align-right\">58</td>",
             "<th class=\"align-center\">Note</th>",
-            // What the answer itself says is left as it was written.
             ">say style=\"text-align: right\"</td>",
         ] {
             assert!(rendered.contains(cell), "{cell} is not in {rendered}");
