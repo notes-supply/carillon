@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
+    bundled::Bundled,
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
     home, loopback,
     prompt::Terminal,
@@ -96,16 +97,17 @@ in Discord.")]
         #[arg(long, requires = "guild_id")]
         route: Vec<DiscordRoute>,
     },
-    /// Check, without changing anything, that this program accepts the
+    /// Check, without changing anything, that this program accepts each
     /// instance's Discord settings and its installed Discord module.
     Check {
-        /// Registry ID of the Discord instance; inferred when only one is configured.
+        /// Registry ID of the Discord instance; every registered one when
+        /// omitted, which may be none.
         #[arg(long)]
         provider: Option<String>,
     },
     /// Call the running provider's Discord API; prints JSON and never retries a write.
     Call {
-        /// Registry ID of the Discord instance; inferred when only one is configured.
+        /// Registry ID of the Discord instance; inferred when only one is registered.
         #[arg(long, global = true)]
         provider: Option<String>,
         #[command(subcommand)]
@@ -124,7 +126,7 @@ The guild and bot identity, attachment limits and whether activity
 cards are shown apply only when the provider restarts; a file that changes
 any of them is not applied at all until then.")]
     Settings {
-        /// Registry ID of the Discord instance; inferred when only one is configured.
+        /// Registry ID of the Discord instance; inferred when only one is registered.
         #[arg(long, global = true)]
         provider: Option<String>,
         #[command(subcommand)]
@@ -145,7 +147,7 @@ leaves the serving module and settings in place. Interactions already running
 finish on the module they started with; each card update is drawn by the
 module serving then.")]
     Module {
-        /// Registry ID of the Discord instance; inferred when only one is configured.
+        /// Registry ID of the Discord instance; inferred when only one is registered.
         #[arg(long, global = true)]
         provider: Option<String>,
         #[command(subcommand)]
@@ -217,10 +219,7 @@ pub(crate) async fn run() -> Result<()> {
             route,
         } => {
             let loaded = installation()?;
-            let provider = match provider {
-                Some(provider) => provider,
-                None => only_interface(&loaded)?,
-            };
+            let provider = instance(&loaded, provider)?;
             match (guild_id, bot_user_id) {
                 (Some(guild_id), Some(bot_user_id)) => {
                     setup::unattended(&loaded, &provider, guild_id, bot_user_id, user_id, route)
@@ -231,16 +230,26 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::Check { provider } => {
             let loaded = installation()?;
-            let provider = instance(&loaded, provider)?;
-            let discord = DiscordConfig::load(&loaded, &provider).with_context(|| {
-                format!("carillon-discord {RELEASE_VERSION} cannot use the settings of {provider}")
-            })?;
-            println!(
-                "{} is compatible with carillon-discord {}",
-                loaded.provider_config_path(&provider)?.display(),
-                RELEASE_VERSION
-            );
-            check_declared(&loaded, &provider, &discord, &release()?).await?;
+            let checked = match &provider {
+                Some(provider) => vec![provider.as_str()],
+                None => instances(&loaded),
+            };
+            if checked.is_empty() {
+                println!("carillon.toml registers no Discord provider, so nothing was checked");
+            }
+            for provider in checked {
+                let discord = DiscordConfig::load(&loaded, provider).with_context(|| {
+                    format!(
+                        "carillon-discord {RELEASE_VERSION} cannot use the settings of {provider}"
+                    )
+                })?;
+                println!(
+                    "{} is compatible with carillon-discord {}",
+                    loaded.provider_config_path(provider)?.display(),
+                    RELEASE_VERSION
+                );
+                check_declared(&loaded, provider, &discord, &release()?).await?;
+            }
         }
         Command::Call {
             provider,
@@ -387,52 +396,28 @@ fn release() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-/// The only interface provider registered, which setup gives its first
-/// settings.
-fn only_interface(config: &LoadedConfig) -> Result<String> {
-    let interfaces: Vec<&str> = config
-        .value
-        .providers
-        .iter()
-        .filter(|provider| provider.role == ProviderRole::Interface)
+fn instances(config: &LoadedConfig) -> Vec<&str> {
+    let providers = config.value.providers.iter();
+    providers
+        .filter(|provider| provider.program == Bundled::Discord.program())
         .map(|provider| provider.id.as_str())
-        .collect();
-    match interfaces.as_slice() {
-        [only] => Ok((*only).to_owned()),
-        several => bail!(
-            "choose the Discord instance to set up with --provider from: {}",
-            several.join(", ")
-        ),
-    }
+        .collect()
 }
 
-/// The Discord instance an operator action names, or the only interface
-/// provider with Discord settings. Anything else is a choice for the operator.
+/// The Discord instance an operator action names, or the only one
+/// registered. Anything else is a choice for the operator.
 fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     if let Some(explicit) = explicit {
         return Ok(explicit);
     }
-    let interfaces: Vec<&str> = config
-        .value
-        .providers
-        .iter()
-        .filter(|provider| provider.role == ProviderRole::Interface)
-        .map(|provider| provider.id.as_str())
-        .collect();
-    let discord: Vec<&str> = interfaces
-        .iter()
-        .copied()
-        .filter(|id| DiscordConfig::read(config, id).is_ok())
-        .collect();
-    match discord.as_slice() {
+    match instances(config).as_slice() {
         [only] => Ok((*only).to_owned()),
         [] => bail!(
-            "no interface provider has Discord settings this program can read; choose one \
-             with --provider from: {}",
-            interfaces.join(", ")
+            "carillon.toml registers no provider with program = \"discord\"; `carillon setup \
+             --interface discord` adds one"
         ),
         several => bail!(
-            "several Discord instances are configured; choose one with --provider from: {}",
+            "several Discord instances are registered; choose one with --provider from: {}",
             several.join(", ")
         ),
     }

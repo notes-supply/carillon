@@ -469,7 +469,10 @@ mod tests {
         let config_path = crate::application::admin::initialize(
             &directory.path().join("installation"),
             44_000,
-            crate::application::admin::Runtime::Pi,
+            &[
+                carillon_installation::bundled::Bundled::Discord,
+                carillon_installation::bundled::Bundled::Pi,
+            ],
             vec![crate::application::admin::assistant(directory.path())],
         )?;
         let config = super::LoadedConfig::load(&config_path)?;
@@ -521,7 +524,10 @@ mod tests {
         let config_path = crate::application::admin::initialize(
             &directory.path().join("installation"),
             44_100,
-            crate::application::admin::Runtime::Pi,
+            &[
+                carillon_installation::bundled::Bundled::Discord,
+                carillon_installation::bundled::Bundled::Pi,
+            ],
             vec![crate::application::admin::assistant(directory.path())],
         )?;
         let mut config = super::LoadedConfig::load(&config_path)?;

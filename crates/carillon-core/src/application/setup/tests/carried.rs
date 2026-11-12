@@ -3,7 +3,7 @@ use std::path::Path;
 use carillon_installation::config::RELEASE_VERSION;
 
 use super::{
-    Runtime, SavedT3, Unasked, adopt_release, fake_t3, initialized, model, options, set_up_t3,
+    Bundled, SavedT3, Unasked, adopt_release, fake_t3, initialized, model, options, set_up_t3,
 };
 use crate::application::setup::{Project, agents};
 
@@ -12,8 +12,8 @@ const PREVIOUS: [&str; 3] = ["0.0.1-previous"; 3];
 fn bundled() -> anyhow::Result<[String; 3]> {
     Ok([
         RELEASE_VERSION.to_owned(),
-        Runtime::Pi.version()?,
-        Runtime::T3.version()?,
+        Bundled::Pi.version()?,
+        Bundled::T3.version()?,
     ])
 }
 
@@ -31,6 +31,7 @@ operator_token_hash = "{hash}"
 [[providers]]
 id = "discord-private"
 role = "interface"
+program = "discord"
 version  =  '{discord}' # owner version note
 url = "http://127.0.0.1:44001"
 token_hash = "{hash}"
@@ -40,6 +41,7 @@ max_upload_mib = 25
 [[providers]]
 id = "runtime-pi"
 role = "runtime"
+program = "runtime-pi"
 version = "{pi}"
 url = "http://127.0.0.1:44002"
 token_hash = "{hash}"
@@ -48,6 +50,7 @@ enabled = true
 [[providers]]
 id = "runtime-t3"
 role = "runtime"
+program = "runtime-t3"
 version = "{t3}"
 url = "http://127.0.0.1:44003"
 token_hash = "{hash}"
@@ -56,8 +59,18 @@ enabled = true
 [[providers]]
 id = "custom-runtime"
 role = "runtime"
+program = "custom-runtime"
 version = "9.8.7" # custom release
 url = "http://127.0.0.1:44004"
+token_hash = "{hash}"
+enabled = false
+
+[[providers]]
+id = "discord-work"
+role = "interface"
+program = "discord"
+version = "{discord}"
+url = "http://127.0.0.1:44005"
 token_hash = "{hash}"
 enabled = false
 
@@ -84,9 +97,9 @@ fn carried_inline(workspace: &Path, [discord, pi, _]: [&str; 3]) -> String {
     let workspace = workspace.display();
     format!(
         r#"providers = [
-  {{ id = "discord-private", role = "interface", version = '{discord}', url = "http://127.0.0.1:44001", token_hash = "{hash}", enabled = true }}, # the bot
-  {{ id = "runtime-pi", role = "runtime", version = "{pi}", url = "http://127.0.0.1:44002", token_hash = "{hash}", enabled = true }},
-  {{ id = "custom-runtime", role = "runtime", version = "9.8.7", url = "http://127.0.0.1:44004", token_hash = "{hash}", enabled = false }},
+  {{ id = "discord-private", role = "interface", program = "discord", version = '{discord}', url = "http://127.0.0.1:44001", token_hash = "{hash}", enabled = true }}, # the bot
+  {{ id = "runtime-pi", role = "runtime", program = "runtime-pi", version = "{pi}", url = "http://127.0.0.1:44002", token_hash = "{hash}", enabled = true }},
+  {{ id = "custom-runtime", role = "runtime", program = "custom-runtime", version = "9.8.7", url = "http://127.0.0.1:44004", token_hash = "{hash}", enabled = false }},
 ]
 data_dir = "state"
 
@@ -105,7 +118,7 @@ resources = "agents/default"
 }
 
 fn carry(home: &Path, workspace: &Path, registry: &str) -> anyhow::Result<std::path::PathBuf> {
-    let path = initialized(home, workspace, Runtime::Pi)?;
+    let path = initialized(home, workspace, Bundled::Pi)?;
     std::fs::write(&path, registry)?;
     std::fs::remove_file(home.join("state/carillon.sqlite3"))?;
     Ok(path)

@@ -8,7 +8,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_installation::config::{LoadedConfig, ProviderRole};
+use carillon_installation::{
+    bundled::Bundled,
+    config::{LoadedConfig, ProviderRole},
+};
 use carillon_protocol::settings::{
     Change, Choice, Page, Revision, RuntimePart, RuntimeSettings, Setting, SettingsRequest,
     Subject, Value,
@@ -16,7 +19,7 @@ use carillon_protocol::settings::{
 use serde_json::json;
 
 use super::{Edit, change, edits, render, settings, summary};
-use crate::application::admin::{Runtime, assistant, initialize};
+use crate::application::admin::{assistant, initialize};
 
 fn revision(number: usize) -> Revision {
     Revision::try_from(format!("{number:064x}")).unwrap_or_else(|_| unreachable!())
@@ -497,7 +500,7 @@ async fn installation(
     let path = initialize(
         &directory.join("home"),
         44_100,
-        Runtime::Pi,
+        &[Bundled::Discord, Bundled::Pi],
         vec![assistant(directory)],
     )?;
     let mut config = LoadedConfig::load(&path)?;

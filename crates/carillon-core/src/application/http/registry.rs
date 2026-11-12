@@ -167,6 +167,7 @@ impl Difference {
         let Provider {
             id,
             role,
+            program,
             version,
             url,
             token_hash,
@@ -185,6 +186,7 @@ impl Difference {
             }
         };
         changed(*role != serving.role, "role", false);
+        changed(*program != serving.program, "program", false);
         changed(*version != serving.version, "version", false);
         changed(*url != serving.url, "url", false);
         changed(*token_hash != serving.token_hash, "token_hash", false);

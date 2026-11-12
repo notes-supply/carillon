@@ -18,13 +18,13 @@ impl Fixture {
         let home = directory.path().join("home");
         let workspace = directory.path().join("requested-workspace");
         std::fs::create_dir(&workspace)?;
-        let path = initialized(&home, directory.path(), Runtime::T3)?;
+        let path = initialized(&home, directory.path(), Bundled::T3)?;
         crate::application::admin::set_agents(
             &path,
             vec![carillon_installation::config::AgentConfig {
                 id: "t3-notes".to_owned(),
                 name: "T3 Code · Notes".to_owned(),
-                runtime: Runtime::T3.id().to_owned(),
+                runtime: Bundled::T3.id().to_owned(),
                 workspace: directory.path().to_path_buf(),
                 resources: None,
             }],
@@ -43,21 +43,7 @@ impl Fixture {
             }),
         )?;
         std::fs::write(directory.path().join("model-t3-notes"), "codex/gpt")?;
-        for (name, script) in [
-            (
-                "runtime-pi",
-                "echo \"$*\" >>\"$CARILLON_HOME/pi-calls\"\n\
-                 case \"$*\" in *--models*) echo '{\"models\": [], \"value\": \"openai-codex/gpt-6.1-sol\"}' ;; esac",
-            ),
-            (
-                "discord",
-                "echo \"$*\" >>\"$CARILLON_HOME/discord-calls\"\nexit 0",
-            ),
-        ] {
-            let program = directory.path().join(format!("carillon-{name}"));
-            std::fs::write(&program, format!("#!/bin/sh\n{script}\n"))?;
-            std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700))?;
-        }
+        fake_providers(directory.path(), &["discord"])?;
         Ok(Self {
             directory,
             home,
@@ -66,21 +52,46 @@ impl Fixture {
     }
 
     fn run(&self, workspace: bool) -> anyhow::Result<std::process::Output> {
-        let path =
-            std::env::join_paths(std::iter::once(self.directory.path().to_path_buf()).chain(
-                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-            ))?;
-        let mut child = std::process::Command::new(std::env::current_exe()?);
-        child
-            .args(["--exact", CHILD, "--ignored", "--nocapture"])
-            .env("PATH", path)
-            .env("CARILLON_HOME", &self.home)
-            .env("CARILLON_TEST_SETUP_HOME", &self.home);
-        if workspace {
-            child.env("CARILLON_TEST_SETUP_WORKSPACE", &self.workspace);
-        }
-        child.output().context("run the setup rerun")
+        let workspace = workspace.then_some(self.workspace.as_path());
+        rerun(self.directory.path(), &self.home, workspace)
     }
+}
+
+pub(super) fn fake_providers(directory: &Path, interfaces: &[&str]) -> anyhow::Result<()> {
+    let pi = "echo \"$*\" >>\"$CARILLON_HOME/pi-calls\"\n\
+              case \"$*\" in *--models*) echo '{\"models\": [], \"value\": \"openai-codex/gpt-6.1-sol\"}' ;; esac";
+    let interfaces = interfaces.iter().map(|name| {
+        let script = format!("echo \"$*\" >>\"$CARILLON_HOME/{name}-calls\"\nexit 0");
+        ((*name).to_owned(), script)
+    });
+    for (name, script) in
+        std::iter::once(("runtime-pi".to_owned(), pi.to_owned())).chain(interfaces)
+    {
+        let program = directory.join(format!("carillon-{name}"));
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n"))?;
+        std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+pub(super) fn rerun(
+    directory: &Path,
+    home: &Path,
+    workspace: Option<&Path>,
+) -> anyhow::Result<std::process::Output> {
+    let path = std::env::join_paths(std::iter::once(directory.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))?;
+    let mut child = std::process::Command::new(std::env::current_exe()?);
+    child
+        .args(["--exact", CHILD, "--ignored", "--nocapture"])
+        .env("PATH", path)
+        .env("CARILLON_HOME", home)
+        .env("CARILLON_TEST_SETUP_HOME", home);
+    if let Some(workspace) = workspace {
+        child.env("CARILLON_TEST_SETUP_WORKSPACE", workspace);
+    }
+    child.output().context("run the setup rerun")
 }
 
 #[test]
@@ -88,12 +99,12 @@ impl Fixture {
 fn setup_added_pi_child() -> anyhow::Result<()> {
     let home = std::env::var_os("CARILLON_TEST_SETUP_HOME").context("setup home")?;
     let options = Options {
-        runtimes: vec![Runtime::Pi],
+        runtimes: vec![Bundled::Pi],
         workspace: std::env::var_os("CARILLON_TEST_SETUP_WORKSPACE").map(Into::into),
         ..options()
     };
     let mut questions = Shown::default();
-    setup(Path::new(&home), &options, &mut questions)?;
+    setup(Path::new(&home), options, &mut questions)?;
     println!("{}", questions.transcript.join("\n"));
     Ok(())
 }
@@ -124,7 +135,7 @@ fn keeping_t3_while_adding_pi_plans_its_assistant_and_honours_workspace() -> any
         assert!(!pi.contains("--configure"), "{pi}");
         assert_eq!(
             std::fs::read_to_string(fixture.home.join("discord-calls"))?,
-            "setup\n"
+            "setup --provider discord-private\n"
         );
     }
     Ok(())

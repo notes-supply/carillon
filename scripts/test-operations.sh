@@ -515,7 +515,7 @@ FINAL=$(release_archive final)
 pack "$FINAL" "$TEST_ROOT/final.tar.gz"
 # A separately installed provider keeps the version it expects.
 cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
-printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = "runtime"\nversion = "9.8.7" # its own release\nurl = "http://127.0.0.1:1"\ntoken_hash = "%s"\nenabled = false\n' \
+printf '\n# Installed separately.\n[[providers]]\nid = "custom-runtime"\nrole = "runtime"\nprogram = "custom-runtime"\nversion = "9.8.7" # its own release\nurl = "http://127.0.0.1:1"\ntoken_hash = "%s"\nenabled = false\n' \
   "$(printf '%064d' 0)" >>"$INSTALLATION/carillon.toml"
 snapshot
 carillon update "$TEST_ROOT/final.tar.gz" | grep -F 'services remain stopped as before' >/dev/null

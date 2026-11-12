@@ -178,10 +178,11 @@ if [ "$CHECK" -eq 1 ]; then
   fi
   rm -rf -- "$probe"
   # This release's own programs must accept the installation as it is now,
-  # read-only: the registry and core database, the Discord settings, and the
-  # T3 runtime's settings and token when it is the one registered and enabled.
+  # read-only: the registry and core database, the settings of every Discord
+  # provider registered, which may be none, and the T3 runtime's settings
+  # and token when it is the one registered and enabled.
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" check
-  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check --provider discord-private
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" runtime-t3 check
   exit 0
 fi
@@ -198,11 +199,12 @@ if [ "$GUIDED" -eq 1 ]; then
 fi
 # Unattended setup keeps an installation's registry, credentials and durable
 # state: init creates a new installation, or starts one carried without state
-# fresh on this release. Only the Discord provider's own settings file is
+# fresh on this release. Its options name Discord, so Discord is the
+# interface it registers. Only the Discord provider's own settings file is
 # (re)written from the arguments.
 if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
-  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" \
-    --base-port "$BASE_PORT"
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --interface discord \
+    --workspace "$WORKSPACE" --base-port "$BASE_PORT"
 fi
 # Serialize maintenance with `carillon update`, which holds this lock itself
 # while it runs `install.sh --update`, and with uninstallation.

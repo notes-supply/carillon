@@ -1,5 +1,5 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, adopt_release, fake_t3, initialized,
+    Bundled, Config, LoadedConfig, Options, SavedT3, Shown, adopt_release, fake_t3, initialized,
     model, options, saved_t3, set_up_t3,
 };
 use crate::application::{
@@ -11,7 +11,7 @@ use crate::application::{
 fn setting_up_t3_keeps_the_assistants_id_and_paths_on_pi() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialized(&home, directory.path(), Runtime::Pi)?;
+    let path = initialized(&home, directory.path(), Bundled::Pi)?;
     let mut config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     config.agents[0].id = "my-assistant".to_owned();
     config.agents[0].name = "My assistant".to_owned();
@@ -48,13 +48,13 @@ fn setting_up_t3_keeps_the_assistants_id_and_paths_on_pi() -> anyhow::Result<()>
 fn a_pi_assistant_is_created_when_a_code_only_installation_adds_pi() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    let path = initialized(&home, directory.path(), Bundled::T3)?;
     set_agents(
         &path,
         vec![carillon_installation::config::AgentConfig {
             id: "t3-code".to_owned(),
             name: "T3 Code".to_owned(),
-            runtime: Runtime::T3.id().to_owned(),
+            runtime: Bundled::T3.id().to_owned(),
             workspace: directory.path().to_path_buf(),
             resources: None,
         }],
@@ -79,12 +79,12 @@ fn a_pi_assistant_is_created_when_a_code_only_installation_adds_pi() -> anyhow::
 fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::Pi)?;
+    initialized(&home, directory.path(), Bundled::Pi)?;
     let options = Options {
-        runtimes: vec![Runtime::T3],
+        runtimes: vec![Bundled::T3],
         ..options()
     };
-    assert_eq!(runtimes(&home, &options)?, [Runtime::Pi, Runtime::T3]);
+    assert_eq!(runtimes(&home, &options)?, [Bundled::Pi, Bundled::T3]);
     let project = super::super::Project {
         id: "notes".to_owned(),
         title: "Notes".to_owned(),
@@ -93,7 +93,7 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
     agents(&home, &options, true, Some(&[&project]))?;
     assert_eq!(
         super::registered_runtimes(&home)?,
-        [Runtime::Pi, Runtime::T3]
+        [Bundled::Pi, Bundled::T3]
     );
     let stored: Config = toml::from_str(&std::fs::read_to_string(home.join("carillon.toml"))?)?;
     assert_eq!(stored.agent("assistant")?.runtime, "runtime-pi");
@@ -107,7 +107,7 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
 fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::T3)?;
+    initialized(&home, directory.path(), Bundled::T3)?;
     let offer = serde_json::json!({
         "projects": [{"id": "notes", "title": "Notes", "workspace": directory.path()}],
         "models": [model("other", "gpt", "Other GPT"), model("codex", "gpt", "GPT")],
@@ -134,13 +134,13 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
 fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    let path = initialized(&home, directory.path(), Bundled::T3)?;
     set_agents(
         &path,
         vec![carillon_installation::config::AgentConfig {
             id: "t3-notes".to_owned(),
             name: "T3 Code · Notes".to_owned(),
-            runtime: Runtime::T3.id().to_owned(),
+            runtime: Bundled::T3.id().to_owned(),
             workspace: directory.path().to_path_buf(),
             resources: None,
         }],
@@ -194,11 +194,11 @@ fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Re
 fn kept_t3_settings_ask_the_model_of_each_agent_that_has_none() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    let path = initialized(&home, directory.path(), Bundled::T3)?;
     let agent = |id: &str, name: &str| carillon_installation::config::AgentConfig {
         id: id.to_owned(),
         name: name.to_owned(),
-        runtime: Runtime::T3.id().to_owned(),
+        runtime: Bundled::T3.id().to_owned(),
         workspace: directory.path().to_path_buf(),
         resources: None,
     };
@@ -260,7 +260,7 @@ fn a_registry_adopts_this_release_and_gets_a_database_only_when_it_has_none() ->
 {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialized(&home, directory.path(), Runtime::Pi)?;
+    let path = initialized(&home, directory.path(), Bundled::Pi)?;
     let note = "# Carried from the previous installation.\n";
     let current = format!("{note}{}", std::fs::read_to_string(&path)?);
     let carried: String = current

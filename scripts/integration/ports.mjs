@@ -3,8 +3,9 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
-// init assigns three consecutive ports, and the T3 runtime case takes the
-// next. The probe releases them before the services bind, so the block lies
+export const PORT_OFFSETS = { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 };
+
+// The probe releases the ports before the services bind, so the block lies
 // below the kernel's ephemeral range, where outgoing connections can't take a
 // port in between, and below the 128 ports under it that the installer and
 // persistence tests take, which may run at the same time.

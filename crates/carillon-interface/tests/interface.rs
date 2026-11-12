@@ -271,6 +271,7 @@ operator_token_hash = "{operator}"
 [[providers]]
 id = "web"
 role = "interface"
+program = "web"
 version = "0.0.0"
 url = "http://{address}"
 token_hash = "{token}"
@@ -278,6 +279,7 @@ enabled = {enabled}
 [[providers]]
 id = "runtime-other"
 role = "runtime"
+program = "runtime-other"
 version = "0.0.0"
 url = "http://127.0.0.1:45402"
 token_hash = "{token}"

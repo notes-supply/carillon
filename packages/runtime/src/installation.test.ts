@@ -19,7 +19,7 @@ async function registry(
   directories.push(root);
   const hash = "0".repeat(64);
   const provider = (id: string, role: string, url: string, enabled: boolean, extra = "") =>
-    `[[providers]]\nid = "${id}"\nrole = "${role}"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = ${String(enabled)}\n${extra}`;
+    `[[providers]]\nid = "${id}"\nrole = "${role}"\nprogram = "${id}"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = ${String(enabled)}\n${extra}`;
   await writeFile(
     join(root, "carillon.toml"),
     [
@@ -37,7 +37,9 @@ async function registry(
 it("hands extensions only loopback interface endpoints, for every runtime", async () => {
   const loaded = await loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-t3");
   if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
-  expect(loaded.interfaces.map((provider) => provider.url)).toEqual(["http://127.0.0.1:3102"]);
+  expect(loaded.interfaces.map(({ program, url }) => [program, url])).toEqual([
+    ["discord", "http://127.0.0.1:3102"],
+  ]);
   await expect(
     loadInstallation(await registry("http://192.0.2.1:8080"), "runtime-t3"),
   ).rejects.toThrow(/provider URL must use an HTTP loopback socket address/u);

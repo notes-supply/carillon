@@ -82,6 +82,7 @@ async function installation(resources: Record<string, string>, core = "127.0.0.1
         {
           id: "runtime-pi",
           role: "runtime",
+          program: "runtime-pi",
           version: "0.0.0",
           url: `http://127.0.0.1:${String(port)}`,
           token_hash: hash,

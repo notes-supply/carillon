@@ -27,9 +27,9 @@ const ephemeral = Number(
 );
 assert.ok(ephemeral >= 1024 + 128, `no ports below the ephemeral range ${String(ephemeral)}`);
 const port = ephemeral - 128;
-// `init` takes only installation-wide settings; the installer additionally
-// writes the Discord provider's own admission file.
-const initOptions = ["--base-port", String(port)];
+// `init` takes installation-wide settings; the installer writes Discord's own too.
+const portOptions = ["--base-port", String(port)];
+const initOptions = ["--interface", "discord", ...portOptions];
 const installOptions = [
   "--guild-id",
   "100",
@@ -39,7 +39,7 @@ const installOptions = [
   "200",
   "--route",
   "300:always:channel:assistant",
-  ...initOptions,
+  ...portOptions,
 ];
 const discordOptions = [
   "--provider",

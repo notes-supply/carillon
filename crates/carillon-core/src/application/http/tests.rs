@@ -43,13 +43,12 @@ fn installation(root: &Path) -> Result<Fixture> {
     .into_iter()
     .enumerate()
     .map(|(index, (id, role))| {
-        fs::write(
-            root.join("credentials").join(format!("{id}.token")),
-            "test-only",
-        )?;
+        let credential = root.join("credentials").join(format!("{id}.token"));
+        fs::write(credential, "test-only")?;
         Ok(Provider {
             id: id.to_owned(),
             role,
+            program: id.to_owned(),
             version: "test".to_owned(),
             url: format!("http://127.0.0.1:{}", index + 2),
             token_hash: hash_token("test-only"),

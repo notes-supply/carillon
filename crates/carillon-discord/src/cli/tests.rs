@@ -1,9 +1,9 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context as _, Result};
-use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
+use carillon_installation::config::{LoadedConfig, Provider};
 
-use super::{Cli, Command, call, instance, uploads};
+use super::{Cli, Command, call, instance, instances, uploads};
 use crate::operations::{Messages, Operation};
 use axum::{
     Router,
@@ -732,26 +732,23 @@ fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
     assert_eq!(instance(&config, None)?, "discord-a");
     assert_eq!(instance(&config, Some("chosen".to_owned()))?, "chosen");
 
-    // Another platform's interface has its own settings, not a Discord choice.
     let mut other = config.value.providers[0].clone();
-    "slack".clone_into(&mut other.id);
+    "chat".clone_into(&mut other.id);
+    "example".clone_into(&mut other.program);
     config.value.providers.push(other);
-    fs::write(
-        config.provider_config_path("slack")?,
-        "workspace = \"T1\"\n",
+    fs::copy(
+        config.provider_config_path("discord-a")?,
+        config.provider_config_path("chat")?,
     )?;
     assert_eq!(instance(&config, None)?, "discord-a");
 
     let second = Provider {
         id: "discord-b".to_owned(),
-        role: ProviderRole::Interface,
+        enabled: false,
         ..config.value.providers[0].clone()
     };
     config.value.providers.push(second);
-    fs::copy(
-        config.provider_config_path("discord-a")?,
-        config.provider_config_path("discord-b")?,
-    )?;
+    assert_eq!(instances(&config), ["discord-a", "discord-b"]);
     let ambiguous = instance(&config, None)
         .err()
         .context("inferred one of several instances")?;
@@ -760,17 +757,19 @@ fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {
         "{ambiguous}"
     );
 
-    for id in ["discord-a", "discord-b"] {
-        fs::remove_file(config.provider_config_path(id)?)?;
-    }
-    let unconfigured = instance(&config, None)
+    config
+        .value
+        .providers
+        .retain(|provider| provider.program != "discord");
+    assert!(instances(&config).is_empty());
+    let unregistered = instance(&config, None)
         .err()
-        .context("inferred an unconfigured instance")?;
+        .context("inferred an instance of another program")?;
     assert!(
-        unconfigured
+        unregistered
             .to_string()
-            .ends_with("discord-a, slack, discord-b"),
-        "{unconfigured}"
+            .starts_with("carillon.toml registers no provider with program = \"discord\""),
+        "{unregistered}"
     );
     Ok(())
 }
