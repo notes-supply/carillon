@@ -1,4 +1,4 @@
-//! People's control reactions on a message whose turn waits in the runtime
+//! People's control reactions on a message whose turn is in the runtime
 //! that holds it. Admission is the same as a message's; core relays an
 //! admitted control to the runtime, which decides.
 
@@ -28,7 +28,7 @@ pub(crate) fn admitted(
 
 /// Asks core to relay `action` on the turn of the message `message_id` to
 /// its runtime. A refusal shows nothing: the message's reactions say how its
-/// turn stands. A control of a turn that no longer waits, or of a message
+/// turn stands. A control of a turn that no longer takes it, or of a message
 /// with no turn, is routine, since people react as turns move on.
 pub(crate) async fn relay(core: CoreClient, message_id: String, action: ControlAction) {
     let Err(failure) = core.control(&message_id, action).await else {

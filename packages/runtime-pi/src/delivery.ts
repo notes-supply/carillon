@@ -45,6 +45,8 @@ export interface DeliveryInput {
   readonly interface_id: string;
   readonly conversation: ConversationId;
   readonly submission: SubmissionId;
+  /** The runtime opened the turn, so no event of an interface addresses it. */
+  readonly opened?: true;
   /** An opened turn is answered only while what it runs for is not over. */
   readonly needs?: Needs;
 }
@@ -54,6 +56,7 @@ const DeliveryInputSchema = Type.Object({
   interface_id: Type.String(),
   conversation: Type.Integer(),
   submission: Type.Integer(),
+  opened: Type.Optional(Type.Literal(true)),
   needs: Type.Optional(Type.Object({ task: Type.Integer(), extension: Type.String() })),
 });
 

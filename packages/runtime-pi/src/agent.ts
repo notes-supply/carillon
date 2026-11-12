@@ -135,6 +135,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const admitting = new Map<string, Promise<void>>();
   /** Each conversation's controls and background interrupts, run in the order they were asked for. */
   const queues = new Map<ConversationId, Promise<void>>();
+  const ending = new Set<ConversationId>();
   let closing = false;
   const watches = new Map<ConversationId, Promise<ConversationActivity>>();
   const watched = new Map<ConversationId, ConversationActivity>();
@@ -304,7 +305,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     activity(turnId, interfaceId) {
       const input = held.get(turnId);
       if (input?.interface_id !== interfaceId) return undefined;
-      return watched.get(input.conversation)?.of(input.submission);
+      return watched.get(input.conversation)?.of(input.submission, controlsOffered(input));
     },
 
     get calling() {
@@ -635,6 +636,11 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     );
   }
 
+  function controlsOffered(input: DeliveryInput) {
+    if (input.opened === true) return "none";
+    return ending.has(input.conversation) ? "waiting" : "all";
+  }
+
   function release(turn: string): void {
     const input = held.get(turn);
     if (input === undefined) return;
@@ -740,14 +746,19 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     spared?: SubmissionId,
   ): Promise<boolean> {
     let aborted = false;
-    for (let attempt = 0; attempt < ABORT_ATTEMPTS; attempt += 1) {
-      const run = (await harness.snapshot(LiveDoc, conversation, context))?.run;
-      if (run === undefined || !run.inputs.includes(held)) return aborted;
-      if (spared !== undefined && run.inputs.includes(spared)) return aborted;
-      if ((await harness.abortTask(run.taskId, context)) === "marked") aborted = true;
-      await harness.waitForTask(run.taskId, context);
+    try {
+      for (let attempt = 0; attempt < ABORT_ATTEMPTS; attempt += 1) {
+        const run = (await harness.snapshot(LiveDoc, conversation, context))?.run;
+        if (run === undefined || !run.inputs.includes(held)) return aborted;
+        if (spared !== undefined && run.inputs.includes(spared)) return aborted;
+        ending.add(conversation);
+        if ((await harness.abortTask(run.taskId, context)) === "marked") aborted = true;
+        await harness.waitForTask(run.taskId, context);
+      }
+      return aborted;
+    } finally {
+      ending.delete(conversation);
     }
-    return aborted;
   }
 
   /** The messages waiting in the conversation's inbox, not its writes. */

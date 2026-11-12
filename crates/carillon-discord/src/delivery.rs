@@ -92,7 +92,7 @@ impl From<Silence> for Feedback {
 /// After the stop nothing is sent, not even an outcome a caller awaits.
 ///
 /// They also own the control reactions a message offers while its turn
-/// waits in its runtime, as [`Controls`], and withdraw them before the
+/// is in its runtime, as [`Controls`], and withdraw them before the
 /// message's outcome shows. A message without a feedback target, such as a
 /// turn its runtime opened, gets no reaction at all.
 ///

@@ -34,8 +34,10 @@ with `pi` as its first argument, the same executable is Pi's own command line
   other agent, and no store recreated in its place, shares it. The key
   opens and places the turn once across restarts; its input waits as a
   follow-up on the model of the channel core names in its reply, and the
-  turn settles like
-  any other, with its cards, typing and stop. Work that has ended, such as
+  turn settles like any other, with its cards and typing. Its activity
+  lists no controls yet, waiting or running: an interface addresses a
+  control by a message's event, and an opened turn has none. Work that has
+  ended, such as
   a cancelled schedule's run, opens no turn, unless core was asked already
   and may have opened one. A turn core has settled already is left alone,
   one whose work ended before it was placed is settled `stopped`, and one
@@ -48,12 +50,18 @@ with `pi` as its first argument, the same executable is Pi's own command line
   `interrupt` ends it, a note saying so, with every waiting message joining
   the next answer. The message is accepted before that answer ends; if the
   process crashes before the interrupt is applied, it waits as in `queue`.
-- **Controls.** `POST /v1/turns/{id}/control` acts on a waiting message for
-  its interface: `steer` hands it to the running answer, `interrupt` ends that
-  answer and runs the waiting messages next, and `stop` drops it. Stopping a
-  running message ends its answer, never one that followed it. A waiting
-  turn's activity has phase `queued` and lists the controls that apply: a
-  waiting steer offers no `steer`.
+  Stopping any message of a joined answer ends that answer for all of them:
+  each turn settles `stopped`, and Discord shows the stopped reaction on
+  each message and sends nothing.
+- **Controls.** `POST /v1/turns/{id}/control` acts on a message for its
+  interface. On a waiting message, `steer` hands it to the running answer,
+  `interrupt` ends that answer and runs the waiting messages next, and `stop`
+  drops it. On a running message, `stop` ends its answer, never one that
+  followed it; `steer` and `interrupt` are refused. A turn's activity lists
+  the controls that apply now. A waiting turn has phase `queued` and lists
+  all three, without `steer` when it already waits as a steer. A running
+  turn lists `stop` from when its run holds it until its answer ends, and
+  not while a stop or an interrupt is already ending that run.
 - **Restarts.** A model call or a replay-safe tool cut off by a crash runs
   again; any other tool tells the model it was interrupted. Parked deliveries
   run again at startup. A run that crashed the process too often is given up,

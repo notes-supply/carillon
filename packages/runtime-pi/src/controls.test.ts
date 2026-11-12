@@ -18,7 +18,7 @@ import {
   MemoryStorage,
   type Extension,
 } from "@earendil-works/pi-durable";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
 
 const fixtures: Fixture[] = [];
@@ -171,6 +171,60 @@ it("queues a message behind a running answer, offering its controls", async () =
   expect(await agent.outcome("turn-1")).toMatchObject({ output: "First answer." });
   expect(await agent.outcome("turn-2")).toMatchObject({ output: "Second answer." });
   expect(agent.runtime.restartReadiness()).toEqual({ state: "ready" });
+});
+
+const offered = (agent: Fixture, turnId: string) =>
+  agent.runtime.activity(turnId, "discord-private")?.controls;
+
+it("offers only stop on a running message, and nothing once its answer ended", async () => {
+  const { agent, pause } = await busy("queue", [fauxAssistantMessage("First answer.")]);
+  expect(await eventually(() => offered(agent, "turn-1"))).toEqual(["stop"]);
+  for (const action of ["steer", "interrupt"] as const)
+    await expect(
+      agent.runtime.turns.control("turn-1", "discord-private", action),
+    ).rejects.toMatchObject({ status: 409 });
+  const recording = agent.core.stall("/v1/runtime/turns/turn-1/outcome");
+  pause.release();
+  await recording.reached;
+  await vi.waitFor(() => expect(offered(agent, "turn-1")).toBeUndefined(), { timeout: 3_000 });
+  expect(agent.runtime.activity("turn-1", "discord-private")).toMatchObject({
+    recent: [{ tool: "pause", ok: true }],
+  });
+  await expect(
+    agent.runtime.turns.control("turn-1", "discord-private", "stop"),
+  ).rejects.toMatchObject({ status: 409 });
+  recording.release();
+});
+
+it("stops a running message from the stop it offers, which it withdraws while the run ends", async () => {
+  const { agent, pause, turn } = await busy("queue", [fauxAssistantMessage("Second answer.")], {
+    stubborn: true,
+  });
+  expect(await eventually(() => offered(agent, "turn-1"))).toEqual(["stop"]);
+  await agent.runtime.turns.submit(turn("turn-2", "second"));
+  await eventually(() => offered(agent, "turn-2"));
+  const stopping = agent.runtime.turns.control("turn-1", "discord-private", "stop");
+  await vi.waitFor(() => expect(offered(agent, "turn-1")).toBeUndefined(), { timeout: 3_000 });
+  expect(agent.runtime.activity("turn-1", "discord-private")).toMatchObject({
+    running: [{ tool: "pause" }],
+  });
+  expect(offered(agent, "turn-2")).toEqual(["steer", "interrupt", "stop"]);
+  pause.release();
+  await stopping;
+  expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
+  expect(await agent.outcome("turn-2")).toMatchObject({ output: "Second answer." });
+});
+
+it("offers stop on each message of a running answer, which ends it for them all", async () => {
+  const { agent, pause, turn } = await busy("steer", [heldAnswer("never", never)]);
+  await agent.runtime.turns.submit(turn("turn-2", "second"));
+  expect(await eventually(() => offered(agent, "turn-2"))).toEqual(["interrupt", "stop"]);
+  pause.release();
+  await vi.waitFor(() => expect(offered(agent, "turn-2")).toEqual(["stop"]), { timeout: 3_000 });
+  expect(offered(agent, "turn-1")).toEqual(["stop"]);
+  await agent.runtime.turns.control("turn-2", "discord-private", "stop");
+  expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
+  expect(await agent.outcome("turn-2")).toEqual({ outcome: "stopped" });
 });
 
 it("steers a waiting message into the running answer", async () => {

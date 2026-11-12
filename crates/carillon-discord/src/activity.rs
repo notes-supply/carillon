@@ -273,7 +273,7 @@ struct Cards {
 /// records are left as they are. The monitor works with the Discord client
 /// and settings of `reactions`. Each job shows typing when the settings
 /// serving as it is first followed say so, and offers through `reactions`
-/// the controls its runtime offers while its turn waits there. Once
+/// the controls its runtime offers while its turn is there. Once
 /// `stopping`, nothing more is read, typed or made a card; when `delivering`
 /// closes, core is read once more and the cards of jobs that settled get up
 /// to [`FINAL_DRAIN`] to show their summaries, and every other card stays

@@ -85,8 +85,9 @@ native state between engines or T3 projects.
 - **Busy conversations.** A message that arrives while Pi answers in its
   conversation steers that answer by default, or waits for it or interrupts
   it, as the agent's settings choose. People can steer a waiting message in,
-  interrupt for it, or stop it, with reactions. On T3, a conversation's
-  messages wait their turn, and people can stop one, waiting or running.
+  interrupt for it, or stop it, and stop a running answer, with reactions. On
+  T3, a conversation's messages wait their turn, and people can stop one,
+  waiting or running.
 - **Visibility.** While a turn runs, a card shows its current tool calls,
   recent ones and delegated work, never tool output or private reasoning.
   It stays as a summary when the work ends.
