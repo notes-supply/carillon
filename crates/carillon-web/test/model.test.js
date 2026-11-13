@@ -20,10 +20,12 @@ import {
   pressed,
   reading,
   refusal,
+  relisted,
   sendingLine,
   since,
   size,
   span,
+  superseded,
   titleOf,
   unfinished,
   unread,
@@ -128,6 +130,42 @@ describe("the poll", () => {
     expect(unread(undefined, conversation())).toBe(false);
   });
 
+  describe("lays the first page over the conversations held", () => {
+    const talks = (/** @type {number[]} */ ...activities) =>
+      activities.map((activity) => conversation({ id: `c${String(activity)}`, activity }));
+    const ids = (/** @type {Conversation[]} */ list) => list.map(({ id }) => id);
+
+    it("keeps a conversation the first page no longer lists, and where earlier ones continue", () => {
+      // The person loaded the page before 3. Then a new conversation pushed c3 off the first page.
+      const held = { conversations: talks(5, 4, 3, 2, 1), next: null };
+      const rail = relisted(held, { conversations: talks(6, 5, 4), next: 4 });
+      expect(ids(rail.conversations)).toEqual(["c6", "c5", "c4", "c3", "c2", "c1"]);
+      expect(rail.next).toBeNull();
+    });
+
+    it("lists a conversation that changed once, where the first page has it", () => {
+      const held = { conversations: talks(5, 4, 3, 2), next: 2 };
+      const moved = conversation({ id: "c2", activity: 6, title: "Now with an answer" });
+      const rail = relisted(held, { conversations: [moved, ...talks(5, 4)], next: 4 });
+      expect(rail.conversations).toEqual([moved, ...talks(5, 4, 3)]);
+      expect(rail.next).toBe(2);
+    });
+
+    it("takes a first page that is the whole list as it is", () => {
+      const first = { conversations: talks(3, 2), next: null };
+      expect(relisted({ conversations: [], next: null }, first)).toEqual(first);
+      expect(relisted({ conversations: talks(2, 1), next: null }, first)).toEqual(first);
+    });
+
+    it("starts again from a first page on which every conversation changed", () => {
+      // More conversations than a page lists may have changed, so those held leave a gap.
+      const held = { conversations: talks(5, 4, 3, 2, 1), next: null };
+      const changed = [conversation({ id: "c1", activity: 8 }), ...talks(7, 6)];
+      const first = { conversations: changed, next: 6 };
+      expect(relisted(held, first)).toEqual(first);
+    });
+  });
+
   it("waits about a second, and longer after each failure, up to ten", () => {
     expect([0, 1, 2, 3, 4, 9].map(wait)).toEqual([1000, 2000, 4000, 8000, 10_000, 10_000]);
   });
@@ -211,6 +249,16 @@ describe("answers to requests", () => {
     for (const status of [0, 200, 403, 503]) expect(dropsToken(status, "t1", "t1")).toBe(false);
   });
 
+  it("asks again when a 401 is for a token that is no longer the stored one", () => {
+    // Every browser was signed out and another tab signed in again while the request was on its way.
+    expect(superseded(401, "t1", "t2")).toBe(true);
+    expect(superseded(401, null, "t2")).toBe(true);
+    expect(superseded(401, "t1", "t1")).toBe(false);
+    // Nothing is stored to ask again with.
+    expect(superseded(401, "t1", null)).toBe(false);
+    for (const status of [0, 200, 403, 503]) expect(superseded(status, "t1", "t2")).toBe(false);
+  });
+
   it("tells signed out, away and refused apart", () => {
     expect([200, 204].map(reading)).toEqual(["ok", "ok"]);
     expect([0, 503].map(reading)).toEqual(["away", "away"]);
@@ -244,7 +292,7 @@ describe("turns", () => {
 
   it("replaces held turns by ID and keeps older pages", () => {
     const page = { turns: [turn("b"), turn("c", "running"), turn("d", "queued")], before: "b" };
-    const merged = merge(held, page);
+    const merged = merge(held, page, false);
     expect(merged.turns.map(({ id, state }) => [id, state])).toEqual([
       ["a", "answered"],
       ["b", "answered"],
@@ -256,13 +304,18 @@ describe("turns", () => {
 
   it("takes a page that reaches the first turn as the whole conversation", () => {
     const page = { turns: [turn("b"), turn("c")], before: null };
-    expect(merge(held, page)).toEqual(page);
+    expect(merge(held, page, false)).toEqual(page);
   });
 
   it("replaces everything when the newest page shares no turn with those held", () => {
     const page = { turns: [turn("x"), turn("y")], before: "x" };
-    expect(merge(held, page)).toEqual(page);
-    expect(merge({ turns: [], before: null }, page)).toEqual(page);
+    expect(merge(held, page, false)).toEqual(page);
+    expect(merge({ turns: [], before: null }, page, false)).toEqual(page);
+  });
+
+  it("drops the earlier turns when their file links have aged, to be read again", () => {
+    const page = { turns: [turn("b"), turn("c", "running"), turn("d", "queued")], before: "b" };
+    expect(merge(held, page, true)).toEqual(page);
   });
 
   it("puts an older page before the turns held", () => {
