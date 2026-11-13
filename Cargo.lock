@@ -262,7 +262,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carillon-card-colours"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "carillon-discord-module",
  "carillon-protocol",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-core"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-discord"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -341,14 +341,14 @@ dependencies = [
 
 [[package]]
 name = "carillon-discord-bundled"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "carillon-discord-module",
 ]
 
 [[package]]
 name = "carillon-discord-module"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "carillon-protocol",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-installation"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "hex",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-interface"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-protocol"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "serde",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-wasm"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "tokio",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-web"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 dependencies = [
  "anyhow",
  "axum",
