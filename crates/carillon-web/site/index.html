@@ -72,6 +72,19 @@
     <main class="door" id="door" hidden>
       <h1 class="wordmark">Carillon</h1>
       <p id="door-why" role="status"></p>
+      <form class="sign-in" id="sign-in" hidden>
+        <input name="username" autocomplete="username" value="carillon" hidden />
+        <label for="password">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <button class="button primary">Sign in</button>
+        <p id="sign-in-said" role="alert"></p>
+      </form>
     </main>
     <noscript>Carillon's chat needs JavaScript.</noscript>
   </body>

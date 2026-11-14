@@ -46,6 +46,9 @@ const page = {
   app: part("app", HTMLElement),
   door: part("door", HTMLElement),
   doorWhy: part("door-why", HTMLElement),
+  signIn: part("sign-in", HTMLFormElement),
+  password: part("password", HTMLInputElement),
+  signInSaid: part("sign-in-said", HTMLElement),
   chats: part("chats", HTMLOListElement),
   noChats: part("no-chats", HTMLElement),
   moreChats: part("more-chats", HTMLButtonElement),
@@ -154,6 +157,26 @@ function shut(why, refused) {
   page.app.hidden = true;
   page.door.hidden = false;
   page.doorWhy.replaceChildren(...phrase(why));
+  page.signIn.hidden = false;
+  page.password.focus();
+}
+
+/** Trades the password typed for the token. A sign-in that fails keeps any token stored. */
+async function signIn() {
+  const answer = await ask("/api/sign-in", "POST", { password: page.password.value });
+  const kind = reading(answer.status);
+  if (kind === "ok") {
+    /** @type {{ token: string }} */
+    const signedIn = data(answer);
+    token.set(signedIn.token);
+    location.reload();
+  } else if (kind === "away") {
+    page.signInSaid.replaceChildren("Carillon is not answering. Sign in again in a moment.");
+  } else {
+    page.signInSaid.replaceChildren(...phrase(refusal(answer.status, answer.body)));
+    page.password.value = "";
+    page.password.focus();
+  }
 }
 
 /**
@@ -417,8 +440,7 @@ function show(id, minted) {
 
 function route() {
   const hash = location.hash.slice(1);
-  if (hash.startsWith("sign-in=")) location.reload();
-  else if (!signedOut) {
+  if (!signedOut) {
     const id = UUID.test(hash) ? hash : crypto.randomUUID();
     if (id !== hash) history.replaceState(null, "", `#${id}`);
     if (id !== open.id) show(id, id !== hash);
@@ -708,6 +730,10 @@ document.addEventListener("visibilitychange", () => {
     polls.end();
   } else if (!signedOut) kick();
 });
+page.signIn.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void signIn();
+});
 window.addEventListener("storage", (event) => {
   if (signedOut && event.key === "token" && event.newValue !== null) location.reload();
   // Another tab cleared this conversation's draft, as its own receipt does: what this tab holds is still unsent.
@@ -715,29 +741,7 @@ window.addEventListener("storage", (event) => {
     storeDraft(open.id, page.text.value);
 });
 
-/** The sign-in code of the address, which it leaves: a code works once. */
-function takeSignInCode() {
-  const code = new URLSearchParams(location.hash.slice(1)).get("sign-in");
-  if (code !== null) history.replaceState(null, "", location.pathname);
-  return code;
-}
-
 async function start() {
-  const code = takeSignInCode();
-  if (code !== null) {
-    const traded = await ask("/api/sign-in", "POST", { code });
-    const kind = reading(traded.status);
-    if (kind === "ok") {
-      /** @type {{ token: string }} */
-      const signedIn = data(traded);
-      token.set(signedIn.token);
-    } else if (token.get() === null) {
-      const unanswered = "Carillon did not answer the sign-in link. Run `carillon web open` again.";
-      shut(kind === "away" ? unanswered : refusal(traded.status, traded.body));
-      return;
-    }
-    // A link that no longer works changes nothing for a browser that is signed in.
-  }
   for (let failed = 0; ; failed += 1) {
     const answer = await ask("/api/session");
     const kind = reading(answer.status);

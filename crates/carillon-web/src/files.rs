@@ -3,7 +3,7 @@
 //!
 //! A link is minted only in an answer to the signed-in page and carries its
 //! own authority, so `<img>` and an ordinary download work without the
-//! token. It names one file, expires, and dies with the browser key. Only
+//! token. It names one file, expires, and dies with the password. Only
 //! a raster image is shown in place. Anything else, HTML and SVG included,
 //! downloads, so nothing an agent or a person made runs on this origin,
 //! where it could read the token.
@@ -139,7 +139,7 @@ pub(crate) async fn file(
     let expires = link.exp.to_string();
     let signed = signed(&path, &link.name, &expires);
     if link.exp <= now()
-        || !Key::read(&web.browser.key_file).is_some_and(|key| key.matches(&signed, &link.sig))
+        || !Key::read(&web.browser.password_file).is_some_and(|key| key.matches(&signed, &link.sig))
     {
         return Err(refusal(
             StatusCode::FORBIDDEN,

@@ -9,7 +9,7 @@ use axum::{
 
 use super::{encoded, signed, view};
 use crate::{
-    browser::Key,
+    browser::{Key, set_password},
     fixture::{Answer, Fixture, request},
 };
 
@@ -33,7 +33,7 @@ async fn fixture() -> Result<Fixture> {
 }
 
 fn key(fixture: &Fixture) -> Result<Key> {
-    Key::read(&fixture.key_file()).context("no browser key")
+    Key::read(&fixture.password_file()).context("no password")
 }
 
 /// The link the page is given to the stored file `path`.
@@ -97,7 +97,7 @@ async fn only_a_raster_image_is_shown_in_place_and_all_else_downloads() -> Resul
 }
 
 #[tokio::test]
-async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<()> {
+async fn a_link_opens_one_file_until_it_expires_or_the_password_changes() -> Result<()> {
     let fixture = fixture().await?;
     let good = link(&fixture, "capture/0", "chart.png").await?;
     assert_eq!(follow(&fixture, &good).await?.status, StatusCode::OK);
@@ -145,7 +145,7 @@ async fn a_link_opens_one_file_until_it_expires_or_the_key_changes() -> Result<(
         );
     }
 
-    Key::replace(&fixture.key_file())?;
+    set_password(&fixture.password_file(), "another good password")?;
     assert_eq!(follow(&fixture, &good).await?.status, StatusCode::FORBIDDEN);
     let renewed = link(&fixture, "capture/0", "chart.png").await?;
     assert_ne!(renewed, good);

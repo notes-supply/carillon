@@ -184,8 +184,9 @@ export function generations(ask) {
 
 /**
  * Whether an answer says the stored token is no longer good: a 401 to a
- * request that carried the token still stored. A sign-in that fails carried
- * none, and a token another tab stored since is not the one refused.
+ * request that carried the token still stored. A request made with no token
+ * stored carried none, and a token another tab stored since is not the one
+ * refused.
  * @param {number} status
  * @param {string | null} carried The token the request carried.
  * @param {string | null} stored
@@ -223,7 +224,7 @@ export const AWAY = "Carillon is not answering. Trying again.";
 export const UNREADABLE =
   "This page could not read what Carillon answered. It is trying again. If this stays, reload the page.";
 export const SIGNED_OUT =
-  "This browser is signed out. Run `carillon web open` in a terminal to sign it in.";
+  "Sign in with the web chat's password. To choose one, run `carillon web password` in a terminal.";
 
 /**
  * The words for an answer that is not 2xx: the provider's own when it gave

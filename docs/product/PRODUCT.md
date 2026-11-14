@@ -10,8 +10,9 @@ runtime doesn't mean rebuilding the rest.
 
 1. Install Carillon as an ordinary Unix user, with the web chat, Discord or
    both, and add the other later with one command.
-2. Open the web chat in a browser on the same machine with `carillon web
-   open`, start a conversation with any agent, send it messages and files,
+2. Open the web chat in a browser on the same machine, or on another device
+   through Tailscale, and sign in with the password `carillon web password`
+   sets. Start a conversation with any agent, send it messages and files,
    and read its answers and their files there. It needs no bot and no
    account beyond the model's.
 3. Configure a Discord server, allowlisted users and routed channels, and
@@ -56,9 +57,11 @@ native state between engines or T3 projects.
 
 ## Behaviour
 
-- **Admission.** The web chat serves only this machine, and only a browser
-  its owner signed in: `carillon web open` makes a link that works once,
-  and `carillon web sign-out` signs every browser out. Discord refuses
+- **Admission.** The web chat admits only a browser signed in with the
+  password its owner chose with `carillon web password`, which signs every
+  browser out when run again. It answers only at its own address and the
+  addresses its owner named, such as the one `tailscale serve` gives it.
+  Being on the tailnet signs no browser in. Discord refuses
   anything outside its guild, allowlist and routes before core sees it. Direct messages to the bot are admitted only
   from allowlisted people, and only while the Discord settings name the
   agent that answers them; each person's direct messages are one rolling

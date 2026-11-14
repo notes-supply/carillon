@@ -45,8 +45,11 @@ checks it against its published checksum, and asks you:
   and who may talk to it.
 
 Then it starts Carillon and links `carillon` into `~/.local/bin`. With the
-web chat, `carillon web open` signs your browser in and opens it. For a
-particular release, run `sh -s -- --version 0.1.0-beta.2` instead of `sh`.
+web chat, `carillon web password` chooses the password it asks for and says
+where to open it. Your other devices can reach it through
+[Tailscale](crates/carillon-web/README.md#open-it-from-your-other-devices).
+For a particular release, run `sh -s -- --version 0.1.0-beta.2` instead of
+`sh`.
 
 The [operations guide](docs/product/OPERATIONS.md) covers installing without
 questions or from the downloaded archive, everyday commands, configuration,

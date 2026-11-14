@@ -16,6 +16,8 @@ const installation = join(root, "installation");
 const workspace = join(root, "workspace");
 const manager = join(root, "manager");
 const binary = resolve("target/debug/carillon");
+const PASSWORD = "correct horse battery";
+const TAILNET = "chat.example-tailnet.ts.net";
 isolateEnvironment();
 // `carillon restart` reads the units' installation here and stops and
 // starts the services through the `systemctl` first on its path.
@@ -125,6 +127,7 @@ async function install() {
     join(units, "carillon-core.service"),
     `[Service]\nEnvironment="CARILLON_HOME=${installation}"\n`,
   );
+  await writeFile(join(installation, "providers/web.toml"), `addresses = ["https://${TAILNET}"]\n`);
   const config = join(installation, "carillon.toml");
   const logs = join(installation, "logs");
   const tokenFile = (name) => join(installation, "credentials", `${name}.token`);
@@ -179,23 +182,25 @@ esac
   await chmod(join(manager, "systemctl"), 0o755);
 }
 
-/** Signs a browser in with the link `carillon web open` prints, which works once. */
-async function signIn() {
-  const link = carillon("web", "open", "--print");
-  assert.match(link, new RegExp(`^${origin}/#sign-in=\\d+\\.[0-9a-f]{32}\\.[0-9a-f]{64}$`, "u"));
-  const code = link.split("#sign-in=")[1];
-  const traded = await trade(code);
-  assert.equal(traded.status, 200);
-  assert.equal((await trade(code)).status, 401, "a sign-in code worked twice");
-  return (await traded.json()).token;
+function choosePassword(password) {
+  const options = { encoding: "utf8", env, input: `${password}\n` };
+  const chosen = execFileSync(binary, ["--home", installation, "web", "password"], options);
+  assert.match(chosen, /^The web chat's password is set\./u);
 }
 
-function trade(code) {
-  return fetch(`${origin}/api/sign-in`, {
+async function guess(password) {
+  const response = await fetch(`${origin}/api/sign-in`, {
     method: "POST",
     headers: { "content-type": "application/json", origin },
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ password }),
   });
+  return { status: response.status, body: await response.json() };
+}
+
+async function signIn(password = PASSWORD) {
+  const answer = await guess(password);
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  return answer.body.token;
 }
 
 async function testGate(token) {
@@ -211,6 +216,8 @@ async function testGate(token) {
     assert.equal((await fetch(`${origin}/${file}`)).status, 200, `the page's ${file}`);
   }
   assert.equal(await raw("/", { host: "rebound.example" }), 421);
+  const named = { host: TAILNET, origin: `https://${TAILNET}`, authorization: `Bearer ${token}` };
+  assert.equal(await raw("/api/session", named), 200);
   assert.equal(await raw("/api/session", { origin: "http://evil.example" }), 403);
   assert.equal((await api("wrong", "/api/session")).status, 401);
   const session = await api(token, "/api/session");
@@ -348,11 +355,16 @@ async function testOpenedTurn(token, chat) {
 
 try {
   await install();
-  assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
   services("start", "runtime", "core", "web");
   for (const name of ["runtime", "core", "web"]) await healthy(name);
   assert.match(carillon("settings", "--agent", "assistant", "model=local/echo"), /Local echo/u);
 
+  assert.match((await guess(PASSWORD)).body.error, /no password yet/u);
+  choosePassword(PASSWORD);
+  assert.deepEqual(await guess("not the password at all"), {
+    status: 401,
+    body: { error: "That is not the web chat's password." },
+  });
   const token = await signIn();
   await testGate(token);
   const { chat, link } = await testFiles(token);
@@ -363,18 +375,12 @@ try {
     assert.match(listing, /^web\n {2}no channels with settings of their own$/mu);
   assert.match(refused("settings", "--interface", "web", chat), /refused with 404/u);
 
-  // The provider keeps nothing but its key: a restart loses no conversation
-  // and signs no browser out.
   const before = await turns(token, chat);
-  const unused = carillon("web", "open", "--print").split("#sign-in=")[1];
   services("stop", "web");
   services("start", "web");
   await healthy("web");
   assert.deepEqual(await turns(token, chat), before);
   assert.equal((await fetch(`${origin}${link}`)).status, 200);
-  // What a provider traded it remembers only while it runs, so one that
-  // starts takes no code made before it.
-  assert.equal((await trade(unused)).status, 401, "a code from before a restart worked");
 
   // Answers reach a web chat by being recorded, so a drain waits for no
   // page and no provider.
@@ -400,19 +406,19 @@ try {
   assert.equal((await across).status, 200, "a message sent while core was away was lost");
   assert.equal((await settled(token, chat)).at(-1).from.text, "while core was away");
 
-  assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
+  choosePassword("a second good password");
   assert.equal((await api(token, "/api/session")).status, 401);
   assert.equal((await fetch(`${origin}${link}`)).status, 403);
-  const later = await signIn();
+  assert.equal((await guess(PASSWORD)).status, 401, "the old password still signed in");
+  const later = await signIn("a second good password");
   services("stop", "web");
-  assert.match(refused("web", "open", "--print"), /web chat is not running at /u);
-  assert.match(carillon("web", "sign-out"), /Every browser is signed out/u);
+  choosePassword(PASSWORD);
   services("start", "web");
   await healthy("web");
   assert.equal((await api(later, "/api/session")).status, 401);
   assert.equal((await api(await signIn(), "/api/session")).status, 200);
   process.stdout.write(
-    "web passed: sign-in, files both ways, duplicate and agent refusals, controls, an opened turn, provider restart, drained restart, a send across a core stop, sign-out with the provider running and stopped\n",
+    "web passed: password sign-in, an address the owner named, files both ways, duplicate and agent refusals, controls, an opened turn, provider restart, drained restart, a send across a core stop, a new password with the provider running and stopped\n",
   );
 } catch (error) {
   for (const log of ["core", "runtime-pi", "web"])

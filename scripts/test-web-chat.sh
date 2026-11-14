@@ -3,10 +3,11 @@ set -eu
 
 text=${1:?text required}
 headers=${2:?headers file required}
-link=$(carillon web open --print)
-origin=${link%%/#sign-in=*}
+password='correct horse battery'
+origin=$(printf '%s\n' "$password" | carillon web password | sed -n 's/.* Sign in at \(.*\)\.$/\1/p')
+[ -n "$origin" ] || { printf 'carillon web password did not say where to sign in\n' >&2; exit 1; }
 token=$(curl --fail --silent --max-time 120 -X POST -H 'content-type: application/json' -H "origin: $origin" \
-  --data "{\"code\":\"${link#*#sign-in=}\"}" "$origin/api/sign-in" |
+  --data "{\"password\":\"$password\"}" "$origin/api/sign-in" |
   sed 's/.*"token":"\([^"]*\)".*/\1/')
 (umask 077 && printf 'authorization: Bearer %s\n' "$token" >"$headers")
 chat=$(cat /proc/sys/kernel/random/uuid)

@@ -214,7 +214,7 @@ rm -f "$TRACE"
 carillon setup --interface web </dev/null >"$TEST_ROOT/add-web.log"
 grep -F 'so it restarts now' "$TEST_ROOT/add-web.log" >/dev/null
 grep -Fx "  web: ready ($VERSION)" "$TEST_ROOT/add-web.log" >/dev/null
-grep -Fx "\`carillon web open\` opens the web chat in your browser." "$TEST_ROOT/add-web.log" >/dev/null
+grep -Fx "\`carillon web password\` chooses the web chat's password." "$TEST_ROOT/add-web.log" >/dev/null
 expect_trace "$RUNNING" "$PARTS" "$STOP" '--user start carillon.target'
 diff "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml" >"$TEST_ROOT/registry.diff" || true
 ! grep '^<' "$TEST_ROOT/registry.diff" >/dev/null || fail 'adding the web chat changed another entry'
