@@ -229,7 +229,8 @@ POST /api/sign-in
 ```
 
 Space at either end of the password is not part of it. A wrong password is
-answered after a second, and the next guess waits for that. A 401 here says
+answered after a second, and the next guess waits for that. A body over
+4 KiB is 413. A 401 here says
 nothing of a token the browser already has, which every tab shares: keep
 it. The page stores the token and reloads.
 

@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{
         HeaderName, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
@@ -151,7 +151,11 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .layer(from_fn_with_state(Arc::clone(&web), operator_only));
     Router::new()
         .route("/health", get(health))
-        .route("/api/sign-in", post(api::sign_in))
+        // A guess waits its turn holding its body, so a body is kept small.
+        .route(
+            "/api/sign-in",
+            post(api::sign_in).layer(DefaultBodyLimit::max(4096)),
+        )
         .nest("/api", api)
         .nest("/v1", operator)
         .route("/files/{*path}", get(files::file))

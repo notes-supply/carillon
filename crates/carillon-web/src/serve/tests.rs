@@ -307,6 +307,16 @@ async fn guesses_wait_their_turn_and_a_wrong_one_holds_it_a_second() -> Result<(
     Ok(())
 }
 
+#[tokio::test]
+async fn a_guess_is_small() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let long = fixture.send(guess(&"x".repeat(5000))?).await?;
+    assert_eq!(long.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let right = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(right.status, StatusCode::OK);
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_guess_whose_request_is_dropped_keeps_its_turn() -> Result<()> {
     let fixture = Arc::new(Fixture::new().await?);

@@ -10,8 +10,9 @@ runtime doesn't mean rebuilding the rest.
 
 1. Install Carillon as an ordinary Unix user, with the web chat, Discord or
    both, and add the other later with one command.
-2. Open the web chat in a browser on the same machine with `carillon web
-   open`, start a conversation with any agent, send it messages and files,
+2. Open the web chat in a browser on the same machine, or on another device
+   through Tailscale, and sign in with the password `carillon web password`
+   sets. Start a conversation with any agent, send it messages and files,
    and read its answers and their files there. It needs no bot and no
    account beyond the model's.
 3. Configure a Discord server, allowlisted users and routed channels, and
