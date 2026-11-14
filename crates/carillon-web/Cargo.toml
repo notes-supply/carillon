@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-argon2 = "0.6.0"
+argon2 = { version = "0.5.3", features = ["std"] }
 axum = { workspace = true, features = ["multipart"] }
 carillon-installation = { path = "../carillon-installation" }
 carillon-interface = { path = "../carillon-interface" }
