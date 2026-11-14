@@ -23,7 +23,9 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use argon2::{
     Argon2,
-    password_hash::{PasswordHasher as _, PasswordVerifier as _, phc::PasswordHash},
+    password_hash::{
+        PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString, rand_core::OsRng,
+    },
 };
 use axum::http::{
     HeaderMap, StatusCode,
@@ -62,11 +64,13 @@ pub(crate) struct Address {
 }
 
 impl Address {
-    /// An address as `providers/<id>.toml` writes it: `http` or `https`, a
-    /// host and an optional port.
+    /// An address as `providers/<id>.toml` writes it: `https`, a host and an
+    /// optional port. A browser gives a plain-http page of another machine
+    /// no secure context, where the page cannot mint its IDs, and such a
+    /// page would send the password unencrypted.
     pub(crate) fn parse(written: &str) -> Result<Self> {
         let url = Url::parse(written).with_context(|| format!("{written} is not an address"))?;
-        let (Some(host), "http" | "https", "/", None, None, "", None) = (
+        let (Some(host), "https", "/", None, None, "", None) = (
             url.host_str(),
             url.scheme(),
             url.path(),
@@ -76,8 +80,8 @@ impl Address {
             url.password(),
         ) else {
             bail!(
-                "{written} is not an address a browser opens the chat at: write `http` or \
-                 `https`, a host and an optional port, such as https://<machine>.<tailnet>.ts.net"
+                "{written} is not an address a browser opens the chat at: write `https`, a host \
+                 and an optional port, such as https://<machine>.<tailnet>.ts.net"
             );
         };
         let host = match url.port() {
@@ -127,8 +131,9 @@ pub(crate) fn set_password(file: &Path, password: &str) -> Result<()> {
     if password.chars().count() < 12 {
         bail!("a password needs 12 characters or more, so the web chat's password is as it was");
     }
+    let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
-        .hash_password(password.as_bytes())
+        .hash_password(password.as_bytes(), &salt)
         .map_err(|error| anyhow!("hash the password: {error}"))?;
     if let Some(directory) = file.parent() {
         DirBuilder::new()

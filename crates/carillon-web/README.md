@@ -69,9 +69,12 @@ Being on the tailnet does not sign a browser in. Each browser signs in with
 the password.
 
 `tailscale serve` passes the browser's `Host` on as it is, so the provider
-must know the address. An address is `http` or `https`, a host and an
-optional port, as a browser writes an origin. The provider refuses to start,
-and `carillon web setup` refuses the file, when it holds anything else.
+must know the address. An address is `https`, a host and an optional port,
+as a browser writes an origin. Plain `http` is refused: a browser gives such
+a page of another machine no secure context, where the page cannot work,
+and the password would cross the network unencrypted. The provider refuses
+to start, and `carillon web setup` refuses the file, when it holds anything
+else.
 
 ## Who may use it
 

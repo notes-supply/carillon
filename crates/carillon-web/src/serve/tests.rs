@@ -328,6 +328,25 @@ fn a_password_is_set_before_the_provider_first_starts() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn a_plain_http_address_is_refused_for_https() -> Result<()> {
+    for written in [
+        "http://chat.example-tailnet.ts.net",
+        "http://chat.example-tailnet.ts.net:43804",
+        "http://127.0.0.1:45404",
+    ] {
+        let said = Address::parse(written).err().context(written)?.to_string();
+        assert_eq!(
+            said,
+            format!(
+                "{written} is not an address a browser opens the chat at: write `https`, a host \
+                 and an optional port, such as https://<machine>.<tailnet>.ts.net"
+            )
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_owner_s_addresses_are_read_as_a_browser_writes_them() -> Result<()> {
     for (written, host, origin) in [
@@ -338,11 +357,15 @@ async fn the_owner_s_addresses_are_read_as_a_browser_writes_them() -> Result<()>
             TAILNET,
         ),
         (
-            "http://192.168.1.4:8080",
-            "192.168.1.4:8080",
-            "http://192.168.1.4:8080",
+            "https://100.64.0.7:8443",
+            "100.64.0.7:8443",
+            "https://100.64.0.7:8443",
         ),
-        ("http://[::1]:80", "[::1]", "http://[::1]"),
+        (
+            "https://[fd7a:115c::7]",
+            "[fd7a:115c::7]",
+            "https://[fd7a:115c::7]",
+        ),
     ] {
         let expected = Address {
             host: host.to_owned(),
