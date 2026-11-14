@@ -37,8 +37,8 @@ terminal:
    assistant, the agent with Discord's context and Carillon's resources. T3
    runs T3 Code channels.
 2. **The interfaces.** Where people talk to Carillon: the
-   [web chat](#web-chat) in your own browser on this machine, which is
-   preselected, Discord, or both. An installation needs at least one.
+   [web chat](#web-chat) in your own browser, signed in with a password,
+   which is preselected, Discord, or both. An installation needs at least one.
    `carillon setup` and `carillon init` take `--interface web` and
    `--interface discord` as the answer.
 3. **T3** asks for its address and a token (`t3 auth session issue --label
@@ -60,8 +60,8 @@ terminal:
    checks that the bot may answer that way in each channel, and asks again
    until it may. Then who it answers: the bot application's owners, and
    anyone else by Discord user ID. Only those people can talk to the agent.
-6. Carillon starts. With the web chat, `carillon web open` signs your
-   browser in and opens it.
+6. Carillon starts. With the web chat, `carillon web password` chooses
+   its password and says where to sign in.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
@@ -140,7 +140,8 @@ Then, for Discord, put the bot token in
 the printed `carillon-pi` command, and run `carillon start`. Choose the
 assistant's model last, with `carillon settings --agent assistant
 model=PROVIDER/MODEL`. A value that names no model lists the models Pi
-offers. With the web chat, `carillon web open` then opens it.
+offers. With the web chat, `carillon web password` then chooses its
+password and says where to sign in.
 
 Rerunning the installer with options keeps the registry, credentials and
 state, and writes the guild, bot and people from them. A `carillon.toml`
@@ -173,7 +174,7 @@ carillon recent              # recent turns
 carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
 carillon settings            # each interface's routed channels, one line each
-carillon web open            # sign this machine's browser in to the web chat and open it
+carillon web password        # choose the web chat's password, which signs every browser out
 ```
 
 An enabled runtime with no assigned agents is `idle`. Core does not probe it,
@@ -602,22 +603,28 @@ channel's page, which has neither line.
 
 ## Web chat
 
-The web chat is a page in your own browser on the machine that runs
-Carillon. It answers at the web provider's address, `http://127.0.0.1:43804`
-with the default ports, and only there: a request that names the machine any
-other way, `localhost` included, is refused.
+The web chat is a page in your own browser, signed in with a password you
+choose. It answers at the web provider's address, `http://127.0.0.1:43804`
+with the default ports, and at the addresses you name for it: a request that
+names the machine any other way, `localhost` included, is refused.
 
 ```sh
-carillon web open            # sign this machine's browser in and open the chat
-carillon web open --print    # print the link instead, to paste into a browser
-carillon web sign-out        # sign every browser out
+carillon web password        # choose the password, which signs every browser out
+printf '%s\n' "$PASSWORD" | carillon web password    # or from a script or a password manager
 ```
 
-`open` makes a link that signs one browser in. The link works once, within
-two minutes, and only while Carillon runs. The browser then stays signed in,
-across restarts and updates. `sign-out` signs every browser out and voids
-every link to a file, whether or not Carillon runs. Run `open` again to sign
-in again.
+The page asks for the password, and a browser that gives it stays signed
+in, across restarts and updates, until the password changes. Choosing one
+again, even the same one, signs every browser out and voids every link to a
+file, whether or not Carillon runs. A wrong password is answered after a
+second, and the provider checks one at a time.
+
+To open the chat from your other devices, run `tailscale serve --bg
+http://127.0.0.1:43804`, add the `https://<machine>.<tailnet>.ts.net`
+address it prints to `addresses` in `providers/web.toml`, and run `carillon
+restart`. Use `serve`, never `funnel`, which puts the chat on the public
+internet. The [web guide](../../crates/carillon-web/README.md#open-it-from-your-other-devices)
+has the details. Being on the tailnet signs no browser in.
 
 A conversation starts with the agent you pick and stays with it. It takes
 its agent's model, which `carillon settings --agent` changes. Answers reach
@@ -625,9 +632,9 @@ the page from core's own record, so nothing is lost while no browser is
 open, and [a restart or update](#restart-and-update-drain-first) waits for
 none.
 
-The chat is for the machine's own user. It has no accounts and no remote
-access. Any program you run on the machine can reach its address, as it can
-reach your files.
+The chat is for the machine's own user. It has no accounts: whoever has the
+password has the chat. Any program you run on the machine can reach its
+address, as it can reach your files.
 
 ```toml
 # carillon.toml, the web chat's [[providers]] entry
@@ -636,9 +643,12 @@ max_upload_mib = 1024     # the largest file an answer carries to the page
 delivery = "retained"     # answers are read from core; the provider serves no other entry
 ```
 
-The provider has no settings file. `carillon logs web` shows its log. Its
-only file of its own is the browser key, `state/components/web/browser.key`,
-which `sign-out` replaces.
+`providers/web.toml` is optional and holds only `addresses`. A malformed one
+stops the provider and fails `carillon web setup`. `carillon logs web` shows
+its log. Its only file of its own is the password's hash,
+`state/components/web/password.hash`. An installation updated from
+0.1.0-beta.10 or earlier keeps an unused `browser.key`, and its browsers are
+signed out until you choose a password.
 
 ### Add the web chat to an installation
 
@@ -649,7 +659,7 @@ release bundles it:
 ```sh
 carillon update carillon-VERSION-linux-x86_64.tar.gz
 carillon setup --interface web
-carillon web open
+carillon web password
 ```
 
 `carillon setup --interface web` registers the provider `web`, on the port
@@ -1036,14 +1046,15 @@ the tools can administer the server.
   again until core records it, and the turn shows as running meanwhile.
 - **Delegated T3 work** reports later in its own message, even across
   restarts.
-- **The web chat does not open.** `carillon web open` says so when nothing
-  answers at its address: `carillon start` starts Carillon. A page that
-  asks you to sign in again was signed out, or its link was used or is over
-  two minutes old: run `carillon web open` again.
+- **The web chat does not open.** A page that does not load at all has no
+  provider behind it: `carillon start` starts Carillon. A page that asks for
+  the password again was signed out by a new one. A page that says it has no
+  password yet needs `carillon web password`. At a tailnet address, a 421
+  says the address is not in `providers/web.toml`.
 
 ## Credentials
 
-The bot token belongs to Discord, the browser key to the web chat, model
+The bot token belongs to Discord, the password's hash to the web chat, model
 credentials to the runtime (Pi keeps
 its own under `~/.carillon/pi`, separate from `~/.pi`). Loopback tokens in
 `credentials/` authenticate the services to each other; `operator` authorizes

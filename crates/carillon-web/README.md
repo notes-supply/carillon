@@ -1,11 +1,11 @@
 # Web provider
 
 `carillon-web` is the interface provider behind Carillon's web chat, a page
-in your own browser on the machine that runs Carillon. It is built on the
-[shared interface boundary](../carillon-interface/README.md). It keeps no
-conversation: core has every turn, file and answer, and the provider reads
-them back. Its only durable file is the browser key,
-`state/components/<id>/browser.key`.
+in your own browser, signed in with a password you choose. It is built on
+the [shared interface boundary](../carillon-interface/README.md). It keeps
+no conversation: core has every turn, file and answer, and the provider
+reads them back. Its only durable file is the password's hash,
+`state/components/<id>/password.hash`.
 
 A registry entry with `program = "web"` runs it. Setup registers one, when
 you choose the web chat at install or run `carillon setup --interface web`
@@ -32,57 +32,87 @@ entry without that line.
 
 ```sh
 carillon web serve --config carillon.toml --provider web --token-file credentials/web.token
-carillon web setup           # check the entry and its credential; asks nothing (run by `carillon setup`)
-carillon web open            # sign this machine's browser in and open the chat
-carillon web open --print    # print the link instead
-carillon web sign-out        # sign every browser out and void every file link
+carillon web setup           # check the entry, its credential and settings; asks nothing (run by `carillon setup`)
+carillon web password        # choose the password, which signs every browser out
 ```
 
-`open` and `sign-out` work on the browser key file and send the provider
-no request. `open` only checks that something listens at the provider's
-address, and says so when nothing does. `sign-out` works whether or not the
-provider runs. Both take `--provider ID` when the registry has more than one
-web entry.
+`password` asks twice at a terminal. Otherwise it reads one line from
+standard input, so a script or a password manager can pipe it in. Space at
+either end is not part of the password, and it needs 12 characters or more.
+It writes the hash and sends the provider no request, so it works whether or
+not the provider runs. Running it again, even with the same password, signs
+every browser out and voids every file link. Both commands take
+`--provider ID` when the registry has more than one web entry.
+
+## Open it from your other devices
+
+Setup has the provider listen on loopback. To reach it from your other
+devices, put it on your Tailscale network with `tailscale serve`, as root or
+once `sudo tailscale set --operator=$USER` has run. Name the provider's
+`url`, which is `http://127.0.0.1:43804` with the default ports:
+
+```sh
+tailscale serve --bg http://127.0.0.1:43804
+```
+
+Tailscale asks you to enable HTTPS certificates for the tailnet the first
+time. Add the address it prints to the provider's settings file,
+`providers/<id>.toml`, and run `carillon restart`:
+
+```toml
+# Addresses the chat is opened at besides its own, such as the one `tailscale serve` gives it.
+addresses = ["https://<machine>.<tailnet>.ts.net"]
+```
+
+Use `serve`, never `funnel`: Funnel puts the chat on the public internet.
+Being on the tailnet does not sign a browser in. Each browser signs in with
+the password.
+
+`tailscale serve` passes the browser's `Host` on as it is, so the provider
+must know the address. An address is `http` or `https`, a host and an
+optional port, as a browser writes an origin. The provider refuses to start,
+and `carillon web setup` refuses the file, when it holds anything else.
 
 ## Who may use it
 
-Any page your browser opens can send requests to loopback, so the provider
-trusts nothing a browser attaches on its own.
+Whoever knows the password may use the chat, from this machine or any
+address you named. Any page your browser opens can send requests to
+loopback, so the provider trusts nothing a browser attaches on its own.
 
-- The browser key is the root secret. Its file has mode 0600, so only the
-  installing user reads it. The provider reads it again for every request
-  that presents a token, a sign-in code or a file link, and keeps no key
-  between requests. A replaced file takes effect on the next request.
-- `carillon web open` reads the key and makes a sign-in code: a time two
-  minutes on, a name of its own and the key's signature of both. It opens
-  `<address>/#sign-in=<code>`. The provider takes a code that the current
-  key signed, that has not expired, that was made since the provider
-  started and that no request traded before. It remembers a traded code
-  only while it runs and until the code expires, so it takes no code from
-  before its start. The page trades the code for a token and keeps the
-  token in `localStorage`.
+- The password's hash is the root secret: Argon2id, in PHC form, with a
+  salt of its own. Its file has mode 0600, so only the installing user
+  reads it. The provider reads it again for every request that presents a
+  password, a token or a file link, and keeps no key between requests. A
+  new file takes effect on the next request.
+- The page trades the password for a token and keeps the token in
+  `localStorage`. The token is the same for every browser and lasts until
+  the password changes.
+- The provider checks one password at a time, and a wrong one holds the next
+  for a second, so guesses come at about one a second, all browsers
+  together.
 - Every `/api` request carries `Authorization: Bearer <token>`. No cookie
   carries authority.
-- `Host` must be the address the provider listens on, as a browser writes
-  it, or the answer is 421. `localhost` is another name and is refused.
-- An `Origin` other than the provider's own is 403, a preflight's included.
-  No answer has a CORS header.
+- `Host` must be the address the provider listens on or one in
+  `addresses`, as a browser writes it, or the answer is 421. `localhost` is
+  another name and is refused.
+- An `Origin` other than one of those addresses is 403, a preflight's
+  included. No answer has a CORS header.
 - The page runs under a content security policy that allows only its own
   scripts, styles, images and fonts.
-- The token, a sign-in code and every file link are HMACs of the browser
-  key. `carillon web sign-out` replaces the key, which voids them all.
+- The token and every file link are HMACs of the hash's text. A new
+  password writes a new hash, which voids them all.
 
 The page's address belongs to whichever local program holds the provider's
 port. While the provider is stopped, another program of this machine can
-take the port and serve a page at the chat's own origin, which can read what
-the real page stored there. Carillon trusts the machine's local programs
-here, as its other providers do. `carillon web sign-out` voids what such a
-page could have taken. `carillon web open` refuses to make a link when
-nothing listens, but it cannot tell another listener from the provider.
+take the port and serve a page at the chat's origin, the tailnet address
+included, since `tailscale serve` forwards to that port. Such a page can
+read the token the real page stored and ask for the password. Carillon
+trusts the machine's local programs here, as its other providers do, and
+remote admission is the boundary. A new password voids what such a page
+could have taken.
 
-`carillon web open` hands the sign-in link, with its two-minute code, to the
-browser opener as a process argument. Other users of the machine can read
-a process's arguments while it runs.
+An installation updated from 0.1.0-beta.10 or earlier keeps an unused
+`browser.key`. Its browsers are signed out until you choose a password.
 
 ## The page's files
 
@@ -169,7 +199,7 @@ These statuses mean the same on every route:
 
 | Status | Meaning | What the page does |
 | --- | --- | --- |
-| 401 | The token is not the current key's: never signed in, or signed out. | Drop the token the request carried, if it is still the one stored, and ask the person to run `carillon web open`. If another token is stored by then, make the request again with that one. |
+| 401 | The token is not the current password's: never signed in, or the password changed. | Drop the token the request carried, if it is still the one stored, and ask for the password. If another token is stored by then, make the request again with that one. |
 | 403, 421 | The request did not come from the page's own origin, or named another host. | Nothing. A page loaded from the provider never sees these. |
 | 503 | Carillon cannot answer now: core is away, as it is for a moment at every restart, or it failed, or the provider is stopping. | Keep what is on screen and try again. The body is always the same sentence. |
 
@@ -183,17 +213,17 @@ never sent it.
 
 ```http
 POST /api/sign-in
-{"code": "<the fragment's code>"}
+{"password": "<what the person typed>"}
 
 200 {"token": "9f2c…"}
+401 {"error": "That is not the web chat's password."}
+401 {"error": "The web chat has no password yet. Run `carillon web password` in a terminal to choose one."}
 ```
 
-Take the code from the fragment and remove the fragment from the address
-before the request. A code that was traded already, has expired, was made
-before the provider started or was not signed by the current key is 401.
-That 401 says nothing of a token the browser already has, which every tab
-shares: keep it, and use it. An old link opened in a browser that is signed
-in opens the chat.
+Space at either end of the password is not part of it. A wrong password is
+answered after a second, and the next guess waits for that. A 401 here says
+nothing of a token the browser already has, which every tab shares: keep
+it. The page stores the token and reloads.
 
 ### Read the session
 
@@ -359,8 +389,8 @@ A file has a `name`, a `size` in bytes, a `type` and a `url`.
   those from under a person scrolled up among them. They go once the person
   is back at the conversation's end, so their links stop working only for
   someone who stays scrolled up through a second UTC day.
-- A sign-out voids every link at once: the next request for one is 403. The
-  bytes a browser already cached or saved remain with that browser.
+- A new password voids every link at once: the next request for one is 403.
+  The bytes a browser already cached or saved remain with that browser.
 - A file core no longer has is 404.
 - A `Range` request is answered with the whole file.
 
@@ -561,8 +591,8 @@ its agent's model. Change that with `carillon settings --agent`.
 
 - [`serve.rs`](src/serve.rs): the process, the router and the gate every
   request passes.
-- [`browser.rs`](src/browser.rs): the browser key, sign-in codes, the token
-  and signatures.
+- [`browser.rs`](src/browser.rs): the password, its hash and sign-in, the
+  token and signatures, and the addresses the gate admits.
 - [`identity.rs`](src/identity.rs): how a conversation and a message map
   onto core's identities.
 - [`api.rs`](src/api.rs): the browser API's reads, its view types and what

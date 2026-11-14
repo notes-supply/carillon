@@ -207,8 +207,9 @@ a reaction instead. A graceful stop records the gateway
 session so the next start can resume it and have Discord replay what it
 missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 
-The web provider (`carillon-web`) serves a chat page to the installing
-user's own browser on the same machine. Setup registers it as `web`, with
+The web provider (`carillon-web`) serves a chat page to a browser signed in
+with the owner's password, on this machine or at an address the owner named
+in `providers/<id>.toml`, such as `tailscale serve`'s. Setup registers it as `web`, with
 `delivery = "retained"` and `max_upload_mib = 1024`. It refuses to serve an
 entry with any other delivery, whose answers would wait for a claim it
 never makes.
@@ -222,13 +223,13 @@ in core, and its agent is chosen with its first message and never changes.
 A message's event ID is the page's too, so a retry is the first message
 again. Uploads stream into a staging batch of the request's own. Answers
 are rendered to HTML by the provider, and files are read by signed links
-that expire. The provider's only durable file is the browser key, which it
-reads again for every request that presents a credential. `carillon web
-open` reads the key itself and signs a single-use code that expires after
-two minutes. A browser trades the code for a bearer token made from the
-key. `carillon web sign-out` replaces the key file. Neither command sends
-the provider a request. Every request must name the provider in `Host` and
-come from its own origin. A failure of core reaches the page as one
+that expire. The provider's only durable file is the password's Argon2id
+hash, which it reads again for every request that presents a credential.
+`carillon web password` writes it and sends the provider no request. A
+browser trades the password for a bearer token made from the hash, one guess
+at a time, and a wrong guess holds the next for a second. A new password
+voids every token and file link. Every request must name one of the chat's
+addresses in `Host` and come from one of them. A failure of core reaches the page as one
 retryable status, and what core said is logged.
 See the [web guide](../../crates/carillon-web/README.md).
 
@@ -537,10 +538,9 @@ the owner.
 
 The web chat's address belongs to whichever local program holds the web
 provider's port. While the provider is stopped, another program on the
-machine can take the port and serve a page at the chat's own origin, which
-can read what the real page stored there. Carillon trusts the machine's
-local programs here, as its other providers do, and remote admission is the
-boundary. `carillon web sign-out` voids what such a page could have taken.
-`carillon web open` hands the sign-in link, with its two-minute code, to the
-browser opener as a process argument, which other users of the machine can
-read while it runs.
+machine can take the port and serve a page at the chat's origin, the
+tailnet address included, since `tailscale serve` forwards to that port.
+Such a page can read the token the real page stored and ask for the
+password. Carillon trusts the machine's local programs here, as its other
+providers do, and remote admission is the boundary. A new password voids
+what such a page could have taken.
