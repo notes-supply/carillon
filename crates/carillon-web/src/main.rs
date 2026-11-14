@@ -14,10 +14,9 @@ mod serve;
 mod site;
 
 use std::{
-    net::TcpStream,
+    io::{IsTerminal as _, stdin},
     path::{Path, PathBuf},
-    process::{Command as Process, ExitCode},
-    time::Duration,
+    process::ExitCode,
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -25,12 +24,13 @@ use carillon_installation::{
     bundled::Bundled,
     config::{LoadedConfig, ProviderRole, token_matches},
     home,
+    prompt::{Questions as _, Terminal},
 };
 use carillon_interface::instance;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::{browser::Key, serve::serve};
+use crate::serve::serve;
 
 /// The `program` of a registry entry this program serves.
 const PROGRAM: &str = Bundled::Web.program();
@@ -40,8 +40,8 @@ const PROGRAM: &str = Bundled::Web.program();
     name = "carillon-web",
     version,
     about = "Carillon web chat interface provider",
-    after_help = "Run as `carillon web …`. `carillon web open` signs this machine's browser \
-                  in and opens the chat."
+    after_help = "Run as `carillon web …`. `carillon web password` chooses the password the \
+                  chat asks for."
 )]
 struct Cli {
     /// Installation for operator actions. Defaults to `CARILLON_HOME`, then
@@ -76,18 +76,10 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Sign a browser of this machine in and open the chat in it. The link
-    /// works once, within two minutes.
-    Open {
-        /// Print the link instead of opening it.
-        #[arg(long)]
-        print: bool,
-        /// Registry ID of the web instance; inferred when only one is registered.
-        #[arg(long)]
-        provider: Option<String>,
-    },
-    /// Sign every browser out and void every file link.
-    SignOut {
+    /// Choose the chat's password, which signs every browser out and voids
+    /// every file link. It asks twice at a terminal, and otherwise reads
+    /// one line from standard input.
+    Password {
         /// Registry ID of the web instance; inferred when only one is registered.
         #[arg(long)]
         provider: Option<String>,
@@ -139,39 +131,33 @@ async fn run() -> Result<()> {
                 bail!("the credential of {provider} does not match its entry in carillon.toml");
             }
             serve::retained(entry)?;
+            browser::addresses(&loaded, &provider)?;
             println!(
-                "The web chat is set up at http://{address}. While Carillon runs, `carillon web \
-                 open` signs this machine's browser in and opens it."
+                "The web chat is set up at http://{address}. `carillon web password` chooses or \
+                 changes the password it asks for."
             );
             Ok(())
         }
-        Command::Open { print, provider } => {
-            let loaded = installation()?;
-            let link = link(&loaded, &instance(&loaded, PROGRAM, provider)?)?;
-            // The code travels in the fragment, which no server or log receives.
-            if !print
-                && Process::new("xdg-open")
-                    .arg(&link)
-                    .status()
-                    .is_ok_and(|status| status.success())
-            {
-                println!("Opened Carillon's web chat in your browser.");
-            } else {
-                println!("{link}");
-            }
-            Ok(())
-        }
-        Command::SignOut { provider } => {
+        Command::Password { provider } => {
             let loaded = installation()?;
             let provider = instance(&loaded, PROGRAM, provider)?;
-            let key_file = browser::key_file(&loaded.value.data_dir, &provider);
-            // A hand-written entry has no directory before its first start.
-            if !key_file.parent().is_some_and(Path::is_dir) {
-                println!("Carillon's web chat has not started yet, so no browser is signed in.");
-                return Ok(());
-            }
-            Key::replace(&key_file).with_context(|| format!("replace {}", key_file.display()))?;
-            println!("Every browser is signed out of Carillon's web chat.");
+            let password = if stdin().is_terminal() {
+                let password =
+                    Terminal.secret("The web chat's password (12 characters or more):")?;
+                if Terminal.secret("The same password again:")? != password {
+                    bail!("the two passwords differ, so the web chat's password is as it was");
+                }
+                password
+            } else {
+                let mut line = String::new();
+                stdin().read_line(&mut line)?;
+                line
+            };
+            browser::set_password(
+                &browser::password_file(&loaded.value.data_dir, &provider),
+                &password,
+            )?;
+            println!("The web chat's password is set. Any browser signed in before is signed out.");
             Ok(())
         }
     }
@@ -186,23 +172,4 @@ fn release_site() -> Result<PathBuf> {
         .and_then(Path::parent)
         .map(|release| release.join("lib").join("web"))
         .context("cannot locate this program's release")
-}
-
-/// The link that signs a browser in, made from the browser key alone: no
-/// request carries a credential to whatever listens at the provider's
-/// address. The provider is only asked whether it is there.
-fn link(loaded: &LoadedConfig, provider: &str) -> Result<String> {
-    let address = loaded
-        .provider(provider, ProviderRole::Interface)?
-        .listen_address()?;
-    if TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_err() {
-        bail!(
-            "Carillon's web chat is not running at http://{address}. Start Carillon with \
-             `carillon start`."
-        );
-    }
-    let key_file = browser::key_file(&loaded.value.data_dir, provider);
-    let code = browser::new_code(&key_file)
-        .with_context(|| format!("read or create {}", key_file.display()))?;
-    Ok(format!("http://{address}/#sign-in={code}"))
 }

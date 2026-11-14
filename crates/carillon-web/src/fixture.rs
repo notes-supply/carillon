@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::{
-    browser::{self, Browser, Key, now_ms},
+    browser::{self, Address, Browser},
     send::Sends,
     serve::{Web, router},
     site::Site,
@@ -47,6 +47,9 @@ use crate::{
 pub(crate) const AUTHORITY: &str = "127.0.0.1:45404";
 pub(crate) const INTERFACE_TOKEN: &str = "interface-token";
 pub(crate) const OPERATOR_TOKEN: &str = "operator-token";
+pub(crate) const PASSWORD: &str = "correct horse battery";
+/// An address the owner named, as `tailscale serve` gives one.
+pub(crate) const TAILNET: &str = "https://chat.example-tailnet.ts.net";
 
 /// What the fake of core holds and what it was asked.
 #[derive(Default)]
@@ -341,7 +344,7 @@ workspace = "work"
             let _ = axum::serve(listener, fake).await;
         });
         let staging = Staging::open(staging)?;
-        Key::replace(&browser::key_file(&data_dir, "web"))?;
+        browser::set_password(&browser::password_file(&data_dir, "web"), PASSWORD)?;
         let web = Arc::new(Web {
             core: CoreClient::new(
                 format!("http://{address}"),
@@ -355,12 +358,12 @@ workspace = "work"
                 status: "ready".to_owned(),
             },
             staging,
-            browser: Browser {
-                key_file: browser::key_file(&data_dir, "web"),
-                authority: AUTHORITY.to_owned(),
-                started: now_ms(),
-                used: Mutex::default(),
-            },
+            browser: Browser::new(
+                &data_dir,
+                "web".to_owned(),
+                AUTHORITY.to_owned(),
+                vec![Address::parse(TAILNET)?],
+            ),
             sends: Sends::default(),
             site: Site {
                 custom: data_dir.join("components/web/site"),
@@ -378,15 +381,8 @@ workspace = "work"
         })
     }
 
-    pub(crate) fn key_file(&self) -> PathBuf {
-        browser::key_file(&self.web.registry.value.data_dir, "web")
-    }
-
-    /// A sign-in code as `carillon web open` makes one, good until
-    /// `expires`.
-    pub(crate) fn code(&self, expires: u128) -> Result<String> {
-        let key = Key::read(&self.key_file()).context("no browser key")?;
-        Ok(key.code(expires))
+    pub(crate) fn password_file(&self) -> PathBuf {
+        browser::password_file(&self.web.registry.value.data_dir, "web")
     }
 
     pub(crate) fn core(&self) -> MutexGuard<'_, Core> {
@@ -417,12 +413,10 @@ workspace = "work"
         })
     }
 
-    /// A token as a browser gets one: a code made with the key, traded at
-    /// the page's route.
+    /// A token as a browser gets one: the password, traded at the page's
+    /// route.
     pub(crate) async fn sign_in(&self) -> Result<String> {
-        let traded = self
-            .send(trade(&browser::new_code(&self.key_file())?)?)
-            .await?;
+        let traded = self.send(guess(PASSWORD)?).await?;
         assert_eq!(traded.status, StatusCode::OK);
         Ok(traded.json()?["token"]
             .as_str()
@@ -467,8 +461,8 @@ pub(crate) fn operator(method: Method, path: &str) -> Builder {
     bearer(method, path, OPERATOR_TOKEN)
 }
 
-pub(crate) fn trade(code: &str) -> Result<Request<Body>> {
+pub(crate) fn guess(password: &str) -> Result<Request<Body>> {
     Ok(request(Method::POST, "/api/sign-in")
         .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "code": code }).to_string()))?)
+        .body(Body::from(json!({ "password": password }).to_string()))?)
 }

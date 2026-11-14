@@ -2,9 +2,9 @@
 //! page would drive them.
 
 use std::{
-    net::TcpListener,
     os::unix::fs::{PermissionsExt as _, symlink},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
@@ -19,16 +19,15 @@ use carillon_installation::config::LoadedConfig;
 use hmac::{Hmac, Mac as _};
 use serde_json::json;
 use sha2::Sha256;
+use tokio::time::Instant;
 
 use crate::{
-    browser::{Key, now_ms},
+    browser::{Address, addresses, password_file, set_password},
     fixture::{
-        AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, bearer, operator, request, trade,
+        AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, PASSWORD, TAILNET, bearer, guess,
+        operator, request,
     },
 };
-
-/// How long a sign-in code works, in the milliseconds it counts in.
-const TWO_MINUTES: u128 = 120_000;
 
 /// One route of each class the provider serves.
 const ROUTES: [(Method, &str); 12] = [
@@ -73,6 +72,8 @@ async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<(
             &["127.0.0.1"],
             &[AUTHORITY, AUTHORITY],
             &[AUTHORITY, "rebound.example"],
+            &["other.example-tailnet.ts.net"],
+            &["chat.example-tailnet.ts.net:443"],
         ] {
             let answer = fixture.send(named(hosts)?).await?;
             assert_eq!(
@@ -82,6 +83,16 @@ async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<(
             );
         }
     }
+    let rebound = Request::builder()
+        .uri("/")
+        .header(HOST, "rebound.example")
+        .body(Body::empty())?;
+    let answer = fixture.send(rebound).await?;
+    assert_eq!(
+        answer.json()?["error"],
+        "This is Carillon's web chat at http://127.0.0.1:45404. To open it at another address, \
+         add that address to `addresses` in providers/web.toml."
+    );
     Ok(())
 }
 
@@ -96,6 +107,8 @@ async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
             "https://127.0.0.1:45404",
             "http://127.0.0.1:45405",
             "http://localhost:45404",
+            "http://chat.example-tailnet.ts.net",
+            "https://chat.example-tailnet.ts.net:8443",
         ] {
             let answer = fixture
                 .send(
@@ -132,7 +145,30 @@ async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
 }
 
 #[tokio::test]
-async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
+async fn the_page_answers_at_an_address_the_owner_named() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // A browser's request as `tailscale serve` forwards it, Host and all.
+    let named = |path: &str| {
+        Request::builder()
+            .uri(path)
+            .header(HOST, "chat.example-tailnet.ts.net")
+            .header(ORIGIN, TAILNET)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+    };
+    for path in ["/", "/api/session"] {
+        assert_eq!(
+            fixture.send(named(path)?).await?.status,
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let session = |token: Option<&str>| {
@@ -175,15 +211,12 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
         .await?;
     assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
 
-    let key_file = fixture.key_file();
-    let before = std::fs::read_to_string(&key_file)?;
-    assert!(!before.contains(&token), "the token is not the key");
-    Key::replace(&key_file)?;
-    assert_ne!(std::fs::read_to_string(&key_file)?, before);
-    assert_eq!(
-        std::fs::metadata(&key_file)?.permissions().mode() & 0o777,
-        0o600
-    );
+    let file = fixture.password_file();
+    let before = std::fs::read_to_string(&file)?;
+    assert!(!before.contains(&token), "the token is not the hash");
+    // Choosing the same password again makes a new hash, and signs out.
+    set_password(&file, PASSWORD)?;
+    assert_ne!(std::fs::read_to_string(&file)?, before);
     let after = fixture.send(session(Some(&token))?).await?;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
     let again = fixture.sign_in().await?;
@@ -195,8 +228,8 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
     let keyless = hex::encode(keyless.finalize().into_bytes());
     for no_key in [Some(""), Some("\n"), None] {
         match no_key {
-            Some(empty) => std::fs::write(&key_file, empty)?,
-            None => std::fs::remove_file(&key_file)?,
+            Some(empty) => std::fs::write(&file, empty)?,
+            None => std::fs::remove_file(&file)?,
         }
         for token in [again.as_str(), keyless.as_str()] {
             let answer = fixture.send(session(Some(token))?).await?;
@@ -206,91 +239,145 @@ async fn the_api_needs_the_token_the_current_key_gives() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn signing_out_needs_no_provider_running() -> Result<()> {
-    let installation = tempfile::tempdir()?;
-    let key_file = crate::browser::key_file(installation.path(), "web");
-    std::fs::create_dir_all(installation.path().join("components/web"))?;
-    let first = Key::replace(&key_file)?.token();
+#[tokio::test(start_paused = true)]
+async fn the_password_alone_signs_a_browser_in() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let file = fixture.password_file();
+    // Space around a password is no part of it, where it is set or typed.
+    set_password(&file, "\tcorrect horse battery \n")?;
+    for typed in [PASSWORD, "  correct horse battery\n"] {
+        let answer = fixture.send(guess(typed)?).await?;
+        assert_eq!(answer.status, StatusCode::OK, "{typed:?}");
+        let token = answer.json()?["token"]
+            .as_str()
+            .context("no token")?
+            .to_owned();
+        let session = bearer(Method::GET, "/api/session", &token).body(Body::empty())?;
+        assert_eq!(fixture.send(session).await?.status, StatusCode::OK);
+    }
+    for wrong in ["correct horse batter", "Correct horse battery", ""] {
+        let answer = fixture.send(guess(wrong)?).await?;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{wrong:?}");
+        assert_eq!(
+            answer.json()?["error"],
+            "That is not the web chat's password."
+        );
+    }
+    std::fs::remove_file(&file)?;
+    let unset = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(unset.status, StatusCode::UNAUTHORIZED);
     assert_eq!(
-        std::fs::metadata(&key_file)?.permissions().mode() & 0o777,
-        0o600
+        unset.json()?["error"],
+        "The web chat has no password yet. Run `carillon web password` in a terminal to choose \
+         one."
     );
-    assert_ne!(Key::replace(&key_file)?.token(), first);
     Ok(())
 }
 
-async fn trade_status(fixture: &Fixture, code: String) -> Result<StatusCode> {
-    Ok(fixture.send(trade(&code)?).await?.status)
+#[tokio::test(start_paused = true)]
+async fn guesses_wait_their_turn_and_a_wrong_one_holds_it_a_second() -> Result<()> {
+    let fixture = Arc::new(Fixture::new().await?);
+    let sent = |password: &'static str| {
+        let fixture = Arc::clone(&fixture);
+        tokio::spawn(async move {
+            let answer = fixture.send(guess(password)?).await?;
+            anyhow::Ok((answer.status, Instant::now()))
+        })
+    };
+    let start = Instant::now();
+    let wrong = sent("not the password at all");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let right = sent(PASSWORD);
+    let (wrong, wrong_at) = wrong.await??;
+    let (right, right_at) = right.await??;
+    assert_eq!((wrong, right), (StatusCode::UNAUTHORIZED, StatusCode::OK));
+    assert!(wrong_at - start >= Duration::from_secs(1));
+    assert!(
+        right_at >= wrong_at,
+        "a guess finished during a wrong one's second"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_password_is_set_before_the_provider_first_starts() -> Result<()> {
+    let installation = tempfile::tempdir()?;
+    let file = password_file(installation.path(), "web");
+    let mode =
+        |path: &std::path::Path| anyhow::Ok(std::fs::metadata(path)?.permissions().mode() & 0o777);
+    for short in ["", "elevenchars", "   short and   \n"] {
+        let refused = set_password(&file, short)
+            .err()
+            .context("a short password")?;
+        assert!(refused.to_string().contains("12 characters"), "{refused}");
+        assert!(
+            !installation.path().join("components").exists(),
+            "{short:?}"
+        );
+    }
+    set_password(&file, "twelve chars")?;
+    let hash = std::fs::read_to_string(&file)?;
+    assert!(hash.starts_with("$argon2id$v=19$"), "{hash}");
+    assert_eq!(mode(&file)?, 0o600);
+    assert_eq!(mode(file.parent().context("a directory")?)?, 0o700);
+    assert!(set_password(&file, "too short").err().is_some());
+    assert_eq!(std::fs::read_to_string(&file)?, hash);
+    Ok(())
 }
 
 #[tokio::test]
-async fn a_sign_in_code_works_once_until_it_expires_under_the_key_that_signed_it() -> Result<()> {
-    let fixture = Fixture::new().await?;
-    let status = |code: String| trade_status(&fixture, code);
-    let code = fixture.code(now_ms() + TWO_MINUTES)?;
-    assert_eq!(status(code.clone()).await?, StatusCode::OK);
-    let again = fixture.send(trade(&code)?).await?;
-    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
-    assert!(
-        again.json()?["error"]
-            .as_str()
-            .is_some_and(|said| said.contains("carillon web open"))
-    );
-    let (signed, signature) = code.rsplit_once('.').unwrap_or_default();
-    let respelled = format!("{signed}.{}", signature.to_uppercase());
-    assert_eq!(status(respelled).await?, StatusCode::UNAUTHORIZED);
-
-    for past in [now_ms() - 1, 1] {
-        let expired = fixture.code(past)?;
-        assert_eq!(status(expired).await?, StatusCode::UNAUTHORIZED);
-    }
-    // Made before this provider started. The one before it may have
-    // taken it, and what a provider has taken it remembers only while it runs.
-    let earlier = fixture.code(fixture.web.browser.started + TWO_MINUTES - 1)?;
-    assert_eq!(status(earlier).await?, StatusCode::UNAUTHORIZED);
-    let good = fixture.code(now_ms() + TWO_MINUTES)?;
-    let (expires, rest) = good.split_once('.').unwrap_or_default();
-    let (name, signature) = rest.split_once('.').unwrap_or_default();
-    for forged in [
-        format!("{}.{name}.{signature}", now_ms() + 2 * TWO_MINUTES),
-        format!("{expires}.other{name}.{signature}"),
-        format!("{expires}.{name}.{}", "0".repeat(signature.len())),
-        format!("{expires}.{name}."),
-        format!("{expires}.{name}"),
-        format!("{good}.more"),
-        "never-issued".to_owned(),
-        String::new(),
+async fn the_owner_s_addresses_are_read_as_a_browser_writes_them() -> Result<()> {
+    for (written, host, origin) in [
+        (TAILNET, "chat.example-tailnet.ts.net", TAILNET),
+        (
+            "https://Chat.Example-Tailnet.TS.net:443/",
+            "chat.example-tailnet.ts.net",
+            TAILNET,
+        ),
+        (
+            "http://192.168.1.4:8080",
+            "192.168.1.4:8080",
+            "http://192.168.1.4:8080",
+        ),
+        ("http://[::1]:80", "[::1]", "http://[::1]"),
     ] {
-        assert_eq!(
-            status(forged.clone()).await?,
-            StatusCode::UNAUTHORIZED,
-            "{forged}"
+        let expected = Address {
+            host: host.to_owned(),
+            origin: origin.to_owned(),
+        };
+        assert_eq!(Address::parse(written)?, expected, "{written}");
+    }
+    for refused in [
+        "chat.example-tailnet.ts.net",
+        "localhost:45404",
+        "ftp://chat.example",
+        "https://owner@chat.example",
+        "https://chat.example/chat",
+        "https://chat.example/?page",
+        "https://chat.example/#page",
+    ] {
+        let said = Address::parse(refused).err().context(refused)?.to_string();
+        assert!(
+            said.starts_with(&format!("{refused} is not an address")),
+            "{said}"
         );
     }
-    assert_eq!(status(good).await?, StatusCode::OK);
 
-    let waiting = fixture.code(now_ms() + TWO_MINUTES)?;
-    Key::replace(&fixture.key_file())?;
-    assert_eq!(status(waiting).await?, StatusCode::UNAUTHORIZED);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn two_requests_racing_for_one_code_sign_one_browser_in() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
-    for _ in 0..20 {
-        let code = fixture.code(now_ms() + TWO_MINUTES)?;
-        let racers = [(); 2].map(|()| {
-            let (fixture, request) = (Arc::clone(&fixture), trade(&code));
-            tokio::spawn(async move { anyhow::Ok(fixture.send(request?).await?.status) })
-        });
-        let mut statuses = Vec::new();
-        for racer in racers {
-            statuses.push(racer.await??);
-        }
-        statuses.sort();
-        assert_eq!(statuses, [StatusCode::OK, StatusCode::UNAUTHORIZED]);
+    let fixture = Fixture::new().await?;
+    let registry: &LoadedConfig = &fixture.web.registry;
+    assert!(addresses(registry, "web")?.is_empty());
+    let settings = registry.provider_config_path("web")?;
+    std::fs::create_dir_all(settings.parent().context("a directory")?)?;
+    std::fs::write(&settings, format!("addresses = [\"{TAILNET}/\"]\n"))?;
+    assert_eq!(addresses(registry, "web")?, [Address::parse(TAILNET)?]);
+    for wrong in [
+        "addresses = [\"https://chat.example/chat\"]\n",
+        "address = [\"https://chat.example\"]\n",
+        "addresses = \"https://chat.example\"\n",
+    ] {
+        std::fs::write(&settings, wrong)?;
+        let said = format!("{:#}", addresses(registry, "web").err().context(wrong)?);
+        assert!(said.contains(&settings.display().to_string()), "{said}");
     }
     Ok(())
 }
@@ -484,46 +571,5 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     std::fs::remove_dir_all(&custom)?;
     symlink(&elsewhere, &custom)?;
     assert_eq!(page("/").await?.body, b"<main>linked page</main>");
-    Ok(())
-}
-
-#[tokio::test]
-async fn open_makes_a_link_the_provider_takes_and_says_when_none_runs() -> Result<()> {
-    let fixture = Fixture::new().await?;
-    let listening = TcpListener::bind("127.0.0.1:0")?;
-    let address = listening.local_addr()?.to_string();
-    let root = fixture.directory.path();
-    let registry = std::fs::read_to_string(root.join("carillon.toml"))?;
-    std::fs::write(
-        root.join("elsewhere.toml"),
-        registry.replace(AUTHORITY, &address),
-    )?;
-    let loaded = LoadedConfig::load(&root.join("elsewhere.toml"))?;
-
-    let made = crate::link(&loaded, "web")?;
-    let code = made
-        .strip_prefix(&format!("http://{address}/#sign-in="))
-        .with_context(|| format!("{made} does not open the provider's page"))?;
-    let expires: u128 = code.split('.').next().unwrap_or_default().parse()?;
-    assert!(
-        (now_ms() + TWO_MINUTES - 5000..=now_ms() + TWO_MINUTES).contains(&expires),
-        "the link does not work for two minutes"
-    );
-    listening.set_nonblocking(true)?;
-    let (probe, _) = listening.accept()?;
-    let mut sent = [0_u8; 1];
-    assert_eq!(std::io::Read::read(&mut &probe, &mut sent)?, 0);
-    assert_eq!(fixture.send(trade(code)?).await?.status, StatusCode::OK);
-
-    drop((probe, listening));
-    let stopped = crate::link(&loaded, "web")
-        .err()
-        .context("a link to nothing")?;
-    assert!(
-        stopped
-            .to_string()
-            .contains(&format!("is not running at http://{address}")),
-        "{stopped}"
-    );
     Ok(())
 }

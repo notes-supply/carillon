@@ -2,7 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use anyhow::{Result, bail};
@@ -76,8 +76,6 @@ pub(crate) async fn serve(
     token_file: &Path,
     site: PathBuf,
 ) -> Result<()> {
-    // Read before anything slow, so a code made once this process runs is good.
-    let started = browser::now_ms();
     let Some(Started {
         provider,
         listener,
@@ -88,6 +86,7 @@ pub(crate) async fn serve(
         return Ok(());
     };
     retained(&provider)?;
+    let addresses = browser::addresses(&config, &provider.id)?;
     if !site::has_page(&site) {
         bail!(
             "the web page is not at {}; name its directory with --site",
@@ -100,13 +99,13 @@ pub(crate) async fn serve(
     let web = Arc::new(Web {
         core,
         health,
-        browser: Browser {
-            key_file: browser::key_file(data_dir, &provider.id),
+        browser: Browser::new(
+            data_dir,
+            provider.id.clone(),
             // A browser names the address in one spelling whatever the registry's.
-            authority: listener.local_addr()?.to_string(),
-            started,
-            used: Mutex::default(),
-        },
+            listener.local_addr()?.to_string(),
+            addresses,
+        ),
         staging,
         sends: Sends::default(),
         site: Site {
@@ -121,7 +120,7 @@ pub(crate) async fn serve(
     });
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    info!(url = %web.browser.origin(), "web interface provider ready");
+    info!(url = %web.browser.listen.origin, "web interface provider ready");
     axum::serve(listener, router(web))
         .with_graceful_shutdown(async move {
             tokio::select! {
@@ -202,11 +201,11 @@ async fn browser_only(
     mut request: Request,
     next: Next,
 ) -> Result<Response, InterfaceError> {
-    let key = Key::read(&web.browser.key_file);
+    let key = Key::read(&web.browser.password_file);
     let Some(key) = key.filter(|key| key.authenticates(bearer(request.headers()))) else {
         return Err(refusal(
             StatusCode::UNAUTHORIZED,
-            "This browser is not signed in. Run `carillon web open`.",
+            "This browser is not signed in. Sign in with the web chat's password.",
         ));
     };
     request.extensions_mut().insert(key);

@@ -64,7 +64,7 @@ pub(crate) fn routes() -> Router<Arc<Web>> {
 
 #[derive(Deserialize)]
 pub(crate) struct SignIn {
-    code: String,
+    password: String,
 }
 
 #[derive(Serialize)]
@@ -72,19 +72,13 @@ pub(crate) struct SignedIn {
     token: String,
 }
 
-/// `POST /api/sign-in`: trades the code of `carillon web open`'s link for
-/// the browser's token. The code is the request's whole authority.
+/// `POST /api/sign-in`: trades the web chat's password for the browser's
+/// token. The password is the request's whole authority.
 pub(crate) async fn sign_in(
     State(web): State<Arc<Web>>,
-    Json(SignIn { code }): Json<SignIn>,
+    Json(SignIn { password }): Json<SignIn>,
 ) -> Result<Json<SignedIn>, InterfaceError> {
-    let token = web.browser.redeem(&code).ok_or_else(|| {
-        refusal(
-            StatusCode::UNAUTHORIZED,
-            "This sign-in link was used already or is older than two minutes. \
-             Run `carillon web open` again.",
-        )
-    })?;
+    let token = web.browser.sign_in(password).await?;
     Ok(Json(SignedIn { token }))
 }
 
