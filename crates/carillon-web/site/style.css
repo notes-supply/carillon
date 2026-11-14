@@ -710,6 +710,26 @@ a.file:hover {
 .door p {
   font: 1.0625rem/1.62 var(--reading);
 }
+.sign-in {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.sign-in input {
+  flex: 1;
+  min-width: 10rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--round);
+  background: var(--paper);
+  color: inherit;
+  font: inherit;
+}
+.sign-in p {
+  flex-basis: 100%;
+  margin: 0;
+}
 
 @media (max-width: 46rem) {
   .app {

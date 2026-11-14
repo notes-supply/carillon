@@ -241,7 +241,7 @@ describe("answers to requests", () => {
 
   it("drops the stored token only on a 401 to a request that carried it", () => {
     expect(dropsToken(401, "t1", "t1")).toBe(true);
-    // A sign-in link that failed carried no token, so it says nothing about the one stored.
+    // A request made with no token stored says nothing about one stored since.
     expect(dropsToken(401, null, "t1")).toBe(false);
     expect(dropsToken(401, null, null)).toBe(false);
     // Another tab signed in since: its token is not the one refused.
@@ -279,7 +279,7 @@ describe("answers to requests", () => {
       refusal(503, '{"error":"Carillon is not answering right now. Try again in a moment."}'),
     ).toBe(AWAY);
     expect(refusal(401, "")).toBe(SIGNED_OUT);
-    expect(SIGNED_OUT).toContain("carillon web open");
+    expect(SIGNED_OUT).toContain("carillon web password");
     expect(refusal(422, "Failed to deserialize")).toBe(
       "Carillon refused the request with status 422.",
     );
