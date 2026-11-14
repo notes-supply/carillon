@@ -46,9 +46,9 @@ pub(crate) struct Browser {
     pub(crate) password_file: PathBuf,
     /// The provider's registry ID, which names its settings file.
     provider: String,
-    /// The address the provider listens on.
     pub(crate) listen: Address,
-    /// The others the chat is opened at, from the provider's settings.
+    /// The addresses besides `listen` the chat is opened at, from the
+    /// provider's settings.
     addresses: Vec<Address>,
     /// Held across each guess at the password, and for a second more after
     /// a wrong one, so guesses are made one at a time.
@@ -218,8 +218,6 @@ impl Key {
 }
 
 impl Browser {
-    /// The gate of provider `provider`, which listens at `authority` and is
-    /// opened at `addresses` too.
     pub(crate) fn new(
         data_dir: &Path,
         provider: String,

@@ -127,7 +127,6 @@ async function install() {
     join(units, "carillon-core.service"),
     `[Service]\nEnvironment="CARILLON_HOME=${installation}"\n`,
   );
-  // An address the chat is opened at, as `tailscale serve` gives one.
   await writeFile(join(installation, "providers/web.toml"), `addresses = ["https://${TAILNET}"]\n`);
   const config = join(installation, "carillon.toml");
   const logs = join(installation, "logs");
@@ -183,7 +182,6 @@ esac
   await chmod(join(manager, "systemctl"), 0o755);
 }
 
-/** Chooses the web chat's password as a script does, on standard input. */
 function choosePassword(password) {
   const options = { encoding: "utf8", env, input: `${password}\n` };
   const chosen = execFileSync(binary, ["--home", installation, "web", "password"], options);
@@ -377,8 +375,6 @@ try {
     assert.match(listing, /^web\n {2}no channels with settings of their own$/mu);
   assert.match(refused("settings", "--interface", "web", chat), /refused with 404/u);
 
-  // The provider keeps nothing but the password's hash: a restart loses no
-  // conversation and signs no browser out.
   const before = await turns(token, chat);
   services("stop", "web");
   services("start", "web");

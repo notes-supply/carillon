@@ -76,9 +76,6 @@ grep -F 'interface provider web is not in carillon.toml; not serving' "$TEST_ROO
 serve
 grep -F 'interface provider web is disabled; not serving' "$TEST_ROOT/serve.log" >/dev/null
 [ ! -e "$INSTALLATION/state/components/web/password.hash" ]
-# An entry written by hand may have no directory yet, a settings file that
-# names something other than an address, or external delivery, whose answers
-# would wait for a claim the web provider never makes.
 rm -r "$INSTALLATION/state/components/web"
 password() { "$RELEASE/bin/carillon-web" --home "$INSTALLATION" password; }
 ! printf 'too short\n' | password 2>"$TEST_ROOT/password.log" || fail 'a short password was taken'

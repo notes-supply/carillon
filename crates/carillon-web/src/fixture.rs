@@ -48,7 +48,6 @@ pub(crate) const AUTHORITY: &str = "127.0.0.1:45404";
 pub(crate) const INTERFACE_TOKEN: &str = "interface-token";
 pub(crate) const OPERATOR_TOKEN: &str = "operator-token";
 pub(crate) const PASSWORD: &str = "correct horse battery";
-/// An address the owner named, as `tailscale serve` gives one.
 pub(crate) const TAILNET: &str = "https://chat.example-tailnet.ts.net";
 
 /// What the fake of core holds and what it was asked.

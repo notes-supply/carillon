@@ -148,7 +148,6 @@ async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
 async fn the_page_answers_at_an_address_the_owner_named() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // A browser's request as `tailscale serve` forwards it, Host and all.
     let named = |path: &str| {
         Request::builder()
             .uri(path)
@@ -214,7 +213,6 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
     let file = fixture.password_file();
     let before = std::fs::read_to_string(&file)?;
     assert!(!before.contains(&token), "the token is not the hash");
-    // Choosing the same password again makes a new hash, and signs out.
     set_password(&file, PASSWORD)?;
     assert_ne!(std::fs::read_to_string(&file)?, before);
     let after = fixture.send(session(Some(&token))?).await?;
@@ -243,7 +241,6 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
 async fn the_password_alone_signs_a_browser_in() -> Result<()> {
     let fixture = Fixture::new().await?;
     let file = fixture.password_file();
-    // Space around a password is no part of it, where it is set or typed.
     set_password(&file, "\tcorrect horse battery \n")?;
     for typed in [PASSWORD, "  correct horse battery\n"] {
         let answer = fixture.send(guess(typed)?).await?;

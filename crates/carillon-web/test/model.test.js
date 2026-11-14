@@ -241,7 +241,6 @@ describe("answers to requests", () => {
 
   it("drops the stored token only on a 401 to a request that carried it", () => {
     expect(dropsToken(401, "t1", "t1")).toBe(true);
-    // A request made with no token stored says nothing about one stored since.
     expect(dropsToken(401, null, "t1")).toBe(false);
     expect(dropsToken(401, null, null)).toBe(false);
     // Another tab signed in since: its token is not the one refused.
