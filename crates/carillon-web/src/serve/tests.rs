@@ -220,17 +220,28 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
     let again = fixture.sign_in().await?;
     assert_ne!(again, token);
 
-    let mut keyless = Hmac::<Sha256>::new_from_slice(b"")?;
-    keyless.update(&5_u64.to_be_bytes());
-    keyless.update(b"token");
-    let keyless = hex::encode(keyless.finalize().into_bytes());
-    for no_key in [Some(""), Some("\n"), None] {
+    // A file that holds no whole hash keys nothing, so no token made from
+    // its guessable text gets in.
+    let guessed = |text: &str| -> Result<String> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(text.trim().as_bytes())?;
+        mac.update(&5_u64.to_be_bytes());
+        mac.update(b"token");
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    };
+    for no_key in [
+        Some(""),
+        Some("\n"),
+        Some("not-a-PHC-hash"),
+        Some("$argon2id$v=19$m=19456,t=2,p=1$"),
+        Some("$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0"),
+        None,
+    ] {
         match no_key {
-            Some(empty) => std::fs::write(&file, empty)?,
+            Some(text) => std::fs::write(&file, text)?,
             None => std::fs::remove_file(&file)?,
         }
-        for token in [again.as_str(), keyless.as_str()] {
-            let answer = fixture.send(session(Some(token))?).await?;
+        for token in [again.clone(), guessed(no_key.unwrap_or_default())?] {
+            let answer = fixture.send(session(Some(&token))?).await?;
             assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{no_key:?}");
         }
     }
@@ -293,6 +304,30 @@ async fn guesses_wait_their_turn_and_a_wrong_one_holds_it_a_second() -> Result<(
         right_at >= wrong_at,
         "a guess finished during a wrong one's second"
     );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_guess_whose_request_is_dropped_keeps_its_turn() -> Result<()> {
+    let fixture = Arc::new(Fixture::new().await?);
+    // Dropped while the password is checked, then during the wrong guess's second.
+    for dropped_after in [Duration::ZERO, Duration::from_millis(500)] {
+        let start = Instant::now();
+        let dropped = {
+            let fixture = Arc::clone(&fixture);
+            tokio::spawn(async move { fixture.send(guess("not the password at all")?).await })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::sleep(dropped_after).await;
+        dropped.abort();
+        let right = fixture.send(guess(PASSWORD)?).await?;
+        assert_eq!(right.status, StatusCode::OK);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "a guess went in {:?} after one dropped {dropped_after:?} in",
+            start.elapsed()
+        );
+    }
     Ok(())
 }
 

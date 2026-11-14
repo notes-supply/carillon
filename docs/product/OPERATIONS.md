@@ -648,7 +648,9 @@ stops the provider and fails `carillon web setup`. `carillon logs web` shows
 its log. Its only file of its own is the password's hash,
 `state/components/web/password.hash`. An installation updated from
 0.1.0-beta.10 or earlier keeps an unused `browser.key`, and its browsers are
-signed out until you choose a password.
+signed out until you choose a password. Reload a page that was open across
+the update. A damaged `password.hash` signs no one in. Replace it with
+`carillon web password` rather than editing it.
 
 ### Add the web chat to an installation
 

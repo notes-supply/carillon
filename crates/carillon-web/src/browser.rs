@@ -17,6 +17,7 @@ use std::{
     fs::DirBuilder,
     os::unix::fs::DirBuilderExt as _,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -52,7 +53,7 @@ pub(crate) struct Browser {
     addresses: Vec<Address>,
     /// Held across each guess at the password, and for a second more after
     /// a wrong one, so guesses are made one at a time.
-    guessing: Mutex<()>,
+    guessing: Arc<Mutex<()>>,
 }
 
 /// An address the chat is opened at, as a browser writes it in `Host` and
@@ -166,13 +167,14 @@ pub(crate) fn now() -> u64 {
 pub(crate) struct Key(String);
 
 impl Key {
-    /// The hash in `password_file`. A file that is missing or empty holds
-    /// none, and then nothing is signed in: an empty key would sign for anyone.
+    /// The hash in `password_file`. A file that holds anything but a whole
+    /// hash, its salt and its output included, holds none, and then nothing
+    /// is signed in: a key without them could be guessed.
     pub(crate) fn read(password_file: &Path) -> Option<Self> {
-        let key = std::fs::read_to_string(password_file).ok()?;
-        Some(key.trim().to_owned())
-            .filter(|key| !key.is_empty())
-            .map(Self)
+        let text = std::fs::read_to_string(password_file).ok()?;
+        let key = text.trim();
+        let hash = PasswordHash::new(key).ok()?;
+        (hash.salt.is_some() && hash.hash.is_some()).then(|| Self(key.to_owned()))
     }
 
     /// The signature of `parts`. Each part is preceded by its length, so no
@@ -232,7 +234,7 @@ impl Browser {
                 host: authority,
             },
             addresses,
-            guessing: Mutex::default(),
+            guessing: Arc::default(),
         }
     }
 
@@ -269,25 +271,33 @@ impl Browser {
         Ok(())
     }
 
-    /// The browser's token for `password`, when it is the web chat's.
+    /// The browser's token for `password`, when it is the web chat's. The
+    /// guess runs in a task of its own, which keeps the turn to its end, so
+    /// a request dropped midway frees no turn early.
     pub(crate) async fn sign_in(&self, password: String) -> Result<String, InterfaceError> {
-        let _turn = self.guessing.lock().await;
-        let Some(key) = Key::read(&self.password_file) else {
-            return Err(refusal(
-                StatusCode::UNAUTHORIZED,
-                "The web chat has no password yet. Run `carillon web password` in a terminal to \
-                 choose one.",
-            ));
-        };
-        let checked =
-            tokio::task::spawn_blocking(move || key.admits(password.trim()).then_some(key)).await;
-        if let Ok(Some(key)) = checked {
-            return Ok(key.token());
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        Err(refusal(
-            StatusCode::UNAUTHORIZED,
-            "That is not the web chat's password.",
-        ))
+        const WRONG: &str = "That is not the web chat's password.";
+        let turn = Arc::clone(&self.guessing).lock_owned().await;
+        let file = self.password_file.clone();
+        let guess = tokio::spawn(async move {
+            let _turn = turn;
+            let Some(key) = Key::read(&file) else {
+                return Err(refusal(
+                    StatusCode::UNAUTHORIZED,
+                    "The web chat has no password yet. Run `carillon web password` in a terminal \
+                     to choose one.",
+                ));
+            };
+            let checked =
+                tokio::task::spawn_blocking(move || key.admits(password.trim()).then_some(key))
+                    .await;
+            if let Ok(Some(key)) = checked {
+                return Ok(key.token());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(refusal(StatusCode::UNAUTHORIZED, WRONG))
+        });
+        guess
+            .await
+            .unwrap_or_else(|_| Err(refusal(StatusCode::UNAUTHORIZED, WRONG)))
     }
 }

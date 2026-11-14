@@ -90,9 +90,12 @@ loopback, so the provider trusts nothing a browser attaches on its own.
 - The page trades the password for a token and keeps the token in
   `localStorage`. The token is the same for every browser and lasts until
   the password changes.
+- A file that holds anything but a whole hash, salt and output included,
+  signs no one in. Replace a damaged one with `carillon web password`
+  rather than editing it.
 - The provider checks one password at a time, and a wrong one holds the next
   for a second, so guesses come at about one a second, all browsers
-  together.
+  together. A guess keeps its turn when its request is dropped.
 - Every `/api` request carries `Authorization: Bearer <token>`. No cookie
   carries authority.
 - `Host` must be the address the provider listens on or one in
@@ -116,6 +119,8 @@ could have taken.
 
 An installation updated from 0.1.0-beta.10 or earlier keeps an unused
 `browser.key`. Its browsers are signed out until you choose a password.
+Reload a page that was open across the update, which still runs the old
+script.
 
 ## The page's files
 
