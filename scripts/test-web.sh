@@ -75,26 +75,40 @@ grep -F 'interface provider web is not in carillon.toml; not serving' "$TEST_ROO
 "$RELEASE/bin/carillon" --home "$INSTALLATION" provider web disable >/dev/null
 serve
 grep -F 'interface provider web is disabled; not serving' "$TEST_ROOT/serve.log" >/dev/null
-[ ! -e "$INSTALLATION/state/components/web/browser.key" ]
-# An entry written by hand may have no directory yet, or external delivery,
-# whose answers would wait for a claim the web provider never makes.
+[ ! -e "$INSTALLATION/state/components/web/password.hash" ]
+# An entry written by hand may have no directory yet, a settings file that
+# names something other than an address, or external delivery, whose answers
+# would wait for a claim the web provider never makes.
 rm -r "$INSTALLATION/state/components/web"
-"$RELEASE/bin/carillon-web" --home "$INSTALLATION" sign-out >"$TEST_ROOT/sign-out.log"
-grep -Fx "Carillon's web chat has not started yet, so no browser is signed in." \
-  "$TEST_ROOT/sign-out.log" >/dev/null
+password() { "$RELEASE/bin/carillon-web" --home "$INSTALLATION" password; }
+! printf 'too short\n' | password 2>"$TEST_ROOT/password.log" || fail 'a short password was taken'
+grep -F 'a password needs 12 characters or more' "$TEST_ROOT/password.log" >/dev/null
 [ ! -e "$INSTALLATION/state/components/web" ]
+printf '  correct horse battery\n' | password >"$TEST_ROOT/password.log"
+grep -Fx "The web chat's password is set. Any browser signed in before is signed out. Sign in at http://127.0.0.1:$((PORT + 4))." \
+  "$TEST_ROOT/password.log" >/dev/null
+[ "$(stat -c %a "$INSTALLATION/state/components/web")" = 700 ]
+[ "$(stat -c %a "$INSTALLATION/state/components/web/password.hash")" = 600 ]
+[ "$(cut -c1-15 "$INSTALLATION/state/components/web/password.hash")" = "\$argon2id\$v=19\$" ]
 "$RELEASE/bin/carillon" --home "$INSTALLATION" provider web enable >/dev/null
+printf 'addresses = ["https://chat.example/chat"]\n' >"$INSTALLATION/providers/web.toml"
+! serve credentials/web.token || fail 'the web provider served with a malformed settings file'
+grep -F "in $INSTALLATION/providers/web.toml" "$TEST_ROOT/serve.log" >/dev/null
+! "$RELEASE/bin/carillon-web" --home "$INSTALLATION" setup 2>"$TEST_ROOT/setup.log" ||
+  fail 'setup passed a malformed settings file'
+grep -F "in $INSTALLATION/providers/web.toml" "$TEST_ROOT/setup.log" >/dev/null
+rm "$INSTALLATION/providers/web.toml"
 sed -i '/^delivery = "retained"$/d' "$INSTALLATION/carillon.toml"
 ! serve credentials/web.token || fail 'the web provider served an entry with external delivery'
 grep -F "web needs the line \`delivery = \"retained\"\` in its entry in carillon.toml" \
   "$TEST_ROOT/serve.log" >/dev/null
-printf 'web service passed: it ends at once where it is not registered or is disabled, and refuses external delivery\n'
+printf 'web service passed: it ends at once where it is not registered or is disabled, takes a password before it first starts, and refuses a malformed settings file and external delivery\n'
 
 owner alone
 install_release --interface web >"$TEST_ROOT/alone.log"
 grep -Fx '1. Sign in to a model provider with: '"$INSTALLATION"'/app/bin/carillon-pi --no-session --no-tools --no-approve' \
   "$TEST_ROOT/alone.log" >/dev/null
-grep -Fx '3. Open the web chat in your browser with: carillon web open' "$TEST_ROOT/alone.log" >/dev/null
+grep -Fx "3. Choose the web chat's password with: carillon web password" "$TEST_ROOT/alone.log" >/dev/null
 [ "$(providers)" = 'web runtime-pi ' ]
 [ -z "$(find "$INSTALLATION" -path "$INSTALLATION/app" -prune -o -iname '*discord*' -print)" ] ||
   fail 'an installation of the web chat alone has something of Discord'
@@ -110,18 +124,19 @@ grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/alone-resta
 grep -Fx "  web: ready ($VERSION)" "$TEST_ROOT/alone-restart.log" >/dev/null
 [ "$(session)" = 200 ] || fail 'a restart signed the browser out'
 chat 'after the restart'
-carillon web sign-out | grep -Fx 'Every browser is signed out of Carillon'"'"'s web chat.' >/dev/null
-[ "$(session)" = 401 ] || fail 'a signed-out browser was still let in'
+printf 'another good password\n' | carillon web password |
+  grep -F "Any browser signed in before is signed out." >/dev/null
+[ "$(session)" = 401 ] || fail 'a browser signed in with the old password was still let in'
 carillon logs web | grep -F 'web interface provider ready' >/dev/null
 carillon stop >/dev/null
 uninstall
-printf 'web chat alone passed: installed without Discord, answered, restarted drained, signed out, uninstalled\n'
+printf 'web chat alone passed: installed without Discord, answered, restarted drained, signed out by a new password, uninstalled\n'
 
 owner both
 with_discord --interface web >"$TEST_ROOT/both.log"
 grep -Fx '1. Put the Discord bot token in '"$INSTALLATION"'/credentials/discord-bot.token (mode 0600).' \
   "$TEST_ROOT/both.log" >/dev/null
-grep -Fx '4. Open the web chat in your browser with: carillon web open' "$TEST_ROOT/both.log" >/dev/null
+grep -Fx "4. Choose the web chat's password with: carillon web password" "$TEST_ROOT/both.log" >/dev/null
 [ "$(providers)" = 'web discord-private runtime-pi ' ]
 carillon start >"$TEST_ROOT/both-start.log"
 for id in web discord-private; do

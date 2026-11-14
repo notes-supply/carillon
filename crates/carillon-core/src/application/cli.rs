@@ -48,7 +48,7 @@ use super::{
     about = "Self-hosted agent service",
     after_help = "Provider commands: `carillon <provider> …` runs that provider's own program, \
                   for example `carillon discord --help` for Discord settings and slash-command \
-                  modules, or `carillon web open` to sign a browser in to the web chat."
+                  modules, or `carillon web password` to choose the web chat's password."
 )]
 struct Cli {
     /// Installation to act on. Defaults to `CARILLON_HOME`, then the
@@ -518,7 +518,7 @@ async fn set_up(home: &Path, options: SetupOptions, wait: &Wait) -> Result<()> {
         })?;
     report_running(&config, wait).await?;
     if added.contains(&Bundled::Web) {
-        println!("`carillon web open` opens the web chat in your browser.");
+        println!("`carillon web password` chooses the web chat's password.");
     }
     Ok(())
 }

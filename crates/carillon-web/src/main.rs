@@ -141,6 +141,8 @@ async fn run() -> Result<()> {
         Command::Password { provider } => {
             let loaded = installation()?;
             let provider = instance(&loaded, PROGRAM, provider)?;
+            let entry = loaded.provider(&provider, ProviderRole::Interface)?;
+            let address = entry.listen_address()?;
             let password = if stdin().is_terminal() {
                 let password =
                     Terminal.secret("The web chat's password (12 characters or more):")?;
@@ -157,7 +159,10 @@ async fn run() -> Result<()> {
                 &browser::password_file(&loaded.value.data_dir, &provider),
                 &password,
             )?;
-            println!("The web chat's password is set. Any browser signed in before is signed out.");
+            println!(
+                "The web chat's password is set. Any browser signed in before is signed out. Sign \
+                 in at http://{address}."
+            );
             Ok(())
         }
     }

@@ -348,7 +348,7 @@ Everyday commands: $CARILLON status, $CARILLON logs, $CARILLON restart.
 To start it at boot without logging in, an administrator can run: loginctl enable-linger $OWNER
 EOF
   ! grep -Fqx 'program = "web"' "$CARILLON_HOME/carillon.toml" ||
-    echo "Open the web chat in your browser with: $CARILLON web open"
+    echo "Choose the web chat's password with: $CARILLON web password"
   exit 0
 fi
 echo "Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager."
@@ -363,7 +363,7 @@ step "Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-t
 echo "   In Pi, run /login, then leave with Ctrl+D."
 step "Start deliberately with: $CARILLON start"
 echo "   Then choose the assistant's model: $CARILLON settings --agent assistant model=PROVIDER/MODEL"
-[ -z "$WEB" ] || step "Open the web chat in your browser with: $CARILLON web open"
+[ -z "$WEB" ] || step "Choose the web chat's password with: $CARILLON web password"
 step "Inspect with: $CARILLON status   and   $CARILLON logs"
 cat <<EOF
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz

@@ -320,7 +320,10 @@ fn a_password_is_set_before_the_provider_first_starts() -> Result<()> {
     assert!(hash.starts_with("$argon2id$v=19$"), "{hash}");
     assert_eq!(mode(&file)?, 0o600);
     assert_eq!(mode(file.parent().context("a directory")?)?, 0o700);
-    assert!(set_password(&file, "too short").err().is_some());
+    let refused = set_password(&file, "too short")
+        .err()
+        .context("a short password")?;
+    assert!(refused.to_string().contains("12 characters"), "{refused}");
     assert_eq!(std::fs::read_to_string(&file)?, hash);
     Ok(())
 }
