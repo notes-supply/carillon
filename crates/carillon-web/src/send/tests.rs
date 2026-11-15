@@ -13,7 +13,8 @@ use axum::{
 };
 use carillon_protocol::model::{StagedAttachments, StagedFile};
 use serde_json::json;
-use tokio::sync::Notify;
+use tokio::{io::AsyncWriteExt as _, sync::Notify};
+use tokio_util::io::ReaderStream;
 
 use crate::{
     api::AWAY,
@@ -521,5 +522,116 @@ async fn a_browser_that_leaves_after_its_upload_does_not_take_the_files_from_cor
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(fixture.core().events[0].1, [b"still here".to_vec()]);
+    Ok(())
+}
+
+fn submitted(fixture: &Fixture) -> bool {
+    fixture
+        .core()
+        .asked
+        .iter()
+        .any(|asked| asked == "/v1/events")
+}
+
+#[tokio::test]
+async fn a_message_s_text_is_bounded_by_the_event_core_reads() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let query = "?agent=assistant";
+    let over = "a".repeat(2 * MIB + 1);
+    // Each quote is two bytes of the event's JSON.
+    let over_as_an_event = "\"".repeat(MIB);
+    for (text, why) in [
+        (&over, "longer than an event"),
+        (
+            &over_as_an_event,
+            "longer than an event once written as one",
+        ),
+    ] {
+        let answer = send(&fixture, &token, query, &[Part::Text(text)]).await?;
+        assert!(
+            !submitted(&fixture),
+            "{why}: core was sent text it does not read"
+        );
+        assert_eq!(
+            answer.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{why}: {}",
+            answer.text()
+        );
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message takes about 2 MiB of text at most."}),
+            "{why}"
+        );
+    }
+
+    let long = "a".repeat(MIB);
+    let sent = send(&fixture, &token, query, &[Part::Text(&long)]).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(fixture.core().events[0].0.content, long);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_message_has_one_text_part() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    for parts in [
+        vec![Part::Text("first"), Part::Text("second")],
+        vec![Part::Text("first"), small_file(), Part::Text("")],
+    ] {
+        let answer = send(&fixture, &token, "?agent=assistant", &parts).await?;
+        assert_eq!(
+            answer.status,
+            StatusCode::BAD_REQUEST,
+            "{} parts: {}",
+            parts.len(),
+            answer.text()
+        );
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message has one `text` part."})
+        );
+        assert_eq!(staged(&fixture)?, 0);
+    }
+    assert!(!submitted(&fixture), "a refused message reached core");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_message_is_read_to_its_end_before_it_is_answered() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let over = "a".repeat(3 * MIB);
+    let rest = vec![b'r'; 64 * 1024];
+    let rest = || Part::File("rest.bin", None, &rest);
+    let unknown = String::from_utf8(form(&[Part::Text("hello"), rest()]))?
+        .replacen("name=\"text\"", "name=\"native\"", 1)
+        .into_bytes();
+    for (body, said) in [
+        (unknown, "parts are `text` and `file`"),
+        (
+            form(&[Part::Text("first"), Part::Text("second"), rest()]),
+            "one `text` part",
+        ),
+        (form(&[Part::Text(&over), rest()]), "2 MiB of text"),
+    ] {
+        let (mut browser, provider) = tokio::io::duplex(1024);
+        let upload = tokio::spawn(async move { browser.write_all(&body).await });
+        let request = bearer(Method::PUT, &path(EVENT, "?agent=assistant"), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(ReaderStream::new(provider)))?;
+        let answer = fixture.send(request).await?;
+        upload
+            .await?
+            .with_context(|| format!("{said}: answered while the browser was uploading"))?;
+        assert!(answer.text().contains(said), "{}", answer.text());
+        assert_eq!(staged(&fixture)?, 0, "{said}");
+    }
+    assert!(!submitted(&fixture), "a refused message reached core");
     Ok(())
 }
