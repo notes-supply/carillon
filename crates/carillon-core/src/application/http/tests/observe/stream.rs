@@ -661,6 +661,18 @@ async fn a_stream_ends_at_once_when_its_snapshot_cannot_be_composed() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn an_observation_asked_for_once_a_stop_closed_storage_is_refused_as_unavailable()
+-> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    state.core.storage_settled().await;
+    let (status, said) = refused(&state, "test-interface", OWN, OPEN).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{said}");
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_core_started_again_on_its_storage_sends_a_complete_first_snapshot() -> Result<()> {
     let directory = tempdir()?;

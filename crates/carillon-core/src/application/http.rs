@@ -127,10 +127,16 @@ impl ApiError {
     }
 }
 
+/// A refusal of core's keeps its own status however it was carried here.
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
-        error!(error = %error, "request failed");
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        match error.downcast::<CoreError>() {
+            Ok(refusal) => refusal.into(),
+            Err(error) => {
+                error!(error = %error, "request failed");
+                Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            }
+        }
     }
 }
 

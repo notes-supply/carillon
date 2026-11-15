@@ -119,7 +119,7 @@ store: a message whose write was waiting for SQLite's lock is recorded,
 and a retry is answered as a duplicate. Core still waits, without a bound,
 for the captures, hand-overs and storage work in progress to finish before
 it exits. It starts no storage work for a request that asks once that wait
-has begun, and answers such a request with an error.
+has begun, and refuses such a request with 503 on every route.
 
 ### Dispatchers
 
