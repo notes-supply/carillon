@@ -734,8 +734,8 @@ fn shows(text: &str) -> impl Fn(&Snapshot) -> bool {
 /// first read, this still passes if no round's write lands inside the
 /// composition.
 #[tokio::test(start_paused = true)]
-async fn a_change_committed_while_the_first_snapshot_is_composed_reaches_the_stream() -> Result<()>
-{
+async fn by_timing_a_change_committed_while_the_first_snapshot_is_composed_reaches_the_stream()
+-> Result<()> {
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     slow_to_compose(&fixture).await?;
@@ -754,7 +754,7 @@ async fn a_change_committed_while_the_first_snapshot_is_composed_reaches_the_str
 /// Timing, not proof of the order: with the mark made after the composition,
 /// this still passes if no round's second write lands inside one.
 #[tokio::test(start_paused = true)]
-async fn a_change_committed_while_a_snapshot_is_composed_is_sent_next() -> Result<()> {
+async fn by_timing_a_change_committed_while_a_snapshot_is_composed_is_sent_next() -> Result<()> {
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     slow_to_compose(&fixture).await?;

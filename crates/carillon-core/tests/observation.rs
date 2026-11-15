@@ -196,7 +196,7 @@ async fn an_interface_follows_its_view_until_core_stops_and_again_once_core_is_b
 }
 
 #[tokio::test]
-async fn core_stops_two_seconds_after_it_is_told_while_a_reader_reads_nothing() -> Result<()> {
+async fn core_stops_within_five_seconds_of_being_told_while_a_reader_reads_nothing() -> Result<()> {
     let installation = Installation::create()?;
     let core = installation.serve().await?;
     // A first snapshot of 12 MiB, more than the sockets between core and a
