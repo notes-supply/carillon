@@ -1,3 +1,11 @@
+use std::{
+    future::Future as _,
+    path::PathBuf,
+    pin::pin,
+    sync::{Arc, OnceLock},
+    task::{self, Wake, Waker},
+};
+
 use anyhow::ensure;
 use carillon_protocol::{
     model::Delivery,
@@ -358,5 +366,43 @@ const NO_OPS: &[(&str, Case)] = &[
 fn a_write_that_changes_nothing_announces_nothing() -> Result<()> {
     let announced = unlike(NO_OPS, false)?;
     assert!(announced.is_empty(), "announced a change: {announced:?}");
+    Ok(())
+}
+
+/// Notes, as a change is announced, whether SQLite's log is still beside
+/// the database. SQLite removes the log as the last connection closes.
+struct Announced {
+    log: PathBuf,
+    log_was_there: OnceLock<bool>,
+}
+
+impl Wake for Announced {
+    fn wake(self: Arc<Self>) {
+        let _ = self.log_was_there.set(self.log.exists());
+    }
+}
+
+#[test]
+fn a_change_is_announced_once_the_write_has_closed_its_connection() -> Result<()> {
+    let directory = tempdir()?;
+    let database = Database::create(&directory.path().join("state.sqlite3"))?;
+    let announced = Arc::new(Announced {
+        log: directory.path().join("state.sqlite3-wal"),
+        log_was_there: OnceLock::new(),
+    });
+    // The announcement wakes whoever waits for it before `write` returns,
+    // so this waker runs inside the write, at the moment of the mark.
+    let waker = Waker::from(announced.clone());
+    let mut changes = database.changes();
+    let mut heard = pin!(changes.changed());
+    let waiting = heard.as_mut().poll(&mut task::Context::from_waker(&waker));
+    assert!(waiting.is_pending());
+
+    database.write(|transaction| {
+        ensure!(announced.log.exists(), "an open write keeps no log");
+        Ok(transaction
+            .execute_batch("CREATE TABLE later (note TEXT); INSERT INTO later VALUES ('new')")?)
+    })?;
+    assert_eq!(announced.log_was_there.get(), Some(&false));
     Ok(())
 }

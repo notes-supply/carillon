@@ -514,6 +514,33 @@ async fn a_turn_that_ends_while_its_runtime_is_asked_shows_its_stored_ending() -
 }
 
 #[tokio::test]
+async fn what_a_runtime_said_of_a_turn_is_not_shown_once_another_runtime_holds_it() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    hand_next(&state.core, "test-runtime").await?;
+    let storage = rusqlite::Connection::open(state.config.value.data_dir.join("carillon.sqlite3"))?;
+    let snapshot = state
+        .core
+        .snapshot(
+            "test-interface",
+            &view(1, Some(("conversation", 50)))?,
+            async |held| {
+                // Nothing core does moves a running turn to another runtime,
+                // so storage is edited to say one moved while the first was
+                // asked.
+                let moved = storage.execute("UPDATE turns SET runtime_id = 'another-runtime'", []);
+                assert_eq!(moved.ok(), Some(1));
+                held.iter().map(|_| live(3, &[]).ok()).collect()
+            },
+        )
+        .await?;
+    let (_, turns, _) = recorded(&snapshot)?;
+    assert_eq!(turns[0].progress, Progress::Running { activity: None });
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_turn_stored_as_no_turn_can_be_fails_the_snapshot() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
