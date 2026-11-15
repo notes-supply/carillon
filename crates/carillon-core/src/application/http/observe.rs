@@ -25,7 +25,7 @@ use tokio::{sync::watch, time::Instant};
 use tracing::warn;
 
 use super::{ApiError, AppState, activity::activities, interface_provider};
-use crate::HeldTurn;
+use crate::db::HeldTurn;
 
 /// How long after a snapshot that shows a running turn core composes the
 /// next one, which asks the turn's runtime again.

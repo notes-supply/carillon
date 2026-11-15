@@ -27,7 +27,7 @@ impl Core {
     /// it.
     /// # Errors
     /// Returns storage errors.
-    pub async fn snapshot(
+    pub(crate) async fn snapshot(
         &self,
         interface_id: &str,
         view: &View,

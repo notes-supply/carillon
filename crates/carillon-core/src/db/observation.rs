@@ -22,9 +22,9 @@ use super::{
 
 /// A running turn and the runtime that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HeldTurn {
-    pub turn_id: String,
-    pub runtime_id: String,
+pub(crate) struct HeldTurn {
+    pub(crate) turn_id: String,
+    pub(crate) runtime_id: String,
 }
 
 /// What [`conversation`] reads of a conversation `c` of the interface `?1`.

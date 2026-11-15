@@ -222,8 +222,7 @@ impl Core {
     /// A mark says to look again and no more. Marks coalesce, and carry no
     /// count and no revision. Marking the receiver seen before each look
     /// means no change is missed.
-    #[must_use]
-    pub fn changes(&self) -> watch::Receiver<()> {
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
         self.database.changes()
     }
 

@@ -16,7 +16,7 @@ use carillon_protocol::{
 use tempfile::tempdir;
 
 use super::{Fixture, accept, answer, configured, hand_next, installation, report};
-use crate::{HeldTurn, application::http::*};
+use crate::{application::http::*, db::HeldTurn};
 
 mod stream;
 

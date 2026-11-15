@@ -55,7 +55,7 @@ pub(crate) use admission::Admission;
 pub(crate) use dispatch::QueuedTurn;
 use files::{answer_files, captured_files};
 pub(crate) use jobs::JobPage;
-pub use observation::HeldTurn;
+pub(crate) use observation::HeldTurn;
 pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
 pub use settle::Settled;
 pub(crate) use settle::Settlement;

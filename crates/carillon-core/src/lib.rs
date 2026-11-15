@@ -10,7 +10,7 @@ mod resources;
 mod runtime_client;
 
 pub use attachments::Reconciled;
-pub use db::{HeldTurn, Settled};
+pub use db::Settled;
 pub use engine::{
     AgentOptions, Core, CoreError, CoreOptions, InboxFailure, RuntimeProvider, Stalled, WorkerStep,
 };
