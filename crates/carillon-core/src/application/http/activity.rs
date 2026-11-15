@@ -11,14 +11,16 @@ use tracing::debug;
 
 use super::runtime_token;
 
-/// A snapshot is cosmetic: a runtime that is slow to describe a turn costs
-/// the snapshot, not what reads it.
-const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one sample has, however many turns it asks about. A snapshot
+/// is cosmetic: runtimes that are slow to describe their turns cost the
+/// snapshots, not what reads them.
+const SAMPLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What each of `turns`, a runtime's ID and its turn's, is doing as its
-/// runtime says, in their order: `None` where the runtime did not say.
-/// At most [`JOB_READ_LIMIT`] are asked at once, so that many turns take
-/// one snapshot timeout at most however many runtimes cannot answer.
+/// runtime says, in their order: `None` where the runtime did not say
+/// within [`SAMPLE_TIMEOUT`] of the sample's start. At most
+/// [`JOB_READ_LIMIT`] are asked at once, so a turn behind that many
+/// unanswered ones is not asked at all.
 pub(super) async fn activities<'a>(
     client: &Client,
     config: &LoadedConfig,
@@ -27,11 +29,29 @@ pub(super) async fn activities<'a>(
 ) -> Vec<Option<TurnActivity>> {
     let asked = turns
         .into_iter()
-        .map(|(runtime_id, turn_id)| {
-            runtime_activity(client, config, runtime_id, interface_id, turn_id)
+        .enumerate()
+        .map(|(index, (runtime_id, turn_id))| async move {
+            let said = runtime_activity(client, config, runtime_id, interface_id, turn_id).await;
+            (index, said)
         })
         .collect::<Vec<_>>();
-    stream::iter(asked).buffered(JOB_READ_LIMIT).collect().await
+    let mut sample = vec![None; asked.len()];
+    let mut answers = stream::iter(asked).buffer_unordered(JOB_READ_LIMIT);
+    let answered = async {
+        while let Some((index, said)) = answers.next().await {
+            sample[index] = said;
+        }
+    };
+    if tokio::time::timeout(SAMPLE_TIMEOUT, answered)
+        .await
+        .is_err()
+    {
+        debug!(
+            interface_id,
+            "runtimes did not describe every turn within {SAMPLE_TIMEOUT:?}"
+        );
+    }
+    sample
 }
 
 async fn runtime_activity(
@@ -50,12 +70,7 @@ async fn runtime_activity(
             .extend(["v1", "turns", turn_id, "activity"]);
         url.query_pairs_mut()
             .append_pair("interface_id", interface_id);
-        let response = client
-            .get(url)
-            .bearer_auth(token)
-            .timeout(ACTIVITY_TIMEOUT)
-            .send()
-            .await?;
+        let response = client.get(url).bearer_auth(token).send().await?;
         // Not yet or no longer executing in the runtime.
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);

@@ -469,8 +469,8 @@ struct JobQuery {
 /// The caller's jobs, as core recorded them: a page of those at work, or
 /// those it names, each running turn with its runtime's latest snapshot when
 /// the runtime supplies one. The durable states come from storage; a running
-/// turn without `activity` has not ended. Runtimes are asked at once, so the
-/// read takes one snapshot timeout at most however many runtimes cannot
+/// turn without `activity` has not ended. The runtimes have one deadline
+/// between them, so the read waits that long at most however many cannot
 /// answer, and a page holds at most
 /// [`JOB_READ_LIMIT`](carillon_protocol::model::JOB_READ_LIMIT) running turns.
 async fn jobs(

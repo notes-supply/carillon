@@ -93,8 +93,10 @@ window run, asks their runtimes what they are doing outside any
 transaction, and then reads everything the snapshot holds in one
 transaction. It keeps a runtime's answer only for a turn that read still
 finds running there. A turn that ended meanwhile shows its stored ending,
-and a turn whose runtime did not answer is still running. A turn the
-runtime opened offers no controls.
+and a turn whose runtime did not answer is still running. Core asks about
+32 turns at once and gives the runtimes two seconds for all the turns of
+one snapshot, so runtimes that do not answer cost a snapshot two seconds
+however many turns run. A turn the runtime opened offers no controls.
 
 The stream is the response body alone, with no task or queue behind it.
 Core composes a snapshot only when the reader takes the one before, so a

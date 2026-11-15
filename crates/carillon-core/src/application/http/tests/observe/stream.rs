@@ -3,7 +3,11 @@
 //! read. Cases that ask no runtime run on a paused clock, where a wait for
 //! silence costs no time and ends only once core has nothing left to do.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    collections::HashMap,
+    future,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use anyhow::{Context as _, bail};
 use axum::{
@@ -463,6 +467,45 @@ async fn many_running_turns_take_no_longer_to_show_than_one_when_their_runtime_n
         Ok(asked.elapsed())
     };
     assert_eq!(first_of(many).await?, first_of(1).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turn_shows_what_its_runtime_said_though_an_older_turn_is_never_described() -> Result<()>
+{
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    fixture.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let state = configured(&fixture);
+    let mut turns = Vec::new();
+    for message in ["one", "two", "three"] {
+        turns.push(accept(&fixture, message, "conversation").await?.turn_id);
+        hand_next(&state.core, "test-runtime").await?;
+    }
+    // The runtime never answers about the oldest turn.
+    let made = HashMap::from([(turns[1].clone(), 2), (turns[2].clone(), 3)]);
+    let activity = get(move |AxumPath(turn): AxumPath<String>| {
+        let calls = made.get(&turn).copied();
+        async move {
+            match calls {
+                Some(calls) => live(calls, &[])
+                    .map(Json)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+                None => future::pending().await,
+            }
+        }
+    });
+    let router = Router::new().route("/v1/turns/{id}/activity", activity);
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let first = open(&state, OPEN).await?.snapshot().await?;
+    let described = |calls| -> Result<Progress> {
+        let activity = Some(live(calls, &[])?);
+        Ok(Progress::Running { activity })
+    };
+    let silent = Progress::Running { activity: None };
+    assert_eq!(progress(&first)?, [silent, described(2)?, described(3)?]);
     Ok(())
 }
 
