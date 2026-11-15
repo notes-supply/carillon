@@ -10,7 +10,10 @@ use axum::{
     body::{Body, BodyDataStream},
     http::Request,
 };
-use carillon_protocol::observation::{Ending, Opened, Progress, SNAPSHOT_LIMIT, Snapshot};
+use carillon_protocol::{
+    model::JOB_READ_LIMIT,
+    observation::{Ending, Opened, Progress, SNAPSHOT_LIMIT, Snapshot},
+};
 use futures_util::StreamExt as _;
 use tempfile::tempdir;
 use tower::ServiceExt as _;
@@ -423,6 +426,43 @@ async fn core_asks_a_runtime_once_for_each_snapshot_a_reader_takes_and_never_for
     // One for the reader that left, and one for each of the three
     // snapshots this one took, though a second passed between them.
     assert_eq!(runtime.asked(), 4);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn many_running_turns_take_no_longer_to_show_than_one_when_their_runtime_never_answers()
+-> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    // Nothing takes a connection from this listener, so the system accepts
+    // each one and no request on it is ever answered.
+    let silent = TcpListener::bind("127.0.0.1:0").await?;
+    fixture.config.value.providers[1].url = format!("http://{}", silent.local_addr()?);
+    accept(&fixture, "one", "conversation").await?;
+    let state = configured(&fixture);
+    hand_next(&state.core, "test-runtime").await?;
+    // One more than core asks about at once.
+    let many = JOB_READ_LIMIT + 1;
+    for key in 1..many {
+        let opening = carillon_protocol::turns::TurnOpening {
+            interface_id: "test-interface".to_owned(),
+            agent_id: "test-agent".to_owned(),
+            audience_id: "conversation".to_owned(),
+            key: key.to_string(),
+            label: None,
+        };
+        state.core.open_turn("test-runtime", &opening)?;
+    }
+
+    let running = Progress::Running { activity: None };
+    let first_of = async |turns: usize| -> Result<Duration> {
+        let asked = tokio::time::Instant::now();
+        let mut reader = open(&state, &format!("{OPEN}&turns={turns}")).await?;
+        let first = reader.snapshot().await?;
+        assert_eq!(progress(&first)?, vec![running.clone(); turns]);
+        Ok(asked.elapsed())
+    };
+    assert_eq!(first_of(many).await?, first_of(1).await?);
     Ok(())
 }
 
