@@ -336,7 +336,7 @@ async fn a_message_that_arrives_once_storage_has_settled_is_refused_and_recorded
     };
     let refused = core.accept(&interface(), &late).await;
     assert!(
-        matches!(&refused, Err(CoreError::Storage(error)) if error.to_string() == "Carillon is shutting down"),
+        matches!(&refused, Err(CoreError::Unavailable(_))),
         "{refused:?}"
     );
     drop(core);
