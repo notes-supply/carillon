@@ -114,9 +114,12 @@ The web provider still polls the two reads above, so they stay.
 
 Told to stop, core ends every observation and waits at most two seconds
 for the requests in flight to be answered. A request still in flight then
-is cut off when the process ends. Core still waits, without a bound, for
-the captures, hand-overs and storage work in progress to finish before it
-exits.
+loses its answer when the process ends. It keeps what it had begun to
+store: a message whose write was waiting for SQLite's lock is recorded,
+and a retry is answered as a duplicate. Core still waits, without a bound,
+for the captures, hand-overs and storage work in progress to finish before
+it exits. It starts no storage work for a request that asks once that wait
+has begun, and answers such a request with an error.
 
 ### Dispatchers
 

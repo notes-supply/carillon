@@ -187,9 +187,12 @@ pub(super) fn check(config: &LoadedConfig) -> Result<CoreDatabase> {
 }
 
 /// How long core waits, once told to stop, for the requests in flight to be
-/// answered. They take milliseconds; only a call relayed to a slow runtime
-/// or a registry apply can outlast it, and is then cut off as a kill would
-/// cut it.
+/// answered. Most take milliseconds. A write that waits for SQLite's lock,
+/// a call relayed to a slow runtime and a registry apply can outlast it,
+/// and so can a peer that stalls. Such a request loses its answer when the
+/// process ends, and keeps what it did: storage work it began is waited
+/// for, so a message whose write was waiting is kept, and a retry of it is
+/// answered as a duplicate.
 const DRAIN: Duration = Duration::from_secs(2);
 
 /// Serves the installation whose registry `config` was loaded from `path`,
@@ -252,8 +255,12 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
         }
     };
     // The caller releases the service lock when this returns, however the
-    // server ended: no copy may still be publishing then, no dispatcher may
-    // still be handing a turn over, and no storage work may still be writing.
+    // server ended. By then no copy is publishing and none can start, no
+    // dispatcher is handing a turn over, and no storage work is running or
+    // can start: `storage_settled` closes storage to new work before it
+    // waits. A connection still open past the bound is not closed here.
+    // Its request may still read storage until the process ends, and
+    // cannot write.
     stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;

@@ -182,7 +182,8 @@ impl Core {
     /// waits for the writer. The work finishes even if the caller stops
     /// waiting, and its outcome is the database's, as for a synchronous call.
     /// # Errors
-    /// Returns the work's error, or a storage error if it panicked.
+    /// Returns the work's error, a storage error if it panicked, or a
+    /// refusal that ran nothing once [`Self::storage_settled`] was called.
     pub async fn blocking<T, E>(
         &self,
         work: impl FnOnce(&Self) -> Result<T, E> + Send + 'static,
@@ -192,14 +193,23 @@ impl Core {
         E: From<anyhow::Error> + Send + 'static,
     {
         let core = self.clone();
-        self.storage
-            .spawn_blocking(move || work(&core))
-            .await
-            .map_err(|error| E::from(anyhow!(error).context("storage work did not finish")))?
+        // Counted before the look: `storage_settled` then either waits for
+        // this work or has closed storage to it, and never misses it.
+        let counted = self.storage.token();
+        if self.storage.is_closed() {
+            return Err(E::from(anyhow!("Carillon is shutting down")));
+        }
+        tokio::task::spawn_blocking(move || {
+            let _counted = counted;
+            work(&core)
+        })
+        .await
+        .map_err(|error| E::from(anyhow!(error).context("storage work did not finish")))?
     }
 
-    /// Wait until storage work started for async callers has finished, so
-    /// exclusive ownership can be released with no write still running.
+    /// Closes storage to work for async callers and waits until what they
+    /// started has finished, so exclusive ownership can be released with no
+    /// write still running and none to come.
     pub async fn storage_settled(&self) {
         self.storage.close();
         self.storage.wait().await;

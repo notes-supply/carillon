@@ -1,5 +1,7 @@
 use anyhow::{Context as _, Result};
-use carillon_core::{AgentOptions, Core, CoreOptions, RuntimeProvider, Settled, WorkerStep};
+use carillon_core::{
+    AgentOptions, Core, CoreError, CoreOptions, RuntimeProvider, Settled, WorkerStep,
+};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::{
     model::{ExternalEvent, SelectedProvider, TurnState},
@@ -317,6 +319,30 @@ async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runt
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.state, TurnState::Interrupted);
     core.storage_settled().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_message_that_arrives_once_storage_has_settled_is_refused_and_recorded_nowhere()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let options = options(directory.path());
+    let core = Core::create(options.clone())?;
+    let accepted = core.accept(&interface(), &event()).await?;
+    core.storage_settled().await;
+    let late = ExternalEvent {
+        event_id: "late".to_owned(),
+        ..event()
+    };
+    let refused = core.accept(&interface(), &late).await;
+    assert!(
+        matches!(&refused, Err(CoreError::Storage(error)) if error.to_string() == "Carillon is shutting down"),
+        "{refused:?}"
+    );
+    drop(core);
+    let recorded = Core::open(options)?.recent_turns(None, 10)?;
+    let recorded = recorded.iter().map(|turn| turn.turn_id.as_str());
+    assert_eq!(recorded.collect::<Vec<_>>(), [accepted.turn_id]);
     Ok(())
 }
 
