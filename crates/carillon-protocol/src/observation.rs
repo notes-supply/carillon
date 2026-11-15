@@ -223,7 +223,8 @@ pub struct Conversation {
     /// The channel recorded with the conversation's first message.
     pub channel_id: String,
     /// The first non-blank line of the conversation's first message,
-    /// trimmed. Empty when that message had only files.
+    /// trimmed, at most [`TITLE_LENGTH`](crate::conversations::TITLE_LENGTH)
+    /// characters. Empty when that message had only files.
     pub title: String,
     /// When core accepted the conversation's first message, Unix seconds.
     pub started_at: i64,

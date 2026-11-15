@@ -51,8 +51,9 @@ impl Observation {
         }
     }
 
-    /// The next snapshot, or `None` once core has ended the stream, as it
-    /// does when it stops. Waiting may be abandoned and taken up again:
+    /// The next snapshot, or `None` once the observation is over: core
+    /// ended the stream, as it does when it stops, or an earlier call
+    /// returned an error. Waiting may be abandoned and taken up again:
     /// nothing received is lost.
     ///
     /// # Errors
@@ -60,8 +61,9 @@ impl Observation {
     /// Returns a transient failure when the connection is lost, when the
     /// first snapshot does not come in time, or when the stream stays
     /// silent for three keep-alives. Returns a failure that is not
-    /// transient when core sends what is not a snapshot or one larger than
-    /// [`SNAPSHOT_LIMIT`].
+    /// transient when core sends what is not a snapshot, or an event
+    /// larger than [`SNAPSHOT_LIMIT`]. An error is returned once: every
+    /// call after it returns `Ok(None)`.
     pub async fn next(&mut self) -> Result<Option<Snapshot>, InterfaceError> {
         let outcome = self.read().await;
         if !matches!(outcome, Ok(Some(_))) {
@@ -92,7 +94,7 @@ impl Observation {
                 }
                 Some(Err(error)) => {
                     return Err(InterfaceError::protocol(format!(
-                        "core sent a snapshot over {SNAPSHOT_LIMIT} bytes: {error}"
+                        "core sent an event over {SNAPSHOT_LIMIT} bytes on an observation: {error}"
                     )));
                 }
                 Some(Ok(SseEvent::Retry(_))) => continue,

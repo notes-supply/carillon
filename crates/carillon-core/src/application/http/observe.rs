@@ -64,11 +64,8 @@ struct Observation {
     interface_id: String,
     view: View,
     changes: watch::Receiver<()>,
-    /// The snapshot last sent, serialized.
     sent: String,
-    /// Whether that snapshot shows a running turn.
     running: bool,
-    /// When the last composition ended.
     composed: Instant,
 }
 

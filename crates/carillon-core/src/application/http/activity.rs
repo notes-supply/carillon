@@ -81,7 +81,12 @@ async fn runtime_activity(
     };
     // Interfaces ask every second or so; an unavailable snapshot is routine.
     snapshot.await.unwrap_or_else(|error| {
-        debug!(runtime_id, turn_id, %error, "runtime activity is unavailable");
+        debug!(
+            runtime_id,
+            turn_id,
+            error = format!("{error:#}"),
+            "runtime activity is unavailable"
+        );
         None
     })
 }

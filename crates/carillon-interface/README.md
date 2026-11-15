@@ -22,7 +22,8 @@ in `carillon-protocol`.
   ends the stream, as it does when it stops, and an error when the
   connection is lost, when the first snapshot takes over ten seconds, when
   the stream is silent for three keep-alives, or when core sends what is
-  not a snapshot. Neither retries or reconnects. A provider that still
+  not a snapshot. After an error `next` returns `Ok(None)`, as it does
+  after the end. Neither retries or reconnects. A provider that still
   wants the view opens another observation, whose first snapshot is
   complete. `Deliveries` is the claim, acknowledgement and reconciliation of
   deliveries under one instance identity. Its owner keeps two rules, which
