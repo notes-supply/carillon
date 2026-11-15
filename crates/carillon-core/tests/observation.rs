@@ -196,7 +196,7 @@ async fn an_interface_follows_its_view_until_core_stops_and_again_once_core_is_b
 }
 
 #[tokio::test]
-async fn core_stops_within_seconds_while_a_reader_reads_nothing() -> Result<()> {
+async fn core_stops_two_seconds_after_it_is_told_while_a_reader_reads_nothing() -> Result<()> {
     let installation = Installation::create()?;
     let core = installation.serve().await?;
     // A first snapshot of 12 MiB, more than the sockets between core and a
@@ -230,8 +230,10 @@ async fn core_stops_within_seconds_while_a_reader_reads_nothing() -> Result<()> 
     );
 
     let took = stop(core).await?;
-    // Core waits two seconds for connections; the rest is a loaded machine.
-    assert!(took < Duration::from_secs(10), "{took:?}");
+    // Core waits two seconds for this connection, and the stop was measured
+    // at 2.0 to 2.1 s. The three more are for a loaded machine.
+    let (bound, load) = (Duration::from_secs(2), Duration::from_secs(3));
+    assert!(took >= bound && took < bound + load, "{took:?}");
     drop(reader);
     Ok(())
 }
