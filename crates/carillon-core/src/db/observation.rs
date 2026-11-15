@@ -72,14 +72,9 @@ impl Database {
         Ok(running)
     }
 
-    /// Everything `view` shows the interface, and the running turns it
-    /// lists, oldest first. A running turn is listed without activity:
-    /// that is its runtime's to say.
-    pub(crate) fn observed(
-        &self,
-        interface_id: &str,
-        view: &View,
-    ) -> Result<(Snapshot, Vec<HeldTurn>)> {
+    /// Everything `view` shows the interface. A running turn is listed
+    /// without activity: that is its runtime's to say.
+    pub(crate) fn observed(&self, interface_id: &str, view: &View) -> Result<Snapshot> {
         let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         let limit = view.conversations.get();
@@ -92,21 +87,16 @@ impl Database {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let more = conversations.len() > usize::from(limit);
         conversations.truncate(limit.into());
-        let (open, running) = match &view.open {
-            Some(open) => {
-                let (opened, running) = opened(&transaction, interface_id, open)?;
-                (Some(opened), running)
-            }
-            None => (None, Vec::new()),
-        };
-        Ok((
-            Snapshot {
-                conversations,
-                more,
-                open,
-            },
-            running,
-        ))
+        let open = view
+            .open
+            .as_ref()
+            .map(|open| opened(&transaction, interface_id, open))
+            .transpose()?;
+        Ok(Snapshot {
+            conversations,
+            more,
+            open,
+        })
     }
 }
 
@@ -143,80 +133,55 @@ pub(super) fn source(event_id: String, input: String, command: bool) -> TurnSour
     }
 }
 
-/// A turn's row of the open window.
-struct Stored {
-    turn_id: String,
-    source: TurnSource,
+/// How far the turn `turn_id` has come: its stored `state`, when it ended,
+/// and of its delivery what it says and the silence in place of it. A row
+/// that `db.rs`'s invariants rule out is a fault of storage, never a kind
+/// of progress.
+fn progress(
+    turn_id: &str,
     state: TurnState,
-    accepted_at: i64,
     finished_at: Option<i64>,
-    report: Option<TurnActivity>,
-    runtime_id: String,
-    /// What its delivery says, and the silence in place of it.
     delivered: Option<(String, Option<Silence>)>,
-}
-
-impl Stored {
-    /// The turn as far as it has come, and its holder while it runs. A row
-    /// that `db.rs`'s invariants rule out is a fault of storage, never a
-    /// kind of progress.
-    fn observed(self) -> Result<(ObservedTurn, Option<HeldTurn>)> {
-        let report = self.report;
-        let ended = |finished_at, ending| Progress::Ended {
-            finished_at,
-            ending,
-            report,
-        };
-        let progress = match (self.state, self.finished_at, self.delivered) {
-            (TurnState::Queued, None, None) => Progress::Queued,
-            (TurnState::Running, None, None) => Progress::Running { activity: None },
-            (TurnState::Completed, Some(at), Some((text, None))) => {
-                let files = Vec::new();
-                ended(at, Ending::Answered { text, files })
+    report: Option<TurnActivity>,
+) -> Result<Progress> {
+    let ended = |finished_at, ending| Progress::Ended {
+        finished_at,
+        ending,
+        report,
+    };
+    Ok(match (state, finished_at, delivered) {
+        (TurnState::Queued, None, None) => Progress::Queued,
+        (TurnState::Running, None, None) => Progress::Running { activity: None },
+        (TurnState::Completed, Some(at), Some((text, None))) => {
+            let files = Vec::new();
+            ended(at, Ending::Answered { text, files })
+        }
+        (TurnState::Interrupted, Some(at), Some((notice, None))) => {
+            ended(at, Ending::Interrupted { notice })
+        }
+        (TurnState::Completed, Some(at), Some((_, Some(Silence::Steered)))) => {
+            ended(at, Ending::Steered)
+        }
+        (TurnState::Interrupted, Some(at), Some((_, Some(Silence::Stopped)))) => {
+            ended(at, Ending::Stopped)
+        }
+        (state, finished_at, delivered) => bail!(
+            "turn {turn_id} is stored {} with {} and {}",
+            state.as_str(),
+            finished_at.map_or("no time it ended", |_| "a time it ended"),
+            match delivered {
+                None => "no delivery",
+                Some((_, None)) => "a delivery",
+                Some((_, Some(Silence::Steered))) => "a steered delivery",
+                Some((_, Some(Silence::Stopped))) => "a stopped delivery",
             }
-            (TurnState::Interrupted, Some(at), Some((notice, None))) => {
-                ended(at, Ending::Interrupted { notice })
-            }
-            (TurnState::Completed, Some(at), Some((_, Some(Silence::Steered)))) => {
-                ended(at, Ending::Steered)
-            }
-            (TurnState::Interrupted, Some(at), Some((_, Some(Silence::Stopped)))) => {
-                ended(at, Ending::Stopped)
-            }
-            (state, finished_at, delivered) => bail!(
-                "turn {} is stored {} with {} and {}",
-                self.turn_id,
-                state.as_str(),
-                finished_at.map_or("no time it ended", |_| "a time it ended"),
-                match delivered {
-                    None => "no delivery",
-                    Some((_, None)) => "a delivery",
-                    Some((_, Some(Silence::Steered))) => "a steered delivery",
-                    Some((_, Some(Silence::Stopped))) => "a stopped delivery",
-                }
-            ),
-        };
-        let running = matches!(progress, Progress::Running { .. }).then(|| HeldTurn {
-            turn_id: self.turn_id.clone(),
-            runtime_id: self.runtime_id,
-        });
-        let turn = ObservedTurn {
-            turn_id: self.turn_id,
-            source: self.source,
-            accepted_at: self.accepted_at,
-            progress,
-        };
-        Ok((turn, running))
-    }
+        ),
+    })
 }
 
 /// The interface's conversation `open` names, with the newest turns it
-/// asks for and those of them that run.
-fn opened(
-    connection: &Connection,
-    interface_id: &str,
-    open: &OpenView,
-) -> Result<(Opened, Vec<HeldTurn>)> {
+/// asks for.
+fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Result<Opened> {
     let key = &open.conversation;
     let Some(conversation) = connection
         .query_row(
@@ -229,50 +194,50 @@ fn opened(
         )
         .optional()?
     else {
-        return Ok((Opened::Unrecorded { key: key.clone() }, Vec::new()));
+        return Ok(Opened::Unrecorded { key: key.clone() });
     };
     let limit = open.turns.get();
-    let mut stored = connection
-        .prepare(&format!(
-            "SELECT t.id, t.event_id, t.input,
-                 COALESCE(json_extract(t.native_json, '$.intent') = 'command', 0),
-                 t.state, t.accepted_at, t.finished_at, t.activity_json, t.runtime_id,
-                 d.content, d.silence
-             FROM (SELECT * {WINDOW}) t LEFT JOIN deliveries d ON d.turn_id = t.id
-             ORDER BY t.acceptance_sequence DESC"
-        ))?
-        .query_map(
-            params![
-                interface_id,
-                key.agent_id(),
-                key.audience_id(),
-                u32::from(limit) + 1
-            ],
-            |row| {
-                let delivered = row
-                    .get::<_, Option<String>>(9)?
-                    .map(|content| {
-                        Ok::<_, rusqlite::Error>((content, optional_state_column(row, 10)?))
-                    })
-                    .transpose()?;
-                Ok(Stored {
-                    turn_id: row.get(0)?,
-                    source: source(row.get(1)?, row.get(2)?, row.get(3)?),
-                    state: state_column(row, 4)?,
-                    accepted_at: row.get(5)?,
-                    finished_at: row.get(6)?,
-                    report: optional_json_column(row, 7)?,
-                    runtime_id: row.get(8)?,
-                    delivered,
-                })
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let earlier = stored.len() > usize::from(limit);
-    stored.truncate(limit.into());
-    let (mut turns, mut running) = (Vec::with_capacity(stored.len()), Vec::new());
-    for stored in stored.into_iter().rev() {
-        let (mut turn, holder) = stored.observed()?;
+    let mut newest = connection.prepare(&format!(
+        "SELECT t.id, t.event_id, t.input,
+             COALESCE(json_extract(t.native_json, '$.intent') = 'command', 0),
+             t.state, t.accepted_at, t.finished_at, t.activity_json, d.content, d.silence
+         FROM (SELECT * {WINDOW}) t LEFT JOIN deliveries d ON d.turn_id = t.id
+         ORDER BY t.acceptance_sequence DESC"
+    ))?;
+    let mut rows = newest.query(params![
+        interface_id,
+        key.agent_id(),
+        key.audience_id(),
+        u32::from(limit) + 1
+    ])?;
+    let (mut turns, mut earlier) = (Vec::new(), false);
+    while let Some(row) = rows.next()? {
+        if turns.len() == usize::from(limit) {
+            earlier = true;
+            break;
+        }
+        let turn_id: String = row.get(0)?;
+        let delivered = match row.get::<_, Option<String>>(8)? {
+            Some(content) => Some((content, optional_state_column(row, 9)?)),
+            None => None,
+        };
+        let report = optional_json_column(row, 7)?;
+        let progress = progress(
+            &turn_id,
+            state_column(row, 4)?,
+            row.get(6)?,
+            delivered,
+            report,
+        )?;
+        turns.push(ObservedTurn {
+            turn_id,
+            source: source(row.get(1)?, row.get(2)?, row.get(3)?),
+            accepted_at: row.get(5)?,
+            progress,
+        });
+    }
+    turns.reverse();
+    for turn in &mut turns {
         if let TurnSource::Message { files, .. } = &mut turn.source {
             *files = captured_files(connection, Some(&turn.turn_id))?
                 .iter()
@@ -286,15 +251,10 @@ fn opened(
         {
             *files = answer_files(connection, &turn.turn_id)?;
         }
-        turns.push(turn);
-        running.extend(holder);
     }
-    Ok((
-        Opened::Recorded {
-            conversation,
-            turns,
-            earlier,
-        },
-        running,
-    ))
+    Ok(Opened::Recorded {
+        conversation,
+        turns,
+        earlier,
+    })
 }

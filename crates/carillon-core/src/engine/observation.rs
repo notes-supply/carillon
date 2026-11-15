@@ -1,6 +1,8 @@
 //! What a view shows an interface, whole: storage's record of its
 //! conversations, and what each running turn's runtime says it is doing.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use carillon_protocol::{
     conversations::TurnSource,
@@ -20,9 +22,8 @@ impl Core {
     /// The order is fixed here. Which turns run is read first, their
     /// runtimes are asked outside any transaction, and one transaction then
     /// reads everything the snapshot holds. An answer is kept only for a
-    /// turn that read still finds running on the runtime that was asked, so
-    /// a turn that ended meanwhile shows its stored ending, and no turn
-    /// shows another runtime's answer. A turn the runtime opened offers no
+    /// turn that read still finds running, so a turn that ended meanwhile
+    /// shows its stored ending. A turn the runtime opened offers no
     /// controls, because a control names its turn by the message that began
     /// it.
     /// # Errors
@@ -47,24 +48,26 @@ impl Core {
             sample(&asked).await
         };
         let (interface, shown) = (interface_id.to_owned(), view.clone());
-        let (mut snapshot, running) = self
+        let mut snapshot = self
             .blocking(move |core| core.database.observed(&interface, &shown))
             .await?;
-        let mut sampled = asked.into_iter().zip(answers).collect::<Vec<_>>();
+        let mut said = asked
+            .into_iter()
+            .zip(answers)
+            .filter_map(|(held, answer)| Some((held.turn_id, answer?)))
+            .collect::<HashMap<_, _>>();
         if let Some(Opened::Recorded { turns, .. }) = &mut snapshot.open {
-            let shown = turns
-                .iter_mut()
-                .filter_map(|turn| match &mut turn.progress {
-                    Progress::Running { activity } => Some((&turn.source, activity)),
-                    Progress::Queued | Progress::Ended { .. } => None,
-                });
-            for ((source, activity), held) in shown.zip(running) {
-                *activity = sampled
-                    .iter_mut()
-                    .find(|(asked, _)| *asked == held)
-                    .and_then(|(_, answer)| answer.take());
-                if let (TurnSource::Opened { .. }, Some(activity)) = (source, activity) {
-                    activity.controls.clear();
+            for turn in turns {
+                match &mut turn.progress {
+                    Progress::Running { activity } => {
+                        *activity = said.remove(&turn.turn_id);
+                        if let (TurnSource::Opened { .. }, Some(activity)) =
+                            (&turn.source, activity)
+                        {
+                            activity.controls.clear();
+                        }
+                    }
+                    Progress::Queued | Progress::Ended { .. } => {}
                 }
             }
         }

@@ -61,11 +61,11 @@ mise run example:core
   ending. One transaction reads all of it. `sample` asks the runtimes what
   the running turns are doing, and core owns the order around it: it reads
   which turns run, calls `sample` outside any transaction, then reads the
-  snapshot, and keeps an answer only for a turn still running on the
-  runtime that was asked. The service streams these at `GET /v1/observe`,
-  one stream for each reader, composed when `changes()` is marked and the
-  reader has taken the snapshot before. The web provider still polls
-  `conversations` and `transcript`, so both stay.
+  snapshot, and keeps an answer only for a turn still running. The
+  service streams these at `GET /v1/observe`, one stream for each reader,
+  composed when `changes()` is marked and the reader has taken the
+  snapshot before. The web provider still polls `conversations` and
+  `transcript`, so both stay.
 - `recover_interrupted` and `reconcile_attachments` are for exclusive
   startup, before events are accepted. Recovery returns the turns core
   handed a runtime to the queue, interrupts those of a runtime no longer
