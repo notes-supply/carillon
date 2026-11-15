@@ -1,33 +1,37 @@
 //! Core's change signal, as its dispatchers hear it.
 
-use super::{
-    live::{HeldRuntime, ok, serving, workers_are},
-    *,
-};
+use std::task::{Context, Waker};
+
+use super::{live::ok, *};
 use crate::{InboxFailure, Stalled};
+
+/// Whether `future` is ready when first polled.
+fn ready(future: impl Future) -> bool {
+    let mut future = std::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    future.as_mut().poll(&mut context).is_ready()
+}
 
 #[tokio::test]
 async fn a_turn_queued_while_its_dispatcher_waits_is_handed_over() -> Result<()> {
     let directory = tempdir()?;
-    let runtime = HeldRuntime::start().await?;
-    let (_fixture, state) = serving(directory.path(), &runtime)?;
+    let runtime = durable::DurableRuntime::start().await?;
+    let (_fixture, state) = durable::durable(directory.path(), &runtime)?;
     let stopping = CancellationToken::new();
-    let supervisor = tokio::spawn(workers::supervise(
-        state.clone(),
-        state.workers.clone(),
-        stopping.clone(),
-    ));
-    workers_are(&state, Dispatcher::Dispatching).await?;
-    for (settled, input) in (1..).zip(["first", "second"]) {
-        // Long enough for the dispatcher to look, find nothing and wait, so
-        // that only core's signal brings it back.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut dispatch = runtime::Dispatch::new(&state, "test-runtime");
+    for input in ["first", "second"] {
+        // It finds nothing queued and waits, and nothing ends the wait yet.
+        assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Idle);
+        assert!(
+            !ready(dispatch.changed()),
+            "a wait ended with nothing changed"
+        );
+        // A queued turn ends the wait, and the next look hands it over.
         ok(live::submit(&state, input, "conversation").await)?;
-        runtime.drain(&state, (0, 0, settled)).await?;
+        assert!(ready(dispatch.changed()), "a wait outlasted a queued turn");
+        assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Advanced);
     }
-    assert_eq!(runtime.given(), ["first", "second"]);
-    stopping.cancel();
-    supervisor.await?;
+    assert_eq!(runtime.handed(), ["first", "second"]);
     Ok(())
 }
 

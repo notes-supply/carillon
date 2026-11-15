@@ -17,6 +17,7 @@ use std::{
     mem::{self, Discriminant},
     time::Duration,
 };
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -156,22 +157,55 @@ impl Failing {
     }
 }
 
+/// A runtime's dispatcher between looks, with core's change signal as it
+/// last saw it.
+pub(super) struct Dispatch<'a> {
+    state: &'a AppState,
+    runtime_id: &'a str,
+    changes: watch::Receiver<()>,
+}
+
+impl<'a> Dispatch<'a> {
+    pub(super) fn new(state: &'a AppState, runtime_id: &'a str) -> Self {
+        Self {
+            state,
+            runtime_id,
+            changes: state.core.changes(),
+        }
+    }
+
+    /// Hands the runtime its oldest queued turn, if it has one. It marks
+    /// the signal seen first, so a change made during the look ends the
+    /// next wait.
+    pub(super) async fn look(
+        &mut self,
+        stopping: &CancellationToken,
+    ) -> Result<WorkerStep, Stalled> {
+        self.changes.mark_unchanged();
+        dispatch_next(self.state, self.runtime_id, stopping).await
+    }
+
+    /// Waits until core's storage or runtimes change after the last look.
+    pub(super) async fn changed(&mut self) {
+        // The sender lives as long as `state`, which this borrows.
+        let _ = self.changes.changed().await;
+    }
+}
+
 /// Hands a runtime its queued turns, one at a time and in order,
 /// until `stopping` is cancelled. While it cannot, it backs off, logging
 /// each new kind of failure once and the recovery once.
 pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: CancellationToken) {
-    let mut changes = state.core.changes();
+    let mut dispatch = Dispatch::new(&state, &runtime_id);
     let mut failing = Failing::default();
     while !stopping.is_cancelled() {
-        changes.mark_unchanged();
-        let wait = match dispatch_next(&state, &runtime_id, &stopping).await {
+        let wait = match dispatch.look(&stopping).await {
             Ok(step @ (WorkerStep::Advanced | WorkerStep::Idle)) => {
                 if failing.recovered() {
                     info!(runtime_id, "runtime provider takes turns again");
                 }
                 if step == WorkerStep::Idle {
-                    // The sender lives as long as `state`, which this task holds.
-                    let _ = stopping.run_until_cancelled(changes.changed()).await;
+                    stopping.run_until_cancelled(dispatch.changed()).await;
                 }
                 continue;
             }
