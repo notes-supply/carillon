@@ -16,7 +16,7 @@ use axum::{
 };
 use carillon_protocol::{
     model::JOB_READ_LIMIT,
-    observation::{Ending, Opened, Progress, SNAPSHOT_LIMIT, Snapshot},
+    observation::{Ending, Opened, Progress, Snapshot},
 };
 use futures_util::StreamExt as _;
 use tempfile::tempdir;
@@ -567,36 +567,46 @@ async fn a_view_is_refused_only_once_its_caller_is_authenticated() -> Result<()>
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_snapshot_over_its_limit_is_refused_and_ends_a_stream_it_grows_on() -> Result<()> {
+async fn a_snapshot_of_16_mib_is_sent_and_one_a_byte_over_is_refused_and_ends_its_stream()
+-> Result<()> {
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     let state = configured(&fixture);
-    let megabytes = |count: usize| "long ".repeat(count * (1 << 20) / 5);
-    let long = SNAPSHOT_LIMIT / (1 << 20) - 2;
-    say(
-        &fixture,
-        "test-interface",
-        "long",
-        "conversation",
-        megabytes(long),
-    )
-    .await?;
-    let mut reader = open(&state, OPEN).await?;
-    assert_eq!(texts(recorded(&reader.snapshot().await?)?.1).len(), 1);
+    let limit = 16 << 20;
+    let size = |snapshot: &Snapshot| anyhow::Ok(serde_json::to_string(snapshot)?.len());
+    let of = |audience: &str| format!("agent_id=test-agent&audience_id={audience}");
+    let said = async |audience: &str, turn: u8, text: String| {
+        let event = format!("{audience} {turn}");
+        say(&fixture, "test-interface", &event, audience, text).await
+    };
+    for audience in ["exact", "above"] {
+        said(audience, 1, "x".to_owned()).await?;
+    }
+    // A reader of the conversation with `audience`, once a second turn has
+    // brought its snapshot to `over` bytes more than the limit.
+    let grown = async |audience: &str, over: usize| -> Result<Reader> {
+        let mut reader = open(&state, &of(audience)).await?;
+        let short = reader.snapshot().await?;
+        // A second turn takes what the first takes but for its text, the
+        // comma between them in place of the first's one byte of it.
+        let turn = serde_json::to_string(&recorded(&short)?.1[0])?.len();
+        let text = "x".repeat(limit + over - size(&short)? - turn);
+        said(audience, 2, text).await?;
+        Ok(reader)
+    };
 
-    say(
-        &fixture,
-        "test-interface",
-        "longer",
-        "conversation",
-        megabytes(3),
-    )
-    .await?;
-    assert_eq!(reader.next().await?, None);
-    let (status, said) = refused(&state, "test-interface", OWN, OPEN).await?;
+    let mut exact = grown("exact", 0).await?;
+    assert_eq!(size(&exact.snapshot().await?)?, limit);
+    let first = open(&state, &of("exact")).await?.snapshot().await?;
+    assert_eq!(size(&first)?, limit);
+
+    let mut above = grown("above", 1).await?;
+    assert!(above.next().await?.is_none(), "a snapshot over the limit");
+    let (status, said) = refused(&state, "test-interface", OWN, &of("above")).await?;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(said.contains(&format!("{} bytes", limit + 1)), "{said}");
     assert!(said.ends_with("ask for fewer turns"), "{said}");
-    let mut fewer = open(&state, &format!("{OPEN}&turns=1")).await?;
+    let mut fewer = open(&state, &format!("{}&turns=1", of("above"))).await?;
     let newest = fewer.snapshot().await?;
     let (_, turns, earlier) = recorded(&newest)?;
     assert_eq!((turns.len(), earlier), (1, true));
