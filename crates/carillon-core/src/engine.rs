@@ -204,10 +204,10 @@ impl Core {
     /// storage, through it or its clones, and when the runtimes change. A
     /// commit that changed no row leaves it unmarked, such as a repeated
     /// event or a claim that found nothing; one that wrote a row the values
-    /// it already had may mark it. It says to look again and no more: marks
-    /// coalesce, and carry no count and no revision. A dispatcher that
-    /// finds nothing to hand over waits on it rather than polling; marking
-    /// the receiver seen before each look means no change is missed.
+    /// it already had may mark it. A mark says to look again and no more.
+    /// Marks coalesce, and carry no count and no revision. A dispatcher
+    /// that finds nothing to hand over waits on it rather than polling, and
+    /// marking the receiver seen before each look means no change is missed.
     #[must_use]
     pub fn changes(&self) -> watch::Receiver<()> {
         self.database.changes()

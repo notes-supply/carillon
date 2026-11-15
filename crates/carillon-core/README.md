@@ -28,12 +28,12 @@ mise run example:core
   queued waits on `changes()` instead of polling; the service's
   dispatcher backs off from 1 to 60 seconds while its runtime takes
   nothing, logging each new kind of failure and the recovery once.
-- `changes()` is marked after every commit that changed a row of core's
-  storage, and when `set_runtimes` changes the runtimes. It says to look
-  again and no more: marks coalesce, and carry no count and no revision. A
-  commit that changed no row is silent, such as a repeated event or a
-  delivery claim that found nothing. One that wrote a row the values it
-  already had may mark it.
+- Core marks `changes()` after every commit that changed a row of its
+  storage, and when `set_runtimes` changes the runtimes. A mark says to
+  look again and no more. Marks coalesce, and carry no count and no
+  revision. A commit that changed no row is silent, such as a repeated
+  event or a delivery claim that found nothing. One that wrote a row the
+  values it already had may mark it.
 - `settle(runtime, turn, outcome)` records how a turn the runtime holds
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
@@ -98,8 +98,8 @@ another runtime's turns never hold back a conversation's messages.
   record what they say of them.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
   its submodules for admission, job reads, history reads, recovery and held
-  turns. [`db/store.rs`](src/db/store.rs) alone opens connections: `read()`
-  gives one that cannot write, and `write()` runs a closure in a
+  turns. [`db/store.rs`](src/db/store.rs) alone opens connections.
+  `read()` gives one that cannot write, and `write()` runs a closure in a
   transaction, commits it and marks `changes()`. A new write goes through
   `write()`, so it cannot commit unannounced.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),

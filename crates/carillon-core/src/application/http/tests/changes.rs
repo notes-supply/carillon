@@ -68,7 +68,8 @@ async fn dispatchers_hear_of_queued_turns_and_hand_over_nothing_once_stopping() 
     assert_eq!(heard(), Some(true));
     assert!(hand_next(&state.core, "test-runtime").await?.is_none());
     assert_eq!(heard(), Some(false));
-    // Runtimes changing do, so a runtime enabled again is handed its turns.
+    // A change of the runtimes is heard too, so a runtime enabled again is
+    // handed its turns.
     state.core.set_runtimes(runtime_facts(&state.config))?;
     assert_eq!(heard(), Some(true));
     Ok(())

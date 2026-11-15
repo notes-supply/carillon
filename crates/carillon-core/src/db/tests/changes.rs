@@ -55,13 +55,11 @@ const STRANDED: Admission<'static> = Admission::Stranded {
     explanation: "Your next message starts a new conversation.",
 };
 
-/// A queued turn of `runtime`, not yet handed over.
 fn queued(database: &Database) -> Result<QueuedTurn> {
     accept(database, "one", "conversation")?;
     database.next_dispatch("runtime")?.context("nothing queued")
 }
 
-/// A turn `runtime` holds.
 fn held(database: &Database) -> Result<QueuedTurn> {
     accept(database, "one", "conversation")?;
     hold(database, "runtime")
@@ -71,7 +69,6 @@ fn settle(database: &Database, turn: &QueuedTurn, settlement: Settlement<'_>) ->
     database.settle_held("runtime", &turn.turn_id, settlement)
 }
 
-/// An answer `instance` claimed and has not acknowledged.
 fn claimed(database: &Database) -> Result<Delivery> {
     let turn = held(database)?;
     answer(database, &turn.turn_id, "done")?;
@@ -210,7 +207,8 @@ fn unlike(cases: &[(&'static str, Case)], expected: bool) -> Result<Vec<&'static
 
 #[test]
 fn every_transition_announces_a_change() -> Result<()> {
-    assert_eq!(unlike(TRANSITIONS, true)?, [""; 0], "announced nothing");
+    let silent = unlike(TRANSITIONS, true)?;
+    assert!(silent.is_empty(), "announced nothing: {silent:?}");
     Ok(())
 }
 
@@ -340,6 +338,7 @@ const NO_OPS: &[(&str, Case)] = &[
 
 #[test]
 fn a_write_that_changes_nothing_announces_nothing() -> Result<()> {
-    assert_eq!(unlike(NO_OPS, false)?, [""; 0], "announced a change");
+    let announced = unlike(NO_OPS, false)?;
+    assert!(announced.is_empty(), "announced a change: {announced:?}");
     Ok(())
 }
