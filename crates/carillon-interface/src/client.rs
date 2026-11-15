@@ -1,5 +1,8 @@
 //! Authenticated transport for the core provider API; no service startup.
-use crate::InterfaceError;
+use crate::{
+    InterfaceError,
+    observation::{OPEN_TIMEOUT, Observation},
+};
 use anyhow::Result;
 use carillon_installation::loopback;
 use carillon_protocol::conversations::{ConversationPage, ConversationSummary, Transcript};
@@ -8,6 +11,7 @@ use carillon_protocol::model::{
     DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
     JobPage, PROVIDER_HEADER,
 };
+use carillon_protocol::observation::View;
 use carillon_protocol::settings::{RuntimeSettings, SettingsRequest};
 use carillon_protocol::turns::{ControlAction, TurnControl};
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
@@ -47,14 +51,18 @@ impl CoreClient {
         format!("{}{path}", self.base_url)
     }
 
-    fn request(&self, method: Method, url: impl IntoUrl) -> RequestBuilder {
+    fn authenticated(&self, method: Method, url: impl IntoUrl) -> RequestBuilder {
         self.http
             .request(method, url)
+            .bearer_auth(&self.token)
+            .header(PROVIDER_HEADER, &self.provider_id)
+    }
+
+    fn request(&self, method: Method, url: impl IntoUrl) -> RequestBuilder {
+        self.authenticated(method, url)
             // These are local admission/delivery endpoints, not model calls.
             // Bound headers and body reads so ambiguous claims can reconcile.
             .timeout(Duration::from_secs(10))
-            .bearer_auth(&self.token)
-            .header(PROVIDER_HEADER, &self.provider_id)
     }
 
     /// Submit an event with its stable platform event ID. With attachments,
@@ -206,6 +214,35 @@ impl CoreClient {
             "read a conversation from core",
         )
         .await
+    }
+
+    /// Opens an observation of `view`: core's stream of complete snapshots
+    /// of this provider's conversations, the latest active first, and of
+    /// the one conversation the view opens. Core takes the provider from
+    /// its credential; the view names none. Nothing is retried and nothing
+    /// reconnects here or in the [`Observation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns core's refusal: 400 for a view core does not accept, 413 for
+    /// one whose snapshot is over
+    /// [`SNAPSHOT_LIMIT`](carillon_protocol::observation::SNAPSHOT_LIMIT).
+    /// Returns a transient failure when core cannot be reached or does not
+    /// answer in time.
+    pub async fn observe(&self, view: &View) -> Result<Observation, InterfaceError> {
+        let first_due = tokio::time::Instant::now() + OPEN_TIMEOUT;
+        // No timeout of the whole request: that would end the stream.
+        let request = self
+            .authenticated(Method::GET, self.url("/v1/observe"))
+            .query(view);
+        let response = tokio::time::timeout_at(first_due, core_send(request, "observe core"))
+            .await
+            .map_err(|_| {
+                InterfaceError::transient(format!(
+                    "observe core: no answer within {OPEN_TIMEOUT:?}"
+                ))
+            })??;
+        Ok(Observation::new(response, first_due))
     }
 
     /// Asks core to relay a person's control of the running turn `event_id`

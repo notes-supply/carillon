@@ -7,6 +7,7 @@
 mod client;
 mod error;
 mod instance;
+mod observation;
 mod operator;
 mod staging;
 mod start;
@@ -15,6 +16,7 @@ mod submission;
 pub use client::{CoreClient, Deliveries, RUNTIME_CALL_TIMEOUT, RUNTIME_LATE};
 pub use error::InterfaceError;
 pub use instance::{instance, instances};
+pub use observation::Observation;
 pub use operator::{authorize_operator, bearer};
 pub use staging::{Batch, Staging};
 pub use start::{Started, start};
