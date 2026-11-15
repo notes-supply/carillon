@@ -1,7 +1,8 @@
 //! Core's SQLite file and the one signal that what it stores changed. The
 //! path is private to this module, so the rest of `db` reaches SQLite only
-//! through [`Database::read`] and [`Database::write`], and no write commits
-//! without marking [`Database::changes`].
+//! through [`Database::read`] and [`Database::write`]. A commit that changed
+//! a row marks [`Database::changes`], and a commit that changed none is
+//! silent.
 
 use std::{
     collections::BTreeSet,
@@ -108,19 +109,13 @@ impl Database {
         // closes, and a reader the mark woke would wait behind that.
         drop(connection);
         if changed {
-            self.announce();
+            self.changes.send_replace(());
         }
         Ok(value)
     }
 
     pub(crate) fn changes(&self) -> watch::Receiver<()> {
         self.changes.subscribe()
-    }
-
-    /// For a change of what core serves from outside SQLite. A write
-    /// announces itself.
-    pub(crate) fn announce(&self) {
-        self.changes.send_replace(());
     }
 
     /// Validate without creating a missing database or repairing an old schema.
