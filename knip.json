@@ -9,6 +9,7 @@
       "entry": ["src/crash-worker.ts"]
     },
     "packages/web": {
+      "entry": ["src/api/stream.ts", "src/api/requests.ts", "src/activity/ledger.ts"],
       "project": ["src/**"]
     }
   }
