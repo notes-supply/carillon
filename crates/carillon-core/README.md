@@ -27,9 +27,11 @@ mise run example:core
   with a turn to hand over, and returns the runtime's answer. When core
   cannot ask the runtime, `submit` fails and the turn stays queued. Once
   `stopping` is cancelled it hands over nothing more. A dispatcher that
-  finds nothing queued waits on `changes()` instead of polling; the service's
-  dispatcher backs off from 1 to 60 seconds while its runtime takes
-  nothing, logging each new kind of failure and the recovery once.
+  finds nothing queued waits on `changes()` instead of polling. The
+  service's dispatcher backs off from 1 to 60 seconds while it cannot hand
+  a turn over, because its runtime does not take one or because core's
+  registry or storage fails. It logs each new kind of failure and the
+  recovery once.
 - Core marks `changes()` after every commit that changed a row of its
   storage, and when `set_runtimes` changes the runtimes. A mark says to
   look again and no more. Marks coalesce, and carry no count and no

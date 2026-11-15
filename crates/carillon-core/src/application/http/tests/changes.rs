@@ -20,13 +20,11 @@ async fn a_turn_queued_while_its_dispatcher_waits_is_handed_over() -> Result<()>
     let stopping = CancellationToken::new();
     let mut dispatch = runtime::Dispatch::new(&state, "test-runtime");
     for input in ["first", "second"] {
-        // It finds nothing queued and waits, and nothing ends the wait yet.
         assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Idle);
         assert!(
             !ready(dispatch.changed()),
             "a wait ended with nothing changed"
         );
-        // A queued turn ends the wait, and the next look hands it over.
         ok(live::submit(&state, input, "conversation").await)?;
         assert!(ready(dispatch.changed()), "a wait outlasted a queued turn");
         assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Advanced);

@@ -202,7 +202,7 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
         let wait = match dispatch.look(&stopping).await {
             Ok(step @ (WorkerStep::Advanced | WorkerStep::Idle)) => {
                 if failing.recovered() {
-                    info!(runtime_id, "runtime provider takes turns again");
+                    info!(runtime_id, "queued turns no longer wait");
                 }
                 if step == WorkerStep::Idle {
                     stopping.run_until_cancelled(dispatch.changed()).await;
