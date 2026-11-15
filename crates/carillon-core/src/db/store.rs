@@ -1,6 +1,8 @@
-//! Core's SQLite file and its connections. The path is private to this
-//! module, so the rest of `db` reaches SQLite through [`Database::read`]
-//! and [`Database::write`] and no other way.
+//! Core's SQLite file, its connections and the one signal that what core
+//! stores changed. The path is private to this module, so the rest of `db`
+//! reaches SQLite through [`Database::read`] and [`Database::write`] and no
+//! other way, and a write cannot commit without [`Database::changes`]
+//! hearing of it.
 
 use std::{
     collections::BTreeSet,
@@ -11,6 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use tokio::sync::watch;
 
 use super::{OtherFormat, SCHEMA};
 
@@ -19,6 +22,7 @@ pub(crate) struct Database {
     path: PathBuf,
     /// The interfaces whose people read answers from core's record.
     retained: BTreeSet<String>,
+    changes: watch::Sender<()>,
 }
 
 impl Database {
@@ -59,6 +63,7 @@ impl Database {
         Self {
             path: path.to_path_buf(),
             retained: BTreeSet::new(),
+            changes: watch::Sender::new(()),
         }
     }
 
@@ -86,7 +91,10 @@ impl Database {
     }
 
     /// The one way to change what is stored. Runs `work` in a transaction
-    /// that commits when it returns `Ok` and rolls back when it fails.
+    /// that commits when it returns `Ok` and rolls back when it fails, and
+    /// announces the commit itself, so no caller has to. A transaction that
+    /// changed no row announces nothing; one that wrote a row the values it
+    /// had may.
     ///
     /// The transaction is immediate, so writers serialize up front under
     /// the busy timeout instead of failing later on a deferred
@@ -96,9 +104,26 @@ impl Database {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = transaction.total_changes();
         let value = work(&transaction)?;
+        let changed = transaction.total_changes() != before;
         transaction.commit()?;
+        if changed {
+            self.announce();
+        }
         Ok(value)
+    }
+
+    /// Marked changed after every commit that changed a row. It says to
+    /// look again and no more: changes coalesce, and it carries no count
+    /// and no revision. A waiter that marks it seen before each look
+    /// misses none.
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    fn announce(&self) {
+        self.changes.send_replace(());
     }
 
     /// Validate without creating a missing database or repairing an old schema.

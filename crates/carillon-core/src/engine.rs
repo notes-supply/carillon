@@ -203,6 +203,17 @@ impl Core {
         self.storage.wait().await;
     }
 
+    /// Changes after every commit that changed what this handle or its
+    /// clones store. It says to look again and no more: changes coalesce,
+    /// and it carries no count and no revision. A commit that changed no row
+    /// is silent, such as a repeated event or a claim that found nothing;
+    /// one that wrote a row the values it had may not be. Marking the
+    /// receiver seen before each look means no change is missed.
+    #[must_use]
+    pub fn changes(&self) -> watch::Receiver<()> {
+        self.database.changes()
+    }
+
     /// Changes whenever a turn may have been queued through this handle or
     /// its clones, or the runtimes changed. A dispatcher that finds nothing
     /// to hand over waits for the next change rather than polling; marking
