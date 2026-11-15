@@ -17,7 +17,7 @@ use tower::ServiceExt as _;
 
 use super::{
     super::{Fixture, accept, answer, configured, hand_next, installation},
-    key, live, recorded, say, say_elsewhere, second_interface, texts,
+    audiences, key, live, recorded, say, say_elsewhere, second_interface, texts,
 };
 use crate::application::http::*;
 
@@ -303,6 +303,24 @@ async fn a_stream_is_sent_nothing_for_a_change_its_view_does_not_show() -> Resul
     let next = reader.snapshot().await?;
     assert_eq!(texts(recorded(&next)?.1), ["mine", "mine again"]);
     assert_eq!(next.conversations.len(), first.conversations.len());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conversation_is_shown_however_long_the_audience_admission_accepted() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    let long = "a".repeat(4096);
+    accept(&fixture, "in the long one", &long).await?;
+    accept(&fixture, "in another", "conversation").await?;
+
+    let another = open(&state, OPEN).await?.snapshot().await?;
+    assert_eq!(audiences(&another.conversations), ["conversation", &long]);
+    assert_eq!(texts(recorded(&another)?.1), ["in another"]);
+    let named = format!("agent_id=test-agent&audience_id={long}");
+    let opened = open(&state, &named).await?.snapshot().await?;
+    assert_eq!(texts(recorded(&opened)?.1), ["in the long one"]);
     Ok(())
 }
 
