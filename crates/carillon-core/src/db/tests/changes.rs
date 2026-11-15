@@ -334,6 +334,24 @@ const NO_OPS: &[(&str, Case)] = &[
             crate::assert_refused(failed, "the work failed")
         })
     }),
+    ("a commit that fails", |storage| {
+        storage.announces(|database| {
+            // Deferred, the foreign key lets the row in and fails the commit.
+            let failed = database.write(|transaction| {
+                transaction.pragma_update(None, "defer_foreign_keys", "ON")?;
+                transaction.execute(
+                    "INSERT INTO deliveries(turn_id, interface_id, target_id,
+                     feedback_target_id, content, state, updated_at)
+                     VALUES ('no such turn', 'discord', 'target', 'feedback', 'answer', 'pending', 0)",
+                    [],
+                )?;
+                Ok(())
+            });
+            crate::assert_refused(failed, "FOREIGN KEY constraint failed")?;
+            ensure!(database.delivery_counts()?.pending == 0);
+            Ok(())
+        })
+    }),
 ];
 
 #[test]
