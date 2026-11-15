@@ -708,6 +708,9 @@ fn shows(text: &str) -> impl Fn(&Snapshot) -> bool {
     move |snapshot| recorded(snapshot).is_ok_and(|(_, turns, _)| texts(turns).contains(&text))
 }
 
+/// Timing, not proof of the order: with the subscription made after the
+/// first read, this still passes if no round's write lands inside the
+/// composition.
 #[tokio::test(start_paused = true)]
 async fn a_change_committed_while_the_first_snapshot_is_composed_reaches_the_stream() -> Result<()>
 {
@@ -726,6 +729,8 @@ async fn a_change_committed_while_the_first_snapshot_is_composed_reaches_the_str
     Ok(())
 }
 
+/// Timing, not proof of the order: with the mark made after the composition,
+/// this still passes if no round's second write lands inside one.
 #[tokio::test(start_paused = true)]
 async fn a_change_committed_while_a_snapshot_is_composed_is_sent_next() -> Result<()> {
     let directory = tempdir()?;
