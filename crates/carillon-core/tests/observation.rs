@@ -3,6 +3,7 @@
 //! the interface client, and stopped as the service manager stops it.
 
 use std::{
+    io::Read as _,
     net::TcpListener,
     process::{Output, Stdio},
     time::Duration,
@@ -15,10 +16,13 @@ use carillon_protocol::{
     model::{EventStatus, ExternalEvent, PROVIDER_HEADER, StagedAttachments, StagedFile},
     observation::{ConversationKey, Limit, OpenView, Opened, Progress, View},
 };
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::{
+    fs::inotify,
+    process::{Pid, Signal, kill_process},
+};
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::TcpStream,
     process::{Child, Command},
     time::Instant,
@@ -67,28 +71,30 @@ impl Installation {
         CoreClient::new(self.url(), INTERFACE.to_owned(), self.token.clone())
     }
 
-    /// Starts core on the installation and waits until it answers.
+    /// Starts core on the installation and waits until it says it listens.
     async fn serve(&self) -> Result<Child> {
         let mut core = Command::new(CARILLON)
             .args(["core", "--config"])
             .arg(self.home.path().join("carillon.toml"))
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
+        let said = core.stdout.take().context("core has no output")?;
+        let mut said = BufReader::new(said).lines();
         let ready = async {
-            let health = format!("{}/health", self.url());
-            while reqwest::get(&health).await.is_err() {
-                if let Some(exited) = core.try_wait()? {
-                    bail!("core ended before it served: {exited}");
+            while let Some(line) = said.next_line().await? {
+                if line.contains("Carillon core ready") {
+                    return Ok(());
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Ok(())
+            bail!("core ended before it served")
         };
         tokio::time::timeout(PATIENCE, ready)
             .await
-            .context("core never answered")??;
+            .context("core never said it was ready")??;
+        // Read to its end, so core never waits to write to a full pipe.
+        tokio::spawn(async move { while let Ok(Some(_)) = said.next_line().await {} });
         Ok(core)
     }
 
@@ -253,23 +259,19 @@ async fn a_capture_in_flight_when_core_stops_is_given_up_and_its_message_refused
             content_type: None,
         }],
     });
+    // Core opens a staged file as it begins to capture it, and not before.
+    let opening = inotify::init(inotify::CreateFlags::CLOEXEC)?;
+    inotify::add_watch(&opening, batch.join("0"), inotify::WatchFlags::OPEN)?;
+    let opened =
+        tokio::task::spawn_blocking(move || std::fs::File::from(opening).read(&mut [0; 64]));
     let client = installation.client()?;
     let submitting = {
         let client = client.clone();
         tokio::spawn(async move { client.submit_event(&message).await })
     };
-    let capturing = async {
-        loop {
-            match client.event_status("with a file").await? {
-                EventStatus::Capturing => return Ok(()),
-                EventStatus::Unknown => tokio::time::sleep(Duration::from_millis(10)).await,
-                EventStatus::Accepted(_) => bail!("the file was captured before core stopped"),
-            }
-        }
-    };
-    tokio::time::timeout(PATIENCE, capturing)
+    tokio::time::timeout(PATIENCE, opened)
         .await
-        .context("core never began to capture")??;
+        .context("core never began to capture")???;
 
     let took = stop(core).await?;
     assert!(took < Duration::from_secs(10), "{took:?}");

@@ -336,7 +336,7 @@ async fn a_conversation_is_shown_however_long_the_audience_admission_accepted() 
 #[derive(Clone, Default)]
 struct Describing {
     calls: Arc<AtomicU32>,
-    asked: Arc<AtomicU32>,
+    asked: watch::Sender<u32>,
 }
 
 impl Describing {
@@ -348,7 +348,7 @@ impl Describing {
         fixture.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
         let described = runtime.clone();
         let activity = get(move || {
-            described.asked.fetch_add(1, Ordering::SeqCst);
+            described.asked.send_modify(|asked| *asked += 1);
             let said = live(described.calls.load(Ordering::SeqCst), &[]);
             async move {
                 said.map(Json)
@@ -361,7 +361,14 @@ impl Describing {
     }
 
     fn asked(&self) -> u32 {
-        self.asked.load(Ordering::SeqCst)
+        *self.asked.borrow()
+    }
+
+    /// Returns once it has been asked `times` times.
+    async fn asked_times(&self, times: u32) -> Result<()> {
+        let mut asked = self.asked.subscribe();
+        asked.wait_for(|&asked| asked >= times).await?;
+        Ok(())
     }
 }
 
@@ -392,14 +399,10 @@ async fn a_running_turn_is_sent_again_when_its_runtime_says_something_new() -> R
     assert_eq!(runtime.asked(), 2);
 
     // Asked twice more, the runtime says the same, and nothing is sent.
-    let unchanged = async {
-        while runtime.asked() < 5 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
+    // Core asks a fifth time only once it has taken the fourth answer.
     tokio::select! {
         sent = reader.next() => bail!("sent what the reader already had: {sent:?}"),
-        () = unchanged => {}
+        asked = runtime.asked_times(5) => asked?,
     }
     answer(&state.core, "test-runtime", &held, None)?;
     let ended = reader.snapshot().await?;
