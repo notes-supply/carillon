@@ -30,8 +30,9 @@ share:
 
 SQLite is the only durable store, and network or model work never runs inside
 its transactions. One module opens its connections. A read's connection
-cannot write, and every write commits through one function, which then
-marks core's change signal. `Core` is platform-neutral: it receives agent, resource and
+cannot write, and every write commits through one function. A commit that
+changed a row marks core's change signal, and a commit that changed none is
+silent. `Core` is platform-neutral: it receives agent, resource and
 runtime facts and knows nothing of Discord, Pi or the installation's files.
 The application around it authenticates HTTP, loads the registry and runs
 the dispatchers. See the [core guide](../../crates/carillon-core/README.md).
