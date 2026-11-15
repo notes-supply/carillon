@@ -4,6 +4,9 @@ valid:
   - "fn name() -> Result<String, Error> { todo() }"
   - "fn name() -> std::result::Result<&'static str, Error> { todo() }"
   - "fn name() -> io::Result<String> { todo() }"
+  - "impl FromStr for Model { type Err = anyhow::Error; }"
+  - "impl TryFrom<String> for Revision { type Error = MalformedRevision; }"
+  - "impl Iterator for Lines { type Item = String; }"
 invalid:
   - "fn run(program: &Path) -> Result<String, String> { todo() }"
   - "fn discover(&self) -> Result<Offer, String> { todo() }"
@@ -14,3 +17,8 @@ invalid:
   - "fn f<'a>() -> Result<(), &'a str> { todo() }"
   - "fn f() -> Result<(), Cow<'_, str>> { todo() }"
   - "fn f<'a>() -> Result<(), std::borrow::Cow<'a, str>> { todo() }"
+  - "impl TryFrom<String> for Revision { type Error = String; }"
+  - "impl TryFrom<String> for EventId { type Error = &'static str; }"
+  - "impl<'a> TryFrom<&'a str> for Name { type Error = Cow<'a, str>; }"
+  - "impl FromStr for Model { type Err = String; }"
+  - "type Error = std::string::String;"
