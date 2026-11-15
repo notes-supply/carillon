@@ -1,0 +1,21 @@
+id: rust-core-sqlite-open
+language: rust
+severity: error
+message: Only db/store.rs opens core's SQLite connections.
+note: Read through Database::read and write through Database::write. A write on a connection of its own commits without marking Core::changes, so nothing that waits on the signal hears of it.
+files:
+  - crates/carillon-core/src/**/*.rs
+ignores:
+  - crates/carillon-core/src/db/store.rs
+  - crates/carillon-core/src/**/tests.rs
+  - crates/carillon-core/src/**/tests/**
+rule:
+  kind: scoped_identifier
+  regex: "(^|::)Connection::open(_[a-z_]+)?$"
+  not:
+    inside:
+      stopBy: end
+      kind: mod_item
+      follows:
+        kind: attribute_item
+        regex: "^#\\[cfg\\(test\\)\\]$"
