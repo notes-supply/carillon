@@ -25,7 +25,7 @@ use futures_util::stream;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::{IDLE_TIMEOUT, OPEN_TIMEOUT, Observation};
+use super::Observation;
 use crate::{CoreClient, InterfaceError};
 
 /// What a case feeds the stream core answers with: bytes, or the loss of
@@ -271,7 +271,7 @@ async fn core_has_ten_seconds_to_answer_and_to_send_the_first_snapshot() -> Resu
     tokio::spawn(async move { axum::serve(listener, router).await });
     let client = CoreClient::new(url, "web".to_owned(), "token".to_owned())?;
     let view = View::default();
-    let slack = Duration::from_secs(1);
+    let (bound, slack) = (Duration::from_secs(10), Duration::from_secs(1));
     let asked_at = tokio::time::Instant::now();
     let observing = client.observe(&view);
     tokio::pin!(observing);
@@ -284,10 +284,7 @@ async fn core_has_ten_seconds_to_answer_and_to_send_the_first_snapshot() -> Resu
     let error = observing.await.err().context("core answered")?;
     assert!(error.is_transient(), "{error:?}");
     let waited = asked_at.elapsed();
-    assert!(
-        waited >= OPEN_TIMEOUT && waited < OPEN_TIMEOUT + slack,
-        "{waited:?}"
-    );
+    assert!(waited >= bound && waited < bound + slack, "{waited:?}");
     tokio::time::resume();
 
     // Core answers and keeps the stream alive, but sends no snapshot: the
@@ -301,10 +298,7 @@ async fn core_has_ten_seconds_to_answer_and_to_send_the_first_snapshot() -> Resu
     assert!(error.is_transient(), "{error:?}");
     assert!(error.message.contains("no first snapshot"), "{error:?}");
     let waited = asked_at.elapsed();
-    assert!(
-        waited >= OPEN_TIMEOUT && waited < OPEN_TIMEOUT + slack,
-        "{waited:?}"
-    );
+    assert!(waited >= bound && waited < bound + slack, "{waited:?}");
     Ok(())
 }
 
@@ -317,12 +311,10 @@ async fn an_observation_gives_up_on_a_stream_silent_for_three_keep_alives() -> R
     let error = observation.next().await.err().context("core spoke")?;
     assert!(error.is_transient(), "{error:?}");
     assert!(error.message.contains("sent nothing"), "{error:?}");
-    assert_eq!(IDLE_TIMEOUT, KEEP_ALIVE * 3);
-    assert!(silent.elapsed() >= IDLE_TIMEOUT, "{:?}", silent.elapsed());
+    let waited = silent.elapsed();
     assert!(
-        silent.elapsed() < IDLE_TIMEOUT + KEEP_ALIVE,
-        "{:?}",
-        silent.elapsed()
+        waited >= KEEP_ALIVE * 3 && waited < KEEP_ALIVE * 4,
+        "{waited:?}"
     );
     Ok(())
 }
@@ -342,7 +334,7 @@ async fn keep_alives_alone_hold_an_observation_open() -> Result<()> {
         anyhow::Ok(feed)
     });
     assert_eq!(observation.next().await?, Some(snapshot(2)?));
-    assert!(quiet.elapsed() >= IDLE_TIMEOUT * 2, "{:?}", quiet.elapsed());
+    assert!(quiet.elapsed() >= KEEP_ALIVE * 6, "{:?}", quiet.elapsed());
     kept_alive.await??;
     Ok(())
 }
