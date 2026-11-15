@@ -104,6 +104,9 @@ impl Database {
         let value = work(&transaction)?;
         let changed = transaction.total_changes() != before;
         transaction.commit()?;
+        // Closed before the mark. The last connection checkpoints as it
+        // closes, and a reader the mark woke would wait behind that.
+        drop(connection);
         if changed {
             self.announce();
         }

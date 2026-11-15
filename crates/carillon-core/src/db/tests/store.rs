@@ -51,3 +51,24 @@ fn a_failed_write_changes_nothing() -> Result<()> {
     assert_eq!(database.turn_counts()?.pending, 1);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reader_woken_by_a_change_finds_storage_free() -> Result<()> {
+    let directory = tempdir()?;
+    let database = Database::create(&directory.path().join("state.sqlite3"))?;
+    let mut changes = database.changes();
+    let storage = database.clone();
+    let reader = tokio::spawn(async move {
+        changes.changed().await?;
+        // With no busy timeout, a writer that is still closing refuses the
+        // read where it would otherwise make the reader wait.
+        let connection = storage.read()?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        let turns: u32 =
+            connection.query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))?;
+        anyhow::Ok(turns)
+    });
+    accept(&database, "one", "conversation")?;
+    assert_eq!(reader.await??, 1);
+    Ok(())
+}
