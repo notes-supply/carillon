@@ -110,7 +110,7 @@ async fn hand_next(core: &Core, runtime_id: &str) -> Result<Option<RuntimeTurnRe
     let mut handed = None;
     core.dispatch_next(runtime_id, &CancellationToken::new(), async |request| {
         handed = Some(request);
-        Ok(Ok(()))
+        Ok(())
     })
     .await?;
     Ok(handed)
@@ -876,7 +876,6 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 }
 
 mod attachments;
-mod changes;
 mod configuration;
 mod conversations;
 mod cutover;
@@ -888,6 +887,7 @@ mod maintenance;
 mod reserved;
 mod retained;
 mod settings;
+mod signals;
 
 /// One async worker, as when every worker could be taken: another writer
 /// holds SQLite's write lock while an interface claims a delivery and a

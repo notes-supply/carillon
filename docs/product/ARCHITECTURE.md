@@ -69,11 +69,8 @@ operator's error text or a snapshot.
 
 Each enabled runtime gets one dispatcher. It hands the runtime every queued
 message in acceptance order, without waiting for a conversation's earlier
-turns, since the runtime orders its own. When it finds nothing queued it
-waits for core's change signal rather than polling. Core marks that signal
-after every commit that changed a row and when the runtimes change, so a
-waiting dispatcher also looks again after a change that queued nothing. No
-dispatcher waits for a turn's work.
+turns, since the runtime orders its own, and waits for core to signal new
+work rather than polling. No dispatcher waits for a turn's work.
 
 One supervisor owns the dispatchers and follows the registry core serves: a
 live change starts the dispatcher of a runtime now enabled and retires the

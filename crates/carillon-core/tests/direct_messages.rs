@@ -80,7 +80,7 @@ async fn a_direct_message_conversation_keeps_one_turn_per_event_across_replays_a
         assert_eq!(
             core.dispatch_next("runtime", &CancellationToken::new(), async |turn| {
                 request = Some(turn);
-                Ok(Ok(()))
+                Ok(())
             })
             .await?,
             WorkerStep::Advanced
@@ -100,7 +100,7 @@ async fn a_direct_message_conversation_keeps_one_turn_per_event_across_replays_a
         )?;
     }
     assert_eq!(
-        core.dispatch_next("runtime", &CancellationToken::new(), async |_| Ok(Ok(())))
+        core.dispatch_next("runtime", &CancellationToken::new(), async |_| Ok(()))
             .await?,
         WorkerStep::Idle
     );

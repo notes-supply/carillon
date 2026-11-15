@@ -50,7 +50,7 @@ async fn answer_next(core: &Core, runtime: &str) -> Result<Option<String>> {
     let step = core
         .dispatch_next(runtime, &CancellationToken::new(), async |request| {
             handed = Some(request.correlation_id);
-            Ok(Ok(()))
+            Ok(())
         })
         .await?;
     let Some(turn) = handed else {

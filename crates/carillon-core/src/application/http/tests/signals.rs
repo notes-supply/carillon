@@ -1,10 +1,11 @@
-//! Core's change signal, as its dispatchers hear it.
+//! Core's two signals: `work`, which wakes its dispatchers, and `changes`,
+//! which follows its storage.
 
 use super::{
     live::{HeldRuntime, ok, serving, workers_are},
     *,
 };
-use crate::{InboxFailure, Stalled};
+use crate::InboxFailure;
 
 #[tokio::test]
 async fn turns_queued_for_a_running_dispatcher_are_handed_over() -> Result<()> {
@@ -32,14 +33,14 @@ async fn turns_queued_for_a_running_dispatcher_are_handed_over() -> Result<()> {
 async fn dispatchers_hear_of_queued_turns_and_hand_over_nothing_once_stopping() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
-    let mut changes = state.core.changes();
-    let mut heard = || {
-        let seen = changes.has_changed().ok();
-        changes.mark_unchanged();
+    let mut work = state.core.work();
+    let mut changed = || {
+        let seen = work.has_changed().ok();
+        work.mark_unchanged();
         seen
     };
     let queued = accept(&state, "one", "conversation").await?;
-    assert_eq!(heard(), Some(true));
+    assert_eq!(changed(), Some(true));
     // Stopping, it hands nothing over: the turn stays queued.
     let stopping = CancellationToken::new();
     stopping.cancel();
@@ -58,17 +59,12 @@ async fn dispatchers_hear_of_queued_turns_and_hand_over_nothing_once_stopping() 
             .state,
         TurnState::Queued
     );
-    // A look that hands nothing over changes nothing, so no dispatcher
-    // wakes itself.
-    assert_eq!(heard(), Some(false));
+    // A hand-over queues nothing, so it wakes no dispatcher.
     hand_next(&state.core, "test-runtime").await?;
-    assert_eq!(heard(), Some(true));
-    assert!(hand_next(&state.core, "test-runtime").await?.is_none());
-    assert_eq!(heard(), Some(false));
-    // A change of the runtimes is heard too, so a runtime enabled again is
-    // handed its turns.
+    assert_eq!(changed(), Some(false));
+    // Runtimes changing do, so a runtime enabled again is handed its turns.
     state.core.set_runtimes(runtime_facts(&state.config))?;
-    assert_eq!(heard(), Some(true));
+    assert_eq!(changed(), Some(true));
     Ok(())
 }
 
@@ -79,10 +75,10 @@ async fn a_turn_its_runtime_refuses_is_heard_of() -> Result<()> {
     let refused = accept(&state, "refused", "conversation").await?;
     let changes = state.core.changes();
     let refuse = async |_| {
-        Ok(Err(InboxFailure::Refused {
+        Err(InboxFailure::Refused {
             status: 422,
             explanation: None,
-        }))
+        })
     };
     state
         .core
@@ -91,25 +87,5 @@ async fn a_turn_its_runtime_refuses_is_heard_of() -> Result<()> {
     assert!(changes.has_changed()?);
     let turn = state.core.inspect_turn(&refused.turn_id)?.context("turn")?;
     assert_eq!(turn.state, TurnState::Interrupted);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_missing_credential_stalls_only_a_turn_to_hand_over() -> Result<()> {
-    let directory = tempdir()?;
-    let runtime = durable::DurableRuntime::start().await?;
-    let (_fixture, state) = durable::durable(directory.path(), &runtime)?;
-    let credential = directory.path().join("credentials/test-runtime.token");
-    fs::remove_file(&credential)?;
-    // Every commit makes a dispatcher look. A look that failed with nothing
-    // queued would have it back off, and sleep through the next turn.
-    assert_eq!(durable::dispatch(&state).await?, WorkerStep::Idle);
-    ok(live::submit(&state, "one", "conversation").await)?;
-    let stalled = durable::dispatch(&state).await.err();
-    let stalled = stalled.context("a turn was handed over with no credential")?;
-    assert!(matches!(stalled, Stalled::Core(_)), "{stalled}");
-    fs::write(&credential, "test-only")?;
-    assert_eq!(durable::dispatch(&state).await?, WorkerStep::Advanced);
-    assert_eq!(runtime.handed(), ["one"]);
     Ok(())
 }

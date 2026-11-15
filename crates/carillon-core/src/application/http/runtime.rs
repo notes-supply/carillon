@@ -160,18 +160,18 @@ impl Failing {
 /// until `stopping` is cancelled. While it cannot, it backs off, logging
 /// each new kind of failure once and the recovery once.
 pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: CancellationToken) {
-    let mut changes = state.core.changes();
+    let mut work = state.core.work();
     let mut failing = Failing::default();
     while !stopping.is_cancelled() {
-        changes.mark_unchanged();
+        work.mark_unchanged();
         let wait = match dispatch_next(&state, &runtime_id, &stopping).await {
             Ok(step @ (WorkerStep::Advanced | WorkerStep::Idle)) => {
                 if failing.recovered() {
-                    info!(runtime_id, "queued turns no longer wait");
+                    info!(runtime_id, "runtime provider takes turns again");
                 }
                 if step == WorkerStep::Idle {
                     // The sender lives as long as `state`, which this task holds.
-                    let _ = stopping.run_until_cancelled(changes.changed()).await;
+                    let _ = stopping.run_until_cancelled(work.changed()).await;
                 }
                 continue;
             }
@@ -197,9 +197,8 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
     }
 }
 
-/// One step of a runtime's dispatcher: its oldest queued turn, handed
-/// over. Only a hand-over reads the runtime's credential, so a look that
-/// finds nothing queued cannot fail on it.
+/// One step of a runtime's dispatcher: its oldest queued turn,
+/// handed over.
 pub(super) async fn dispatch_next(
     state: &AppState,
     runtime_id: &str,
@@ -210,12 +209,15 @@ pub(super) async fn dispatch_next(
     if !runtime.enabled {
         return Ok(WorkerStep::Backoff);
     }
+    let client = RuntimeClient::new(
+        state.client.clone(),
+        runtime.url.clone(),
+        runtime_token(&config, runtime)?,
+    );
     state
         .core
         .dispatch_next(runtime_id, stopping, async |request| {
-            let token = runtime_token(&config, runtime)?;
-            let client = RuntimeClient::new(state.client.clone(), runtime.url.clone(), token);
-            Ok(client.submit(&request).await)
+            client.submit(&request).await
         })
         .await
 }
