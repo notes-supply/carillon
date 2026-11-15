@@ -622,8 +622,8 @@ second, and the provider checks one at a time.
 To open the chat from your other devices, run `tailscale serve --bg
 --https=43804 http://127.0.0.1:43804`, add the
 `https://<machine>.<tailnet>.ts.net:43804` address it prints to `addresses`
-in `providers/web.toml`, and run `carillon restart`. The chat's own port
-number keeps it off 443, which Funnel can publish. Use `serve`, never
+in `providers/web.toml`, and run `carillon restart`. That port keeps the
+chat off 443, 8443 and 10000, the only ones Funnel can publish. Use `serve`, never
 `funnel`, which puts the chat on the public internet. The [web guide](../../crates/carillon-web/README.md#open-it-from-your-other-devices)
 has the details. Being on the tailnet signs no browser in.
 
