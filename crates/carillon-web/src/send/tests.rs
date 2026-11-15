@@ -202,14 +202,19 @@ async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<(
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let first = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
-    assert_eq!(first.json()?["duplicate"], false);
+    let first = first.json()?;
+    assert_eq!(first["duplicate"], false);
     let again = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(
         again.json()?,
-        json!({"turn_id": format!("turn-{EVENT}"), "duplicate": true})
+        json!({"turn_id": first["turn_id"], "duplicate": true})
     );
-    assert_eq!(fixture.core().events[0].0.native, json!({}));
+    let core = fixture.core();
+    let [(event, _)] = core.events.as_slice() else {
+        anyhow::bail!("core admitted one event ID {} times", core.events.len());
+    };
+    assert_eq!(event.native, json!({}));
     Ok(())
 }
 
