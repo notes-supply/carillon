@@ -93,7 +93,7 @@ fn line_mut<'a>(page: &'a mut Page, setting: &str) -> Result<&'a mut Setting, St
 }
 
 fn revision(seed: u64) -> Result<Revision, String> {
-    Revision::try_from(format!("{seed:064x}"))
+    Revision::try_from(format!("{seed:064x}")).map_err(|error| error.to_string())
 }
 
 fn one(id: &str) -> SettingValue {
