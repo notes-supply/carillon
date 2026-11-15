@@ -120,7 +120,7 @@ fn as_chosen(name: &str) -> String {
         .replace("%0A", "\n")
 }
 
-fn too_long() -> InterfaceError {
+fn event_too_large() -> InterfaceError {
     refusal(
         StatusCode::PAYLOAD_TOO_LARGE,
         &format!(
@@ -130,8 +130,9 @@ fn too_long() -> InterfaceError {
     )
 }
 
-/// A `text` part, or `None` for one longer than any event core reads.
-async fn written(part: &mut Field<'_>) -> Result<Option<String>, InterfaceError> {
+/// A `text` part, or `None` for one longer than any event core reads. A
+/// leading byte-order mark is not part of what the person wrote.
+async fn read_text(part: &mut Field<'_>) -> Result<Option<String>, InterfaceError> {
     let mut text = Vec::new();
     while let Some(chunk) = part.chunk().await.map_err(malformed)? {
         if text.len() + chunk.len() > EVENT_BODY_LIMIT {
@@ -139,14 +140,17 @@ async fn written(part: &mut Field<'_>) -> Result<Option<String>, InterfaceError>
         }
         text.extend_from_slice(&chunk);
     }
-    Ok(Some(String::from_utf8_lossy(&text).into_owned()))
+    let text = String::from_utf8_lossy(&text);
+    Ok(Some(
+        text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
+    ))
 }
 
-/// Stages a `file` part at `path`, or `None` for one of more than `room`
-/// bytes.
-async fn staged(
+/// Stages a `file` part at `path`, or `None` for one of more than
+/// `max_bytes`.
+async fn stage_file(
     part: &mut Field<'_>,
-    room: u64,
+    max_bytes: u64,
     path: &FilePath,
 ) -> Result<Option<StagedFile>, InterfaceError> {
     let name = match part.file_name().map(as_chosen) {
@@ -158,7 +162,7 @@ async fn staged(
     let mut size = 0_u64;
     while let Some(chunk) = part.chunk().await.map_err(malformed)? {
         size += chunk.len() as u64;
-        if size > room {
+        if size > max_bytes {
             return Ok(None);
         }
         file.write_all(&chunk).await.context("stage a file")?;
@@ -173,10 +177,11 @@ async fn staged(
 
 /// Reads the request's parts: at most one `text`, and `file`s within
 /// core's limits, in any order. The first part that is something else or
-/// past a limit refuses the message, and no later part is kept. The rest
-/// of the body is still read before the refusal is given: a browser that
-/// is answered while it uploads reports a broken connection and not the
-/// answer.
+/// past a limit refuses the message, and no later part is kept. The later
+/// parts are still read before the refusal is given: a browser that is
+/// answered while it uploads reports a broken connection and not the
+/// answer. A form that cannot be read, or a file that cannot be staged,
+/// is answered at once.
 async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
@@ -191,8 +196,8 @@ async fn stage(
         }
         refused = match part.name() {
             Some("text") if text.is_none() => {
-                text = written(&mut part).await?;
-                text.is_none().then(too_long)
+                text = read_text(&mut part).await?;
+                text.is_none().then(event_too_large)
             }
             Some("text") => Some(refusal(
                 StatusCode::BAD_REQUEST,
@@ -203,10 +208,10 @@ async fn stage(
                 &format!("A message carries at most {} files.", limits.max_files),
             )),
             Some("file") => {
-                let room = limits
+                let max_bytes = limits
                     .max_file_bytes()
                     .min(limits.max_event_bytes() - total);
-                match staged(&mut part, room, &batch.file(files.len())).await? {
+                match stage_file(&mut part, max_bytes, &batch.file(files.len())).await? {
                     Some(file) => {
                         total += file.size;
                         files.push(file);
@@ -281,7 +286,7 @@ pub(crate) async fn send(
     // event past it.
     let event_bytes = serde_json::to_vec(&event).context("write a message as an event")?;
     if event_bytes.len() > EVENT_BODY_LIMIT {
-        return Err(too_long());
+        return Err(event_too_large());
     }
     // Core copies the files before it answers, which can take minutes. The
     // submission runs in a task of its own, so a browser that leaves does

@@ -574,6 +574,17 @@ async fn a_message_s_text_is_bounded_by_the_event_core_reads() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_leading_byte_order_mark_is_not_part_of_the_text() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let text = "\u{feff}hello \u{feff}there";
+    let sent = send(&fixture, &token, "?agent=assistant", &[Part::Text(text)]).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(fixture.core().events[0].0.content, "hello \u{feff}there");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_message_has_one_text_part() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
