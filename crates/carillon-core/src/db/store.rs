@@ -91,10 +91,9 @@ impl Database {
     }
 
     /// The one way to change what is stored. Runs `work` in a transaction
-    /// that commits when it returns `Ok` and rolls back when it fails, and
-    /// announces the commit itself, so no caller has to. A transaction that
-    /// changed no row announces nothing; one that wrote a row the values it
-    /// had may.
+    /// that commits when it returns `Ok` and rolls back when it fails, then
+    /// marks [`Self::changes`] if the commit changed a row, so no caller
+    /// announces its own write.
     ///
     /// The transaction is immediate, so writers serialize up front under
     /// the busy timeout instead of failing later on a deferred
@@ -114,15 +113,18 @@ impl Database {
         Ok(value)
     }
 
-    /// Marked changed after every commit that changed a row. It says to
-    /// look again and no more: changes coalesce, and it carries no count
-    /// and no revision. A waiter that marks it seen before each look
-    /// misses none.
+    /// Marked after every commit that changed a row, and by
+    /// [`Self::announce`]. A commit that changed no row leaves it unmarked;
+    /// one that wrote a row the values it already had may mark it. It says
+    /// to look again and no more: marks coalesce, and carry no count and no
+    /// revision. A waiter that marks it seen before each look misses none.
     pub(crate) fn changes(&self) -> watch::Receiver<()> {
         self.changes.subscribe()
     }
 
-    fn announce(&self) {
+    /// Marks [`Self::changes`]. [`Self::write`] does so for everything
+    /// stored; call it only for what core serves from outside SQLite.
+    pub(crate) fn announce(&self) {
         self.changes.send_replace(());
     }
 

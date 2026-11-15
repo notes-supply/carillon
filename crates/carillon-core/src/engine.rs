@@ -119,8 +119,6 @@ pub struct Core {
     /// derived them.
     runtimes: Arc<watch::Sender<Arc<[RuntimeProvider]>>>,
     pub(crate) intake: Arc<Intake>,
-    /// Marked changed whenever this handle may have queued a turn.
-    work: Arc<watch::Sender<()>>,
     /// Storage work running on Tokio's blocking pool for an async caller.
     storage: TaskTracker,
 }
@@ -151,7 +149,6 @@ impl Core {
             database: database.retaining(std::mem::take(&mut options.retained)),
             options,
             runtimes: Arc::new(watch::Sender::new(runtimes.into())),
-            work: Arc::new(watch::Sender::new(())),
             storage: TaskTracker::new(),
         }
     }
@@ -203,28 +200,17 @@ impl Core {
         self.storage.wait().await;
     }
 
-    /// Changes after every commit that changed what this handle or its
-    /// clones store. It says to look again and no more: changes coalesce,
-    /// and it carries no count and no revision. A commit that changed no row
-    /// is silent, such as a repeated event or a claim that found nothing;
-    /// one that wrote a row the values it had may not be. Marking the
-    /// receiver seen before each look means no change is missed.
+    /// Marked after every commit that changed a row of this handle's
+    /// storage, through it or its clones, and when the runtimes change. A
+    /// commit that changed no row leaves it unmarked, such as a repeated
+    /// event or a claim that found nothing; one that wrote a row the values
+    /// it already had may mark it. It says to look again and no more: marks
+    /// coalesce, and carry no count and no revision. A dispatcher that
+    /// finds nothing to hand over waits on it rather than polling; marking
+    /// the receiver seen before each look means no change is missed.
     #[must_use]
     pub fn changes(&self) -> watch::Receiver<()> {
         self.database.changes()
-    }
-
-    /// Changes whenever a turn may have been queued through this handle or
-    /// its clones, or the runtimes changed. A dispatcher that finds nothing
-    /// to hand over waits for the next change rather than polling; marking
-    /// the receiver unchanged before each look means no change is missed.
-    #[must_use]
-    pub fn work(&self) -> watch::Receiver<()> {
-        self.work.subscribe()
-    }
-
-    fn wake(&self) {
-        self.work.send_replace(());
     }
 
     /// Recover running turns, then interrupt queued turns whose agent moved or was removed.
@@ -384,7 +370,7 @@ impl Core {
         };
         let providers =
             serde_json::to_value([interface, &selected]).map_err(anyhow::Error::from)?;
-        let receipt = self.database.accept_event(
+        Ok(self.database.accept_event(
             &interface.id,
             &runtime.id,
             event,
@@ -393,11 +379,7 @@ impl Core {
                 resource_snapshot_id: &resources,
             },
             capture,
-        )?;
-        if !receipt.duplicate {
-            self.wake();
-        }
-        Ok(receipt)
+        )?)
     }
 
     /// What core knows about an event of an authenticated interface: its
@@ -457,7 +439,7 @@ impl Core {
     pub fn set_runtimes(&self, runtimes: Vec<RuntimeProvider>) -> Result<()> {
         validate_runtimes(&runtimes)?;
         self.runtimes.send_replace(runtimes.into());
-        self.wake();
+        self.database.announce();
         Ok(())
     }
 

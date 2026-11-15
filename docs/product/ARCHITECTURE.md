@@ -29,7 +29,9 @@ share:
 - inspection, backup and restore.
 
 SQLite is the only durable store, and network or model work never runs inside
-its transactions. `Core` is platform-neutral: it receives agent, resource and
+its transactions. One module opens its connections: a read's cannot write,
+and every write commits through one function, which then marks core's
+change signal. `Core` is platform-neutral: it receives agent, resource and
 runtime facts and knows nothing of Discord, Pi or the installation's files.
 The application around it authenticates HTTP, loads the registry and runs
 the dispatchers. See the [core guide](../../crates/carillon-core/README.md).
@@ -67,8 +69,11 @@ operator's error text or a snapshot.
 
 Each enabled runtime gets one dispatcher. It hands the runtime every queued
 message in acceptance order, without waiting for a conversation's earlier
-turns, since the runtime orders its own, and waits for core to signal new
-work rather than polling. No dispatcher waits for a turn's work.
+turns, since the runtime orders its own. When it finds nothing queued it
+waits for core's change signal rather than polling. Core marks that signal
+after every commit that changed a row and when the runtimes change, so a
+waiting dispatcher also looks again after a change that queued nothing. No
+dispatcher waits for a turn's work.
 
 One supervisor owns the dispatchers and follows the registry core serves: a
 live change starts the dispatcher of a runtime now enabled and retires the

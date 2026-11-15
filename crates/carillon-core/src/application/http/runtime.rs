@@ -160,10 +160,10 @@ impl Failing {
 /// until `stopping` is cancelled. While it cannot, it backs off, logging
 /// each new kind of failure once and the recovery once.
 pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: CancellationToken) {
-    let mut work = state.core.work();
+    let mut changes = state.core.changes();
     let mut failing = Failing::default();
     while !stopping.is_cancelled() {
-        work.mark_unchanged();
+        changes.mark_unchanged();
         let wait = match dispatch_next(&state, &runtime_id, &stopping).await {
             Ok(step @ (WorkerStep::Advanced | WorkerStep::Idle)) => {
                 if failing.recovered() {
@@ -171,7 +171,7 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
                 }
                 if step == WorkerStep::Idle {
                     // The sender lives as long as `state`, which this task holds.
-                    let _ = stopping.run_until_cancelled(work.changed()).await;
+                    let _ = stopping.run_until_cancelled(changes.changed()).await;
                 }
                 continue;
             }

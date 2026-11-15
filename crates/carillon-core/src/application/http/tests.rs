@@ -450,45 +450,6 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
-async fn dispatchers_hear_of_queued_turns_and_hand_over_nothing_once_stopping() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let mut work = state.core.work();
-    let mut changed = || {
-        let seen = work.has_changed().ok();
-        work.mark_unchanged();
-        seen
-    };
-    let queued = accept(&state, "one", "conversation").await?;
-    assert_eq!(changed(), Some(true));
-    // Stopping, it hands nothing over: the turn stays queued.
-    let stopping = CancellationToken::new();
-    stopping.cancel();
-    let step = state
-        .core
-        .dispatch_next("test-runtime", &stopping, async |_| {
-            unreachable!("a turn was handed over once stopping")
-        })
-        .await?;
-    assert_eq!(step, WorkerStep::Idle);
-    assert_eq!(
-        state
-            .core
-            .inspect_turn(&queued.turn_id)?
-            .context("missing turn")?
-            .state,
-        TurnState::Queued
-    );
-    // A hand-over queues nothing, so it wakes no dispatcher.
-    hand_next(&state.core, "test-runtime").await?;
-    assert_eq!(changed(), Some(false));
-    // Runtimes changing do, so a runtime enabled again is handed its turns.
-    state.core.set_runtimes(runtime_facts(&state.config))?;
-    assert_eq!(changed(), Some(true));
-    Ok(())
-}
-
-#[tokio::test]
 async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
@@ -915,6 +876,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 }
 
 mod attachments;
+mod changes;
 mod configuration;
 mod conversations;
 mod cutover;

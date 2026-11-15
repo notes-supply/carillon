@@ -24,10 +24,16 @@ mise run example:core
   turn becomes running once the runtime takes it; `InboxFailure::Later`
   and `Misinstalled` leave it queued to be handed over again, in order, and
   `Refused` interrupts it with the runtime's explanation. Once `stopping` is
-  cancelled it hands over nothing more. `work()` changes when a turn may
-  have been queued, so a dispatcher waits instead of polling; the service's
+  cancelled it hands over nothing more. A dispatcher that finds nothing
+  queued waits on `changes()` instead of polling; the service's
   dispatcher backs off from 1 to 60 seconds while its runtime takes
   nothing, logging each new kind of failure and the recovery once.
+- `changes()` is marked after every commit that changed a row of core's
+  storage, and when `set_runtimes` changes the runtimes. It says to look
+  again and no more: marks coalesce, and carry no count and no revision. A
+  commit that changed no row is silent, such as a repeated event or a
+  delivery claim that found nothing. One that wrote a row the values it
+  already had may mark it.
 - `settle(runtime, turn, outcome)` records how a turn the runtime holds
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
@@ -92,7 +98,10 @@ another runtime's turns never hold back a conversation's messages.
   record what they say of them.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
   its submodules for admission, job reads, history reads, recovery and held
-  turns.
+  turns. [`db/store.rs`](src/db/store.rs) alone opens connections: `read()`
+  gives one that cannot write, and `write()` runs a closure in a
+  transaction, commits it and marks `changes()`. A new write goes through
+  `write()`, so it cannot commit unannounced.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
   [`intake.rs`](src/intake.rs), [`answers.rs`](src/answers.rs): captured
   resources, messages' files and answers' files.
