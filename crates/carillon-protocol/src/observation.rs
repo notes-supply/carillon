@@ -18,6 +18,9 @@ use crate::{
 /// takes a sixth of it.
 pub const SNAPSHOT_LIMIT: usize = 16 * 1024 * 1024;
 
+/// The name of the event that carries a snapshot on the stream.
+pub const SNAPSHOT_EVENT: &str = "snapshot";
+
 /// How long core lets an observation stay silent before it writes a
 /// keep-alive comment. A reader gives up on one silent for three of these.
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);

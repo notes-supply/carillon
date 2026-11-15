@@ -1,0 +1,649 @@
+//! `GET /v1/observe` through core's router. A reader here takes the
+//! response body frame by frame, so each case decides when the stream is
+//! read. Cases that ask no runtime run on a paused clock, where a wait for
+//! silence costs no time and ends only once core has nothing left to do.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use anyhow::{Context as _, bail};
+use axum::{
+    body::{Body, BodyDataStream},
+    http::Request,
+};
+use carillon_protocol::observation::{Ending, Opened, Progress, SNAPSHOT_LIMIT, Snapshot};
+use futures_util::StreamExt as _;
+use tempfile::tempdir;
+use tower::ServiceExt as _;
+
+use super::{
+    super::{Fixture, accept, answer, configured, hand_next, installation},
+    key, live, recorded, say, say_elsewhere, second_interface, texts,
+};
+use crate::application::http::*;
+
+const OWN: Option<&str> = Some("test-only");
+const OPEN: &str = "agent_id=test-agent&audience_id=conversation";
+
+/// How core answers `provider`, presenting `token`, asking to observe `query`.
+async fn asked(
+    state: &AppState,
+    provider: &str,
+    token: Option<&str>,
+    query: &str,
+) -> Result<Response> {
+    let mut request = Request::builder()
+        .uri(format!("/v1/observe?{query}"))
+        .header(PROVIDER_HEADER, provider);
+    if let Some(token) = token {
+        request = request.header(http::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    Ok(router(state.clone())
+        .oneshot(request.body(Body::empty())?)
+        .await?)
+}
+
+/// The refusal core answers `query` with: its status and what it says.
+async fn refused(
+    state: &AppState,
+    provider: &str,
+    token: Option<&str>,
+    query: &str,
+) -> Result<(StatusCode, String)> {
+    let response = asked(state, provider, token, query).await?;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
+    let body: Value = serde_json::from_slice(&body)?;
+    let said = body["error"].as_str().context("no refusal")?.to_owned();
+    anyhow::ensure!(body == json!({ "error": said }), "{body}");
+    Ok((status, said))
+}
+
+/// One reader of an observation. Core composes its next snapshot only
+/// while the reader waits for one.
+struct Reader(BodyDataStream);
+
+/// Opens `query` as `test-interface`.
+async fn open(state: &AppState, query: &str) -> Result<Reader> {
+    let response = asked(state, "test-interface", OWN, query).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[http::header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    Ok(Reader(response.into_body().into_data_stream()))
+}
+
+impl Reader {
+    /// The next snapshot sent, or `None` once the stream has ended.
+    async fn next(&mut self) -> Result<Option<Snapshot>> {
+        let sent = async {
+            loop {
+                let Some(frame) = self.0.next().await.transpose()? else {
+                    return Ok(None);
+                };
+                let frame = std::str::from_utf8(&frame)?;
+                if frame == ":\n\n" {
+                    continue;
+                }
+                let snapshot = frame
+                    .strip_prefix("event: snapshot\ndata: ")
+                    .and_then(|rest| rest.strip_suffix("\n\n"))
+                    .with_context(|| format!("not one snapshot event: {frame:.120}"))?;
+                return Ok(Some(serde_json::from_str(snapshot)?));
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), sent)
+            .await
+            .context("the stream neither sent a snapshot nor ended")?
+    }
+
+    async fn snapshot(&mut self) -> Result<Snapshot> {
+        self.next().await?.context("the stream ended")
+    }
+
+    /// The first snapshot sent that `shown` holds of.
+    async fn until(&mut self, shown: impl Fn(&Snapshot) -> bool) -> Result<Snapshot> {
+        loop {
+            let snapshot = self.snapshot().await?;
+            if shown(&snapshot) {
+                return Ok(snapshot);
+            }
+        }
+    }
+
+    /// Fails if the stream sends a snapshot or ends. On a paused clock the
+    /// wait ends once core has nothing left to do for this reader.
+    async fn silent(&mut self) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(5), self.next()).await {
+            Err(_) => Ok(()),
+            Ok(sent) => bail!("the stream was not silent: {:.120}", format!("{:?}", sent?)),
+        }
+    }
+}
+
+/// How far each turn the open conversation shows has come.
+fn progress(snapshot: &Snapshot) -> Result<Vec<Progress>> {
+    let (_, turns, _) = recorded(snapshot)?;
+    Ok(turns.iter().map(|turn| turn.progress.clone()).collect())
+}
+
+fn answered(text: &str, finished_at: i64) -> Progress {
+    Progress::Ended {
+        finished_at,
+        ending: Ending::Answered {
+            text: text.to_owned(),
+            files: Vec::new(),
+        },
+        report: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_stream_is_sent_every_change_of_what_its_view_shows() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    let mut reader = open(&state, OPEN).await?;
+    assert_eq!(
+        reader.snapshot().await?,
+        Snapshot {
+            conversations: Vec::new(),
+            more: false,
+            open: Some(Opened::Unrecorded {
+                key: key("conversation")?
+            }),
+        }
+    );
+
+    // Its first message records the conversation, on the stream already open.
+    let receipt = accept(&fixture, "one", "conversation").await?;
+    let accepted = reader.snapshot().await?;
+    let (conversation, turns, _) = recorded(&accepted)?;
+    assert_eq!(accepted.conversations, std::slice::from_ref(conversation));
+    assert_eq!(
+        (turns[0].turn_id.as_str(), turns.len()),
+        (receipt.turn_id.as_str(), 1)
+    );
+    assert_eq!(progress(&accepted)?, [Progress::Queued]);
+
+    // No runtime listens here, so the running turn shows no activity.
+    let held = hand_next(&state.core, "test-runtime")
+        .await?
+        .context("queued")?;
+    let running = Progress::Running { activity: None };
+    assert_eq!(
+        progress(&reader.snapshot().await?)?,
+        std::slice::from_ref(&running)
+    );
+
+    let opening = carillon_protocol::turns::TurnOpening {
+        interface_id: "test-interface".to_owned(),
+        agent_id: "test-agent".to_owned(),
+        audience_id: "conversation".to_owned(),
+        key: "nightly".to_owned(),
+        label: None,
+    };
+    let opened = state.core.open_turn("test-runtime", &opening)?;
+    let both = [running.clone(), running.clone()];
+    assert_eq!(progress(&reader.snapshot().await?)?, both);
+
+    answer(&state.core, "test-runtime", &held, None)?;
+    let ended = reader.snapshot().await?;
+    let at = recorded(&ended)?.0.active_at;
+    assert_eq!(progress(&ended)?, [answered("reply to one", at), running]);
+
+    let stopped = carillon_protocol::turns::TurnOutcome::Stopped {};
+    state
+        .core
+        .settle("test-runtime", &opened.receipt.turn_id, stopped)?;
+    let last = reader.snapshot().await?;
+    let (conversation, turns, _) = recorded(&last)?;
+    assert_eq!(conversation.at_work, 0);
+    assert!(matches!(
+        &turns[1].progress,
+        Progress::Ended {
+            ending: Ending::Stopped,
+            ..
+        }
+    ));
+
+    // A message its runtime refuses ends interrupted, with nothing run.
+    accept(&fixture, "two", "conversation").await?;
+    assert_eq!(progress(&reader.snapshot().await?)?[2], Progress::Queued);
+    let refuse = async |_| {
+        Err(crate::InboxFailure::Refused {
+            status: 422,
+            explanation: None,
+        })
+    };
+    let stopping = CancellationToken::new();
+    state
+        .core
+        .dispatch_next("test-runtime", &stopping, refuse)
+        .await?;
+    let refused = reader.snapshot().await?;
+    assert!(matches!(
+        &recorded(&refused)?.1[2].progress,
+        Progress::Ended {
+            ending: Ending::Interrupted { .. },
+            ..
+        }
+    ));
+    reader.silent().await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reader_that_falls_behind_is_sent_the_latest_snapshot_and_no_backlog() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    let mut reader = open(&state, OPEN).await?;
+    reader.snapshot().await?;
+    let burst = (0..12).map(|index| format!("message {index}"));
+    for message in burst.clone() {
+        accept(&fixture, &message, "conversation").await?;
+    }
+    // Twelve changes while it was not reading are one snapshot when it reads.
+    let latest = reader.snapshot().await?;
+    assert_eq!(texts(recorded(&latest)?.1), burst.collect::<Vec<_>>());
+    reader.silent().await?;
+    accept(&fixture, "one more", "conversation").await?;
+    assert_eq!(texts(recorded(&reader.snapshot().await?)?.1).len(), 13);
+    reader.silent().await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_right_after_a_snapshot_is_composed_half_a_second_after_it() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    let mut reader = open(&state, OPEN).await?;
+    reader.snapshot().await?;
+    for message in ["one", "two", "three"] {
+        let sent = tokio::time::Instant::now();
+        accept(&fixture, message, "conversation").await?;
+        reader.snapshot().await?;
+        assert!(sent.elapsed() >= Duration::from_millis(500), "{message}");
+    }
+    // A change after a quiet half second is composed at once.
+    tokio::time::advance(Duration::from_millis(500)).await;
+    let quiet = tokio::time::Instant::now();
+    accept(&fixture, "four", "conversation").await?;
+    reader.snapshot().await?;
+    assert!(quiet.elapsed() < Duration::from_millis(500));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_is_sent_nothing_for_a_change_its_view_does_not_show() -> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    second_interface(&mut fixture, directory.path())?;
+    accept(&fixture, "mine", "conversation").await?;
+    let state = configured(&fixture);
+    let held = hand_next(&state.core, "test-runtime")
+        .await?
+        .context("queued")?;
+    answer(&state.core, "test-runtime", &held, None)?;
+    let mut reader = open(&state, OPEN).await?;
+    let first = reader.snapshot().await?;
+
+    // Another interface's turn in a conversation of the same name.
+    say_elsewhere(&fixture, "theirs", "conversation").await?;
+    reader.silent().await?;
+    // The interface's own change of what no view shows: its delivery.
+    let delivery = state.core.claim_delivery("test-interface", "instance")?;
+    assert_eq!(
+        delivery.context("nothing to deliver")?.content,
+        "reply to mine"
+    );
+    reader.silent().await?;
+
+    accept(&fixture, "mine again", "conversation").await?;
+    let next = reader.snapshot().await?;
+    assert_eq!(texts(recorded(&next)?.1), ["mine", "mine again"]);
+    assert_eq!(next.conversations.len(), first.conversations.len());
+    Ok(())
+}
+
+/// A runtime that says every turn it is asked about has made `calls` calls,
+/// and counts how often it was asked.
+#[derive(Clone, Default)]
+struct Describing {
+    calls: Arc<AtomicU32>,
+    asked: Arc<AtomicU32>,
+}
+
+impl Describing {
+    /// Starts it as the runtime of `fixture`, saying one call was made.
+    async fn start(fixture: &mut Fixture) -> Result<Self> {
+        let runtime = Self::default();
+        runtime.calls.store(1, Ordering::SeqCst);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        fixture.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+        let described = runtime.clone();
+        let activity = get(move || {
+            described.asked.fetch_add(1, Ordering::SeqCst);
+            let said = live(described.calls.load(Ordering::SeqCst), &[]);
+            async move {
+                said.map(Json)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        });
+        let router = Router::new().route("/v1/turns/{id}/activity", activity);
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Ok(runtime)
+    }
+
+    fn asked(&self) -> u32 {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+/// The calls the running turn `snapshot` shows has made, as its runtime said.
+fn calls(snapshot: &Snapshot) -> Result<Option<u32>> {
+    match progress(snapshot)?.as_slice() {
+        [Progress::Running { activity }] => Ok(activity.as_ref().map(|said| said.tool_calls)),
+        other => bail!("not one running turn: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_running_turn_is_sent_again_when_its_runtime_says_something_new() -> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    let runtime = Describing::start(&mut fixture).await?;
+    accept(&fixture, "one", "conversation").await?;
+    let state = configured(&fixture);
+    let held = hand_next(&state.core, "test-runtime")
+        .await?
+        .context("queued")?;
+    let mut reader = open(&state, OPEN).await?;
+    assert_eq!(calls(&reader.snapshot().await?)?, Some(1));
+
+    // Nothing is committed: the runtime alone says something new.
+    runtime.calls.store(2, Ordering::SeqCst);
+    assert_eq!(calls(&reader.snapshot().await?)?, Some(2));
+    assert_eq!(runtime.asked(), 2);
+
+    // Asked twice more, the runtime says the same, and nothing is sent.
+    let unchanged = async {
+        while runtime.asked() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        sent = reader.next() => bail!("sent what the reader already had: {sent:?}"),
+        () = unchanged => {}
+    }
+    answer(&state.core, "test-runtime", &held, None)?;
+    let ended = reader.snapshot().await?;
+    let at = recorded(&ended)?.0.active_at;
+    assert_eq!(progress(&ended)?, [answered("reply to one", at)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn core_asks_a_runtime_once_for_each_snapshot_a_reader_takes_and_never_for_one_gone()
+-> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    let runtime = Describing::start(&mut fixture).await?;
+    accept(&fixture, "one", "conversation").await?;
+    let state = configured(&fixture);
+    hand_next(&state.core, "test-runtime").await?;
+    let mut gone = open(&state, OPEN).await?;
+    assert_eq!(calls(&gone.snapshot().await?)?, Some(1));
+    drop(gone);
+
+    let mut reader = open(&state, OPEN).await?;
+    assert_eq!(calls(&reader.snapshot().await?)?, Some(1));
+    for said in 2..4 {
+        runtime.calls.store(said, Ordering::SeqCst);
+        assert_eq!(calls(&reader.snapshot().await?)?, Some(said));
+    }
+    // One for the reader that left, and one for each of the three
+    // snapshots this one took, though a second passed between them.
+    assert_eq!(runtime.asked(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_view_is_refused_only_once_its_caller_is_authenticated() -> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = installation(directory.path())?;
+    second_interface(&mut fixture, directory.path())?;
+    fixture.config.value.providers[2].enabled = false;
+    let state = configured(&fixture);
+    let window = "a window holds 1 to 500 items";
+    let named = "a conversation is named by its agent and its audience";
+    for (query, reason) in [
+        ("conversations=0", window),
+        ("conversations=501", window),
+        ("conversations=many", "invalid digit"),
+        ("agent_id=test-agent&audience_id=someone&turns=0", window),
+        ("agent_id=test-agent&audience_id=someone&turns=501", window),
+        ("agent_id=test-agent", named),
+        ("audience_id=someone", named),
+        ("agent_id=&audience_id=someone", named),
+        ("turns=5", "a window of turns needs the conversation"),
+        (
+            "interface_id=other-interface",
+            "unknown field `interface_id`",
+        ),
+        ("conversations=1&conversations=2", "duplicate field"),
+    ] {
+        let (status, said) = refused(&state, "test-interface", OWN, query).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {said}");
+        assert!(said.contains(reason), "{query}: {said}");
+        // A caller core does not know learns nothing of the view.
+        for (provider, token, refusal) in [
+            ("test-interface", None, "component authentication required"),
+            (
+                "test-interface",
+                Some("wrong"),
+                "component authentication failed",
+            ),
+            ("test-runtime", OWN, "unknown interface provider"),
+            ("unknown", OWN, "unknown interface provider"),
+            (
+                "other-interface",
+                Some("other-only"),
+                "interface provider is disabled",
+            ),
+        ] {
+            assert_eq!(
+                refused(&state, provider, token, query).await?,
+                (StatusCode::FORBIDDEN, refusal.to_owned()),
+                "{provider} with {token:?} asked for {query}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_over_its_limit_is_refused_and_ends_a_stream_it_grows_on() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    let state = configured(&fixture);
+    let megabytes = |count: usize| "long ".repeat(count * (1 << 20) / 5);
+    let long = SNAPSHOT_LIMIT / (1 << 20) - 2;
+    say(
+        &fixture,
+        "test-interface",
+        "long",
+        "conversation",
+        megabytes(long),
+    )
+    .await?;
+    let mut reader = open(&state, OPEN).await?;
+    assert_eq!(texts(recorded(&reader.snapshot().await?)?.1).len(), 1);
+
+    say(
+        &fixture,
+        "test-interface",
+        "longer",
+        "conversation",
+        megabytes(3),
+    )
+    .await?;
+    assert_eq!(reader.next().await?, None);
+    let (status, said) = refused(&state, "test-interface", OWN, OPEN).await?;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(said.ends_with("ask for fewer turns"), "{said}");
+    let mut fewer = open(&state, &format!("{OPEN}&turns=1")).await?;
+    let newest = fewer.snapshot().await?;
+    let (_, turns, earlier) = recorded(&newest)?;
+    assert_eq!((turns.len(), earlier), (1, true));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_streams_end_when_core_stops() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    accept(&fixture, "one", "conversation").await?;
+    let state = configured(&fixture);
+    let mut readers = [open(&state, OPEN).await?, open(&state, "").await?];
+    for reader in &mut readers {
+        reader.snapshot().await?;
+    }
+    state.stopping.cancel();
+    for reader in &mut readers {
+        assert_eq!(reader.next().await?, None);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_ends_at_once_when_its_snapshot_cannot_be_composed() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    accept(&fixture, "one", "conversation").await?;
+    let state = configured(&fixture);
+    let mut reader = open(&state, OPEN).await?;
+    reader.snapshot().await?;
+    let storage =
+        rusqlite::Connection::open(fixture.config.value.data_dir.join("carillon.sqlite3"))?;
+    // A turn stored as no turn can be, which the next composition meets.
+    storage.execute("UPDATE turns SET state = 'completed'", [])?;
+    let before = tokio::time::Instant::now();
+    accept(&fixture, "elsewhere", "another").await?;
+    assert_eq!(reader.next().await?, None);
+    // It ended with the composition that failed: nothing waited to try again.
+    assert!(
+        before.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        before.elapsed()
+    );
+
+    let (status, _) = refused(&state, "test-interface", OWN, OPEN).await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    storage.execute("UPDATE turns SET state = 'queued'", [])?;
+    let again = open(&state, OPEN).await?.snapshot().await?;
+    assert_eq!(again.conversations.len(), 2);
+    assert_eq!(progress(&again)?, [Progress::Queued]);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_core_started_again_on_its_storage_sends_a_complete_first_snapshot() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    accept(&fixture, "held", "conversation").await?;
+    hand_next(&fixture.core, "test-runtime").await?;
+    let opening = carillon_protocol::turns::TurnOpening {
+        interface_id: "test-interface".to_owned(),
+        agent_id: "test-agent".to_owned(),
+        audience_id: "conversation".to_owned(),
+        key: "nightly".to_owned(),
+        label: Some("opened".to_owned()),
+    };
+    fixture.core.open_turn("test-runtime", &opening)?;
+    accept(&fixture, "queued", "conversation").await?;
+
+    let core = Core::open(core_options(&fixture.config))?;
+    core.recover_interrupted()?;
+    let state = AppState {
+        core,
+        ..configured(&fixture)
+    };
+    let first = open(&state, OPEN).await?.snapshot().await?;
+    let (conversation, turns, _) = recorded(&first)?;
+    assert_eq!(conversation.at_work, 3);
+    assert_eq!(texts(turns), ["held", "opened", "queued"]);
+    // The turn core handed over waits to be handed over again; the one its
+    // runtime opened still runs.
+    let running = Progress::Running { activity: None };
+    assert_eq!(
+        progress(&first)?,
+        [Progress::Queued, running, Progress::Queued]
+    );
+    Ok(())
+}
+
+/// A conversation whose snapshot takes long enough to compose that a
+/// change committed meanwhile lands while it is composed.
+async fn slow_to_compose(fixture: &Fixture) -> Result<()> {
+    for index in 0..12 {
+        let text = "long ".repeat((1 << 20) / 5);
+        say(
+            fixture,
+            "test-interface",
+            &format!("long {index}"),
+            "conversation",
+            text,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn shows(text: &str) -> impl Fn(&Snapshot) -> bool {
+    move |snapshot| recorded(snapshot).is_ok_and(|(_, turns, _)| texts(turns).contains(&text))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_committed_while_the_first_snapshot_is_composed_reaches_the_stream() -> Result<()>
+{
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    slow_to_compose(&fixture).await?;
+    let state = configured(&fixture);
+    for round in 0..4 {
+        let message = format!("round {round}");
+        let (writer, said) = (fixture.clone(), message.clone());
+        let written = tokio::spawn(async move { accept(&writer, &said, "conversation").await });
+        let mut reader = open(&state, OPEN).await?;
+        written.await??;
+        reader.until(shows(&message)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_committed_while_a_snapshot_is_composed_is_sent_next() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = installation(directory.path())?;
+    slow_to_compose(&fixture).await?;
+    let state = configured(&fixture);
+    let mut reader = open(&state, OPEN).await?;
+    reader.snapshot().await?;
+    for round in 0..6 {
+        // Past the least time between compositions, so the first change
+        // is composed at once and the second lands while it is.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (first, second) = (format!("first of {round}"), format!("second of {round}"));
+        let (writer, both) = (fixture.clone(), [first, second.clone()]);
+        let written = tokio::spawn(async move {
+            for message in both {
+                accept(&writer, &message, "conversation").await?;
+            }
+            anyhow::Ok(())
+        });
+        reader.until(shows(&second)).await?;
+        written.await??;
+    }
+    Ok(())
+}

@@ -1,9 +1,11 @@
 //! The core service: admission, the dispatchers that hand turns to their
 //! runtimes, and the delivery outbox, served over the loopback provider API.
 
+mod activity;
 mod controls;
 mod conversations;
 mod maintenance;
+mod observe;
 mod registry;
 mod runtime;
 #[cfg(test)]
@@ -30,8 +32,7 @@ use carillon_protocol::{
     model::{
         ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation, EVENT_BODY_LIMIT,
         EventReceipt, EventStatus, ExternalEvent, Health, INSTANCE_HEADER, JobPage,
-        PROVIDER_HEADER, SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState,
-        TurnSummary,
+        PROVIDER_HEADER, SelectedProvider, StatusReport, TurnInspection, TurnState, TurnSummary,
     },
     settings::{SettingsRequest, Subject},
 };
@@ -40,7 +41,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{AgentOptions, Core, CoreError, CoreOptions, db::OtherFormat};
 pub(super) use maintenance::{Drain, Lease};
@@ -60,6 +61,9 @@ struct AppState {
     /// The operator's pause of the workers for maintenance, if one was
     /// taken: written by its routes alone, acted on by the supervisor alone.
     pause: Arc<watch::Sender<Option<Pause>>>,
+    /// Cancelled as core begins to stop: no turn is handed over after, and
+    /// every observation ends.
+    stopping: CancellationToken,
 }
 
 impl AppState {
@@ -182,6 +186,12 @@ pub(super) fn check(config: &LoadedConfig) -> Result<CoreDatabase> {
     }
 }
 
+/// How long core waits, once told to stop, for the requests in flight to be
+/// answered. They take milliseconds; only a call relayed to a slow runtime
+/// or a registry apply can outlast it, and is then cut off as a kill would
+/// cut it.
+const DRAIN: Duration = Duration::from_secs(2);
+
 /// Serves the installation whose registry `config` was loaded from `path`,
 /// which [`Registry::apply`] reads again.
 pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
@@ -208,18 +218,19 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     }
 
     let listen = config.value.core.listen;
+    let stopping = CancellationToken::new();
     let state = AppState {
         registry: Arc::new(Registry::new(path, config)),
         core,
         client: loopback::client().build()?,
         workers: Arc::new(watch::Sender::new(Census::default())),
         pause: Arc::new(watch::Sender::new(None)),
+        stopping: stopping.clone(),
     };
     // Each enabled runtime's one dispatcher hands it its queued turns in
     // order, and the runtime settles them later. Their supervisor follows
     // the serving registry; none hands a turn over once `stopping` is
     // cancelled, as shutdown begins.
-    let stopping = CancellationToken::new();
     let supervisor = tokio::spawn(workers::supervise(
         state.clone(),
         state.workers.clone(),
@@ -228,9 +239,18 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
 
     let router = router(state.clone());
     info!(%listen, "Carillon core ready");
-    let served = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
-        .await;
+    let graceful = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()));
+    let served = tokio::select! {
+        served = graceful => served,
+        // A peer that stops reading holds its connection open, and with it
+        // the graceful shutdown, for as long as it likes. Past the bound it
+        // is left to the end of the process.
+        () = async { stopping.cancelled().await; tokio::time::sleep(DRAIN).await } => {
+            warn!("connections were still open {DRAIN:?} after core was told to stop");
+            Ok(())
+        }
+    };
     // The caller releases the service lock when this returns, however the
     // server ended: no copy may still be publishing then, no dispatcher may
     // still be handing a turn over, and no storage work may still be writing.
@@ -261,6 +281,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
         .route("/v1/runtime/resources", post(runtime::resources))
         .route("/v1/jobs", get(jobs))
+        .route("/v1/observe", get(observe::observe))
         .route("/v1/conversations", get(conversations::list))
         .route(
             "/v1/conversations/{agent_id}/{audience_id}",
@@ -437,10 +458,6 @@ async fn relay_runtime_call(request: RequestBuilder) -> Result<Response, ApiErro
     Ok((status, Json(body)).into_response())
 }
 
-/// A snapshot is cosmetic: a runtime that is slow to describe a turn costs
-/// the snapshot, not a slow list.
-const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// Which jobs a read asks for: those `tracked`, by origin turn IDs separated
 /// by commas, or else a page of those at work, `after` the previous page.
 #[derive(Deserialize)]
@@ -490,69 +507,21 @@ async fn jobs(
             ));
         }
     };
-    let mut snapshots = tokio::task::JoinSet::new();
-    for (index, (runtime_id, job)) in listed.iter().enumerate() {
-        let Some(turn) = job
-            .turns
-            .last()
-            .filter(|turn| turn.state == TurnState::Running)
-        else {
-            continue;
-        };
-        let (client, config, runtime_id) =
-            (state.client.clone(), config.clone(), runtime_id.clone());
-        let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
-        snapshots.spawn(async move {
-            let activity = runtime_activity(&client, &config, &runtime_id, &interface_id, &turn_id);
-            (index, activity.await)
-        });
-    }
-    let mut jobs = listed.into_iter().map(|(_, job)| job).collect::<Vec<_>>();
-    while let Some(snapshot) = snapshots.join_next().await {
-        if let Ok((index, activity)) = snapshot
-            && let Some(turn) = jobs[index].turns.last_mut()
-        {
-            turn.activity = activity;
-        }
+    let (owners, mut jobs): (Vec<_>, Vec<_>) = listed.into_iter().unzip();
+    let running = (owners.iter().zip(&mut jobs))
+        .filter_map(|(runtime_id, job)| {
+            let turn = job.turns.last_mut()?;
+            (turn.state == TurnState::Running).then_some((runtime_id.as_str(), turn))
+        })
+        .collect::<Vec<_>>();
+    let asked = running
+        .iter()
+        .map(|(runtime_id, turn)| (*runtime_id, turn.turn_id.as_str()));
+    let sampled = activity::activities(&state.client, &config, &interface.id, asked).await;
+    for ((_, turn), activity) in running.into_iter().zip(sampled) {
+        turn.activity = activity;
     }
     Ok(Json(JobPage { jobs, next }))
-}
-
-async fn runtime_activity(
-    client: &Client,
-    config: &LoadedConfig,
-    runtime_id: &str,
-    interface_id: &str,
-    turn_id: &str,
-) -> Option<TurnActivity> {
-    let snapshot = async {
-        let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
-        let token = runtime_token(config, runtime)?;
-        let mut url = Url::parse(&runtime.url)?;
-        url.path_segments_mut()
-            .map_err(|()| anyhow!("runtime provider URL cannot have a path"))?
-            .extend(["v1", "turns", turn_id, "activity"]);
-        url.query_pairs_mut()
-            .append_pair("interface_id", interface_id);
-        let response = client
-            .get(url)
-            .bearer_auth(token)
-            .timeout(ACTIVITY_TIMEOUT)
-            .send()
-            .await?;
-        // Not yet or no longer executing in the runtime.
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        Ok::<_, anyhow::Error>(Some(
-            response.error_for_status()?.json::<TurnActivity>().await?,
-        ))
-    };
-    // Interfaces ask every few seconds; an unavailable snapshot is routine.
-    snapshot.await.unwrap_or_else(|error| {
-        debug!(runtime_id, turn_id, %error, "runtime activity is unavailable");
-        None
-    })
 }
 
 /// The credential core presents to a runtime, checked against the registry

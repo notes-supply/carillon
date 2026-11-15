@@ -6,6 +6,7 @@ use std::{cell::RefCell, fs, path::Path};
 use anyhow::{Context as _, bail};
 use carillon_protocol::{
     conversations::TurnSource,
+    model::TurnActivity,
     observation::{
         Conversation, ConversationKey, Ending, Limit, ObservedTurn, OpenView, Opened, Progress,
         Snapshot, View,
@@ -16,6 +17,8 @@ use tempfile::tempdir;
 
 use super::{Fixture, accept, answer, configured, hand_next, installation, report};
 use crate::{HeldTurn, application::http::*};
+
+mod stream;
 
 /// Registers the interface `other-interface`, whose credential is `other-only`.
 pub(super) fn second_interface(state: &mut Fixture, directory: &Path) -> Result<()> {
@@ -31,20 +34,24 @@ pub(super) fn second_interface(state: &mut Fixture, directory: &Path) -> Result<
     state.config.value.validate()
 }
 
-/// Accepts a message saying `text` from `other-interface`.
-async fn say_elsewhere(state: &Fixture, text: &str, audience: &str) -> Result<EventReceipt> {
-    let interface = state
-        .config
-        .provider("other-interface", ProviderRole::Interface)?;
+/// Accepts the message `event_id` saying `text` from `interface`.
+pub(super) async fn say(
+    state: &Fixture,
+    interface: &str,
+    event_id: &str,
+    audience: &str,
+    text: String,
+) -> Result<EventReceipt> {
+    let interface = state.config.provider(interface, ProviderRole::Interface)?;
     let event = ExternalEvent {
-        event_id: text.to_owned(),
+        event_id: event_id.to_owned(),
         agent_id: "test-agent".to_owned(),
         user_id: "someone".to_owned(),
         audience_id: audience.to_owned(),
-        channel_id: "other-channel".to_owned(),
-        delivery_target_id: "other-destination".to_owned(),
-        feedback_target_id: "other-feedback".to_owned(),
-        content: text.to_owned(),
+        channel_id: format!("channel of {}", interface.id),
+        delivery_target_id: "destination".to_owned(),
+        feedback_target_id: "feedback".to_owned(),
+        content: text,
         native: Value::Null,
         attachments: None,
     };
@@ -52,6 +59,15 @@ async fn say_elsewhere(state: &Fixture, text: &str, audience: &str) -> Result<Ev
         .core
         .accept(&selected_provider(interface), &event)
         .await?)
+}
+
+/// Accepts a message saying `text` from `other-interface`.
+pub(super) async fn say_elsewhere(
+    state: &Fixture,
+    text: &str,
+    audience: &str,
+) -> Result<EventReceipt> {
+    say(state, "other-interface", text, audience, text.to_owned()).await
 }
 
 pub(super) fn key(audience: &str) -> Result<ConversationKey> {
@@ -139,7 +155,7 @@ async fn an_interface_is_shown_its_own_conversations_and_never_anothers() -> Res
     let theirs = shown(core, "other-interface", &open).await?;
     assert_eq!(audiences(&theirs.conversations), ["shared"]);
     let (conversation, turns, _) = recorded(&theirs)?;
-    assert_eq!(conversation.channel_id, "other-channel");
+    assert_eq!(conversation.channel_id, "channel of other-interface");
     assert_eq!(texts(turns), ["theirs"]);
 
     // Another interface's conversation reads as one core has never recorded.
