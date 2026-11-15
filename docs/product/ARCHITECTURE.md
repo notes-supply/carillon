@@ -23,7 +23,8 @@ share:
 - the outcomes runtimes report for the turns they hold, and the turns they
   open themselves;
 - delivery intents and their outcomes;
-- each interface's read of its own conversations and their turns;
+- each interface's read of its own conversations and their turns, and its
+  stream of what it is looking at;
 - relaying settings to the runtime that serves the agent, and command reads
   and turn controls to the conversation's runtime; and
 - inspection, backup and restore.
@@ -65,6 +66,55 @@ and the answer core recorded, with its silence, files and delivery state.
 Core scopes both reads to the authenticated interface before it reads a
 row. Neither returns the context an interface added for the model, an
 operator's error text or a snapshot.
+
+`GET /v1/observe` streams what the caller is looking at as server-sent
+events, each a complete snapshot. The view is the request's query:
+`conversations` is how many conversations to list, and `agent_id` with
+`audience_id` open one conversation, whose newest `turns` are shown. Both
+counts are 1 to 500, and 50 when absent. A snapshot holds the listed
+conversations, the latest active first, whether there are more, and the
+open conversation with those turns, oldest first, whether it is listed or
+not. A conversation core records nothing of reads as unrecorded, and so does
+another interface's. A turn is queued, or running with what its runtime
+last said it was doing, or ended with the time, its ending and its final
+report. An ending is an answer with its files, an interruption's notice,
+steered or stopped. An ended turn never changes again.
+
+Core sends the first snapshot at once and another whenever what the view
+shows has changed, so a reader replaces what it had and merges nothing.
+There is no event ID and no replay: a reader that loses the stream opens
+another and starts from its first snapshot. Core authenticates the caller
+before it reads the view, and composes the first snapshot before it
+answers, so a view it does not accept is refused with 400 and one whose
+snapshot is over 16 MiB with 413.
+
+A snapshot is composed in a fixed order. Core reads which turns of the open
+window run, asks their runtimes what they are doing outside any
+transaction, and then reads everything the snapshot holds in one
+transaction. It keeps a runtime's answer only for a turn that read still
+finds running there. A turn that ended meanwhile shows its stored ending,
+and a turn whose runtime did not answer is still running. A turn the
+runtime opened offers no controls.
+
+The stream is the response body alone, with no task or queue behind it.
+Core composes a snapshot only when the reader takes the one before, so a
+slow reader gets the latest state when it reads again and never a backlog.
+It waits on the change signal, which it marks seen before each composition,
+so a change committed while a snapshot is composed starts another. It
+does not send a snapshot equal to the one it last sent, which keeps another
+interface's commits off the wire. While the last snapshot shows a running
+turn, core composes again a second later to ask the runtime again, and two
+compositions on one stream are at least half a second apart. A stream ends
+when core stops and when a snapshot cannot be composed. Nothing waits to
+try again: the reader opens another stream.
+
+The web provider still polls the two reads above, so they stay.
+
+Told to stop, core ends every observation and waits at most two seconds
+for the requests in flight to be answered. A request still in flight then
+is cut off when the process ends. Core still waits, without a bound, for
+the captures, hand-overs and storage work in progress to finish before it
+exits.
 
 ### Dispatchers
 

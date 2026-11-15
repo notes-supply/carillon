@@ -16,7 +16,15 @@ in `carillon-protocol`.
 - [`client`](src/client.rs): `CoreClient`, the provider's authenticated
   requests to core, with bounded waits: submit an event, read its status,
   jobs, controls, channel settings and commands. A successful control has no
-  body. `Deliveries` is the claim, acknowledgement and reconciliation of
+  body. `observe(&View)` opens core's stream of complete snapshots of what
+  the provider is looking at, and `Observation::next` reads them one at a
+  time: replace what you had with each. It returns `Ok(None)` when core
+  ends the stream, as it does when it stops, and an error when the
+  connection is lost, when the first snapshot takes over ten seconds, when
+  the stream is silent for three keep-alives, or when core sends what is
+  not a snapshot. Neither retries or reconnects. A provider that still
+  wants the view opens another observation, whose first snapshot is
+  complete. `Deliveries` is the claim, acknowledgement and reconciliation of
   deliveries under one instance identity. Its owner keeps two rules, which
   the type does not enforce, so that each delivery is sent once. A process
   opens one, because a reconcile under another identity takes the first

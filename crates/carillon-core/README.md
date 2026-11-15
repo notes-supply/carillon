@@ -32,7 +32,8 @@ mise run example:core
   storage. A mark says to look again and no more. Marks coalesce, and
   carry no count and no revision. A commit that changed no row is silent,
   such as a repeated event or a delivery claim that found nothing. One
-  that wrote a row the values it already had may mark it.
+  that wrote a row the values it already had may mark it. The service's
+  observations wait on it. Dispatchers do not: they wait on `work()`.
 - `settle(runtime, turn, outcome)` records how a turn the runtime holds
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
@@ -54,6 +55,17 @@ mise run example:core
   turn's state while it is unfinished, and an external answer's delivery
   state, are not covered: an interface that shows them reads the jobs of
   its unfinished turns.
+- `snapshot(interface, view, sample)` answers a view with everything it
+  shows an interface: its conversations, the latest active first, and one
+  open conversation's newest turns, each queued, running or ended with its
+  ending. One transaction reads all of it. `sample` asks the runtimes what
+  the running turns are doing, and core owns the order around it: it reads
+  which turns run, calls `sample` outside any transaction, then reads the
+  snapshot, and keeps an answer only for a turn still running on the
+  runtime that was asked. The service streams these at `GET /v1/observe`,
+  one stream for each reader, composed when `changes()` is marked and the
+  reader has taken the snapshot before. The web provider still polls
+  `conversations` and `transcript`, so both stay.
 - `recover_interrupted` and `reconcile_attachments` are for exclusive
   startup, before events are accepted. Recovery returns the turns core
   handed a runtime to the queue, interrupts those of a runtime no longer
@@ -94,10 +106,12 @@ another runtime's turns never hold back a conversation's messages.
 - [`engine.rs`](src/engine.rs): public operations and policy;
   [`engine/dispatch.rs`](src/engine/dispatch.rs) and
   [`engine/settle.rs`](src/engine/settle.rs) hand turns to runtimes and
-  record what they say of them.
+  record what they say of them, and
+  [`engine/observation.rs`](src/engine/observation.rs) composes a view's
+  snapshot.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
-  its submodules for admission, job reads, history reads, recovery and held
-  turns. [`db/store.rs`](src/db/store.rs) alone opens connections.
+  its submodules for admission, job reads, history reads, a view's
+  snapshot, recovery and held turns. [`db/store.rs`](src/db/store.rs) alone opens connections.
   `read()` gives one that cannot write. `write()` runs a closure in a
   transaction, commits it and marks `changes()` if it changed a row. A new
   write goes through `write()`, so its change cannot commit unannounced.
@@ -110,6 +124,7 @@ another runtime's turns never hold back a conversation's messages.
   `http/`, `registry.rs` serves the registry and its live apply,
   `workers.rs` supervises each runtime's dispatcher, `maintenance.rs` serves
   the maintenance pause, `runtime.rs` serves runtimes' calls and runs their
-  dispatcher, `controls.rs` relays turn controls, and `conversations.rs`
-  serves an interface its history. `drain.rs`,
+  dispatcher, `controls.rs` relays turn controls, `conversations.rs`
+  serves an interface its history, `observe.rs` streams it its view, and
+  `activity.rs` asks runtimes what running turns are doing. `drain.rs`,
   `operations.rs` and `update.rs` run restarts, services and updates.
