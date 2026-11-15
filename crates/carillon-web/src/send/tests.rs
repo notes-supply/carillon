@@ -106,7 +106,7 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(
         sent.json()?,
-        json!({"turn_id": format!("turn-{EVENT}"), "duplicate": false})
+        json!({"turn_id": "turn-1", "duplicate": false})
     );
     let core = fixture.core();
     let [(event, files)] = core.events.as_slice() else {
@@ -247,8 +247,12 @@ async fn a_conversation_keeps_the_agent_of_its_first_message() -> Result<()> {
         "a refused message reached core"
     );
 
-    for query in ["", "?agent=second"] {
-        let answer = send(&fixture, &token, query, &hello).await?;
+    for (event, query) in [
+        (EVENT, ""),
+        ("m-0190f3a8-7b1c-7def-8a2b-bbbbbbbbbbbb", "?agent=second"),
+    ] {
+        let request = message(&token, &path(event, query), form(&hello))?;
+        let answer = fixture.send(request).await?;
         assert_eq!(answer.status, StatusCode::OK, "{query}");
     }
     let core = fixture.core();
