@@ -1,7 +1,6 @@
 use super::{
     Capture, Database, EventReceipt, ExternalEvent, OptionalExtension, Result, TurnState, Value,
     bail, conversation_runtime, conversations, event_receipt, params, state_column, timestamp,
-    write_transaction,
 };
 
 #[derive(Clone, Copy)]
@@ -25,7 +24,7 @@ impl Database {
         event_id: &str,
     ) -> Result<Option<(String, TurnState, String)>> {
         Ok(self
-            .connect()?
+            .read()?
             .query_row(
                 "SELECT id, state, runtime_id FROM turns WHERE interface_id = ?1 AND event_id = ?2",
                 params![interface_id, event_id],
@@ -46,93 +45,91 @@ impl Database {
         admission: Admission<'_>,
         capture: Option<&Capture>,
     ) -> Result<EventReceipt> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        if let Some(receipt) = event_receipt(&transaction, interface_id, &event.event_id)? {
-            transaction.commit()?;
-            return Ok(receipt);
-        }
-
-        let expected_owner = match admission {
-            Admission::Queued { .. } => runtime_id,
-            Admission::Stranded {
-                previous_runtime, ..
-            } => previous_runtime,
-        };
-        if let Some(owner) = conversation_runtime(
-            &transaction,
-            interface_id,
-            &event.agent_id,
-            &event.audience_id,
-        )? && owner != expected_owner
-        {
-            bail!("conversation is owned by runtime {owner}, not {runtime_id}");
-        }
-        let (providers, resource_snapshot_id, notice) = match admission {
-            Admission::Queued {
-                providers,
-                resource_snapshot_id,
-            } => (
-                serde_json::to_string(providers)?,
-                resource_snapshot_id.to_owned(),
-                None,
-            ),
-            Admission::Stranded { explanation, .. } => {
-                let (providers, resources) = transaction.query_row(
-                    "SELECT provider_snapshot_json, resource_snapshot_id FROM turns
-                     WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
-                     ORDER BY acceptance_sequence DESC LIMIT 1",
-                    params![interface_id, event.agent_id, event.audience_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )?;
-                (providers, resources, Some(explanation))
+        self.write(|transaction| {
+            if let Some(receipt) = event_receipt(transaction, interface_id, &event.event_id)? {
+                return Ok(receipt);
             }
-        };
-        let now = timestamp()?;
-        conversations::accepted(&transaction, interface_id, event, now)?;
-        let turn_id = uuid::Uuid::now_v7().to_string();
-        transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
-                 target_id, feedback_target_id, input, native_json, runtime_id,
-                 provider_snapshot_json, resource_snapshot_id, state, accepted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14)",
-            params![
-                turn_id,
+
+            let expected_owner = match admission {
+                Admission::Queued { .. } => runtime_id,
+                Admission::Stranded {
+                    previous_runtime, ..
+                } => previous_runtime,
+            };
+            if let Some(owner) = conversation_runtime(
+                transaction,
                 interface_id,
-                event.event_id,
-                event.agent_id,
-                event.audience_id,
-                event.user_id,
-                event.delivery_target_id,
-                event.feedback_target_id,
-                event.content,
-                serde_json::to_string(&event.native)?,
-                runtime_id,
-                providers,
-                resource_snapshot_id,
-                now,
-            ],
-        )?;
-        if let Some(capture) = capture {
-            reference_capture(&transaction, event, &turn_id, capture)?;
-        }
-        let state = if let Some(notice) = notice {
+                &event.agent_id,
+                &event.audience_id,
+            )? && owner != expected_owner
+            {
+                bail!("conversation is owned by runtime {owner}, not {runtime_id}");
+            }
+            let (providers, resource_snapshot_id, notice) = match admission {
+                Admission::Queued {
+                    providers,
+                    resource_snapshot_id,
+                } => (
+                    serde_json::to_string(providers)?,
+                    resource_snapshot_id.to_owned(),
+                    None,
+                ),
+                Admission::Stranded { explanation, .. } => {
+                    let (providers, resources) = transaction.query_row(
+                        "SELECT provider_snapshot_json, resource_snapshot_id FROM turns
+                         WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+                         ORDER BY acceptance_sequence DESC LIMIT 1",
+                        params![interface_id, event.agent_id, event.audience_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )?;
+                    (providers, resources, Some(explanation))
+                }
+            };
+            let now = timestamp()?;
+            conversations::accepted(transaction, interface_id, event, now)?;
+            let turn_id = uuid::Uuid::now_v7().to_string();
             transaction.execute(
-                "UPDATE turns SET state = 'interrupted', error = ?2, finished_at = ?3
-                 WHERE id = ?1",
-                params![turn_id, notice, now],
+                "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
+                     target_id, feedback_target_id, input, native_json, runtime_id,
+                     provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14)",
+                params![
+                    turn_id,
+                    interface_id,
+                    event.event_id,
+                    event.agent_id,
+                    event.audience_id,
+                    event.user_id,
+                    event.delivery_target_id,
+                    event.feedback_target_id,
+                    event.content,
+                    serde_json::to_string(&event.native)?,
+                    runtime_id,
+                    providers,
+                    resource_snapshot_id,
+                    now,
+                ],
             )?;
-            self.record_delivery(&transaction, &turn_id, notice, None, now)?;
-            TurnState::Interrupted
-        } else {
-            TurnState::Queued
-        };
-        transaction.commit()?;
-        Ok(EventReceipt {
-            event_id: event.event_id.clone(),
-            turn_id,
-            state,
-            duplicate: false,
+            if let Some(capture) = capture {
+                reference_capture(transaction, event, &turn_id, capture)?;
+            }
+            let state = if let Some(notice) = notice {
+                transaction.execute(
+                    "UPDATE turns SET state = 'interrupted', error = ?2, finished_at = ?3
+                     WHERE id = ?1",
+                    params![turn_id, notice, now],
+                )?;
+                self.record_delivery(transaction, &turn_id, notice, None, now)?;
+                TurnState::Interrupted
+            } else {
+                TurnState::Queued
+            };
+            Ok(EventReceipt {
+                event_id: event.event_id.clone(),
+                turn_id,
+                state,
+                duplicate: false,
+            })
         })
     }
 }

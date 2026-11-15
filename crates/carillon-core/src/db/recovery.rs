@@ -1,10 +1,10 @@
 use rusqlite::Transaction;
 
-use super::{Database, RUNTIME_EVENT_PREFIX, Result, params, timestamp, write_transaction};
+use super::{Database, RUNTIME_EVENT_PREFIX, Result, params, timestamp};
 
 impl Database {
     pub(crate) fn queued_owners(&self) -> Result<Vec<(String, String)>> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement = connection
             .prepare("SELECT DISTINCT agent_id, runtime_id FROM turns WHERE state = 'queued'")?;
         Ok(statement
@@ -38,19 +38,18 @@ impl Database {
         runtime_id: &str,
         explanation: &str,
     ) -> Result<usize> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let queued = transaction
-            .prepare(
-                "SELECT id FROM turns
-                 WHERE state = 'queued' AND agent_id = ?1 AND runtime_id = ?2
-                 ORDER BY acceptance_sequence",
-            )?
-            .query_map(params![agent_id, runtime_id], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        self.interrupt(&transaction, &queued, explanation, explanation)?;
-        transaction.commit()?;
-        Ok(queued.len())
+        self.write(|transaction| {
+            let queued = transaction
+                .prepare(
+                    "SELECT id FROM turns
+                     WHERE state = 'queued' AND agent_id = ?1 AND runtime_id = ?2
+                     ORDER BY acceptance_sequence",
+                )?
+                .query_map(params![agent_id, runtime_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            self.interrupt(transaction, &queued, explanation, explanation)?;
+            Ok(queued.len())
+        })
     }
 
     /// Settles what core was doing when it stopped. Run at startup.
@@ -61,28 +60,27 @@ impl Database {
     /// stays running. A turn of a runtime no longer configured can no
     /// longer be settled, and is interrupted.
     pub(crate) fn recover_running_turns(&self, configured: &[&str]) -> Result<usize> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let gone = transaction
-            .prepare(
-                "SELECT id FROM turns
-                 WHERE state = 'running' AND runtime_id NOT IN (SELECT value FROM json_each(?1))
-                 ORDER BY acceptance_sequence",
-            )?
-            .query_map([serde_json::to_string(configured)?], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        self.interrupt(
-            &transaction,
-            &gone,
-            "its runtime is no longer configured",
-            "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
-        )?;
-        transaction.execute(
-            "UPDATE turns SET state = 'queued'
-             WHERE state = 'running' AND substr(event_id, 1, length(?1)) <> ?1",
-            params![RUNTIME_EVENT_PREFIX],
-        )?;
-        transaction.commit()?;
-        Ok(gone.len())
+        self.write(|transaction| {
+            let gone = transaction
+                .prepare(
+                    "SELECT id FROM turns
+                     WHERE state = 'running' AND runtime_id NOT IN (SELECT value FROM json_each(?1))
+                     ORDER BY acceptance_sequence",
+                )?
+                .query_map([serde_json::to_string(configured)?], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            self.interrupt(
+                transaction,
+                &gone,
+                "its runtime is no longer configured",
+                "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
+            )?;
+            transaction.execute(
+                "UPDATE turns SET state = 'queued'
+                 WHERE state = 'running' AND substr(event_id, 1, length(?1)) <> ?1",
+                params![RUNTIME_EVENT_PREFIX],
+            )?;
+            Ok(gone.len())
+        })
     }
 }

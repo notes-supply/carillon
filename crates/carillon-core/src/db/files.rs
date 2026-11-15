@@ -11,14 +11,12 @@ impl Database {
     /// Every committed attachment reference, for validating the store before
     /// archiving or restoring.
     pub(crate) fn captured_files(&self) -> Result<Vec<CapturedFile>> {
-        let connection =
-            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        captured_files(&connection, None)
+        captured_files(&self.read()?, None)
     }
 
     /// The captures committed turns and answers reference.
     pub(crate) fn captures(&self) -> Result<std::collections::BTreeSet<String>> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare(
             "SELECT capture_id FROM turn_attachments UNION SELECT capture_id FROM answer_files",
         )?;
@@ -29,7 +27,7 @@ impl Database {
     }
 
     pub(crate) fn capture_referenced(&self, capture: &str) -> Result<bool> {
-        Ok(self.connect()?.query_row(
+        Ok(self.read()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turn_attachments WHERE capture_id = ?1)
                  OR EXISTS(SELECT 1 FROM answer_files WHERE capture_id = ?1)",
             [capture],
@@ -39,7 +37,7 @@ impl Database {
 
     /// Bytes kept by every committed capture.
     pub(crate) fn captured_bytes(&self) -> Result<u64> {
-        let bytes: i64 = self.connect()?.query_row(
+        let bytes: i64 = self.read()?.query_row(
             "SELECT (SELECT COALESCE(SUM(size), 0) FROM turn_attachments)
                   + (SELECT COALESCE(SUM(size), 0) FROM answer_files)",
             [],

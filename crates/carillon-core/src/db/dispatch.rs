@@ -49,7 +49,7 @@ impl Database {
     /// conversations itself, so no earlier turn holds it back. One
     /// dispatcher per runtime hands its turns over in acceptance order.
     pub(crate) fn next_dispatch(&self, runtime_id: &str) -> Result<Option<QueuedTurn>> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let turn = connection
             .query_row(
                 &format!(
@@ -70,7 +70,7 @@ impl Database {
     /// The turns core records running on `runtime_id`, oldest first, each
     /// with its event ID, read in one snapshot.
     pub(crate) fn running_turns(&self, runtime_id: &str) -> Result<Vec<(QueuedTurn, String)>> {
-        let mut connection = self.connect()?;
+        let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         let running = transaction
             .prepare(&format!(
@@ -91,11 +91,13 @@ impl Database {
     /// Records that the runtime holds `turn`: it runs there. A turn the
     /// runtime settled before this was recorded keeps its outcome.
     pub(crate) fn dispatched(&self, turn: &QueuedTurn) -> Result<()> {
-        self.connect()?.execute(
-            "UPDATE turns SET state = 'running'
-             WHERE id = ?1 AND runtime_id = ?2 AND state = 'queued'",
-            [&turn.turn_id, &turn.runtime_id],
-        )?;
-        Ok(())
+        self.write(|transaction| {
+            transaction.execute(
+                "UPDATE turns SET state = 'running'
+                 WHERE id = ?1 AND runtime_id = ?2 AND state = 'queued'",
+                [&turn.turn_id, &turn.runtime_id],
+            )?;
+            Ok(())
+        })
     }
 }

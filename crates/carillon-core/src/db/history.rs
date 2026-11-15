@@ -26,7 +26,7 @@ impl Database {
         before: Option<i64>,
         audience_id: Option<&str>,
     ) -> Result<ConversationPage> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut conversations = connection
             .prepare(
                 "SELECT agent_id, audience_id, channel_id, title, started_at, active_at, activity,
@@ -83,7 +83,7 @@ impl Database {
         audience_id: &str,
         before: Option<&str>,
     ) -> Result<Transcript> {
-        let mut connection = self.connect()?;
+        let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         let before = match before {
             None => i64::MAX,

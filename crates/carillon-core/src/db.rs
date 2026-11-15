@@ -1,5 +1,7 @@
 //! Durable operation state. This module owns every turn and delivery state
-//! transition; nothing else writes lifecycle state.
+//! transition; nothing else writes lifecycle state. Each transition is a
+//! closure [`Database::write`] runs in one transaction, and every read takes
+//! a connection from [`Database::read`], which cannot write.
 //!
 //! ```text
 //! turn:      queued -> running -> completed
@@ -46,6 +48,7 @@ mod jobs;
 mod opening;
 mod recovery;
 mod settle;
+mod store;
 
 pub(crate) use admission::Admission;
 pub(crate) use dispatch::QueuedTurn;
@@ -54,11 +57,10 @@ pub(crate) use jobs::JobPage;
 pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
 pub use settle::Settled;
 pub(crate) use settle::Settlement;
+pub(crate) use store::Database;
 
 use std::{
-    collections::BTreeSet,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::Path,
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -72,7 +74,7 @@ use carillon_protocol::{
     turns::Silence,
 };
 use rusqlite::{
-    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params,
+    Connection, OptionalExtension, Row, Transaction, params,
     types::{FromSql, FromSqlError, FromSqlResult, Type, ValueRef},
 };
 use serde::de::DeserializeOwned;
@@ -83,13 +85,6 @@ use crate::attachments::{Capture, CapturedFile};
 #[derive(Debug, thiserror::Error)]
 #[error("database schema is not the current Carillon format")]
 pub(crate) struct OtherFormat;
-
-#[derive(Clone)]
-pub(crate) struct Database {
-    path: PathBuf,
-    /// The interfaces whose people read answers from core's record.
-    retained: BTreeSet<String>,
-}
 
 /// Lifecycle states are stored by their wire names. The wire types live in
 /// the protocol crate, so they are read through this wrapper rather than a
@@ -121,107 +116,9 @@ fn optional_state_column<T: FromStr<Err = anyhow::Error>>(
         .map(|stored| stored.map(|stored| stored.0))
 }
 
-impl Database {
-    pub(crate) fn create(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-            let metadata = std::fs::symlink_metadata(parent)?;
-            if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
-                bail!(
-                    "database directory must be private (0700): {}",
-                    parent.display()
-                );
-            }
-        }
-        let database = Self {
-            path: path.to_path_buf(),
-            retained: BTreeSet::new(),
-        };
-        // Reserve the name atomically before SQLite opens it. Existing files,
-        // including symlinks and incomplete prior creations, are never adopted.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("create fresh database {}", path.display()))?;
-        let connection =
-            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        Self::initialize_connection(&connection)?;
-        Ok(database)
-    }
-
-    pub(crate) fn open(path: &Path) -> Result<Self> {
-        Self::validate_backup(path)?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            retained: BTreeSet::new(),
-        })
-    }
-
-    /// This storage, writing the answers of the `retained` interfaces as
-    /// delivered.
-    pub(crate) fn retaining(self, retained: BTreeSet<String>) -> Self {
-        Self { retained, ..self }
-    }
-
-    fn connect(&self) -> Result<Connection> {
-        let connection =
-            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-                .with_context(|| format!("open {}", self.path.display()))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(connection)
-    }
-
-    /// Validate without creating a missing database or repairing an old schema.
-    pub(crate) fn validate_backup(path: &Path) -> Result<()> {
-        let connection =
-            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let integrity: String =
-            connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            bail!("SQLite integrity check failed: {integrity}");
-        }
-        if connection.prepare("PRAGMA foreign_key_check")?.exists([])? {
-            bail!("SQLite foreign key check failed");
-        }
-        let current = Connection::open_in_memory()?;
-        Self::initialize_connection(&current)?;
-        let schema = |database: &Connection| -> Result<Vec<(String, String, String)>> {
-            Ok(database.prepare(
-                "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
-            )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
-        };
-        if schema(&connection)? != schema(&current)? {
-            return Err(OtherFormat.into());
-        }
-        Ok(())
-    }
-
-    /// Validate every captured resource reference before archiving or restoring.
-    pub(crate) fn validate_resource_snapshots(&self, store: &Path) -> Result<()> {
-        let connection =
-            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut statement =
-            connection.prepare("SELECT DISTINCT resource_snapshot_id FROM turns")?;
-        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
-            crate::resources::validate(&id?, store)
-                .context("backup has missing or altered captured resources")?;
-        }
-        Ok(())
-    }
-
-    fn initialize_connection(connection: &Connection) -> Result<()> {
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS turns (
+/// The current format. A stored database has it when its schema reads as
+/// this text does, whitespace included.
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS turns (
                 acceptance_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 id TEXT NOT NULL UNIQUE,
                 interface_id TEXT NOT NULL,
@@ -302,8 +199,18 @@ impl Database {
                 PRIMARY KEY(interface_id, agent_id, audience_id)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS conversations_activity
-                ON conversations(interface_id, activity);",
-        )?;
+                ON conversations(interface_id, activity);";
+
+impl Database {
+    /// Validate every captured resource reference before archiving or restoring.
+    pub(crate) fn validate_resource_snapshots(&self, store: &Path) -> Result<()> {
+        let connection = self.read()?;
+        let mut statement =
+            connection.prepare("SELECT DISTINCT resource_snapshot_id FROM turns")?;
+        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+            crate::resources::validate(&id?, store)
+                .context("backup has missing or altered captured resources")?;
+        }
         Ok(())
     }
 
@@ -313,7 +220,7 @@ impl Database {
         interface_id: &str,
         event_id: &str,
     ) -> Result<Option<EventReceipt>> {
-        event_receipt(&self.connect()?, interface_id, event_id)
+        event_receipt(&self.read()?, interface_id, event_id)
     }
 
     /// The runtime that took the conversation's latest turn owns it, before any native
@@ -324,7 +231,7 @@ impl Database {
         agent_id: &str,
         audience_id: &str,
     ) -> Result<Option<String>> {
-        conversation_runtime(&self.connect()?, interface_id, agent_id, audience_id)
+        conversation_runtime(&self.read()?, interface_id, agent_id, audience_id)
     }
 
     fn record_delivery(
@@ -341,7 +248,7 @@ impl Database {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         conversations::active(transaction, &interface, &agent, &audience, now)?;
-        let state = if self.retained.contains(&interface) {
+        let state = if self.retains(&interface) {
             DeliveryState::Delivered
         } else {
             DeliveryState::Pending
@@ -370,24 +277,23 @@ impl Database {
         interface_id: &str,
         owner: &str,
     ) -> Result<Vec<String>> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        transaction.execute(
-            "UPDATE deliveries SET claim_owner = NULL, updated_at = ?3,
-                 state = CASE WHEN silence IS NULL THEN 'uncertain' ELSE 'pending' END
-             WHERE interface_id = ?1 AND state = 'delivering'
-               AND (claim_owner IS NULL OR claim_owner <> ?2)",
-            params![interface_id, owner, timestamp()?],
-        )?;
-        let targets = transaction
-            .prepare(
-                "SELECT DISTINCT feedback_target_id FROM deliveries
-                 WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
-            )?
-            .query_map([interface_id], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
-        transaction.commit()?;
-        Ok(targets)
+        self.write(|transaction| {
+            transaction.execute(
+                "UPDATE deliveries SET claim_owner = NULL, updated_at = ?3,
+                     state = CASE WHEN silence IS NULL THEN 'uncertain' ELSE 'pending' END
+                 WHERE interface_id = ?1 AND state = 'delivering'
+                   AND (claim_owner IS NULL OR claim_owner <> ?2)",
+                params![interface_id, owner, timestamp()?],
+            )?;
+            let targets = transaction
+                .prepare(
+                    "SELECT DISTINCT feedback_target_id FROM deliveries
+                     WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
+                )?
+                .query_map([interface_id], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok(targets)
+        })
     }
 
     /// Claims the oldest pending delivery for an interface instance.
@@ -417,62 +323,61 @@ impl Database {
         owner: &str,
         turn_id: Option<&str>,
     ) -> Result<Option<Delivery>> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let mut delivery = transaction
-            .query_row(
-                "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
-                        t.agent_id, t.accepted_at, d.silence
-                 FROM deliveries d
-                 JOIN turns t ON t.id = d.turn_id
-                 WHERE d.interface_id = ?1 AND d.state IN ('pending', 'delivering')
-                   AND (d.state = 'pending' OR d.claim_owner = ?2)
-                   AND (?3 IS NULL OR d.turn_id = ?3)
-                 ORDER BY CASE d.state WHEN 'delivering' THEN 0 ELSE 1 END, d.id LIMIT 1",
-                params![interface_id, owner, turn_id],
-                |row| {
-                    Ok(Delivery {
-                        id: row.get(0)?,
-                        turn_id: row.get(1)?,
-                        target_id: row.get(2)?,
-                        feedback_target_id: row.get(3)?,
-                        content: row.get(4)?,
-                        turn_state: state_column::<TurnState>(row, 5)?,
-                        agent_id: row.get(6)?,
-                        origin: Origin {
+        self.write(|transaction| {
+            let mut delivery = transaction
+                .query_row(
+                    "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
+                            t.agent_id, t.accepted_at, d.silence
+                     FROM deliveries d
+                     JOIN turns t ON t.id = d.turn_id
+                     WHERE d.interface_id = ?1 AND d.state IN ('pending', 'delivering')
+                       AND (d.state = 'pending' OR d.claim_owner = ?2)
+                       AND (?3 IS NULL OR d.turn_id = ?3)
+                     ORDER BY CASE d.state WHEN 'delivering' THEN 0 ELSE 1 END, d.id LIMIT 1",
+                    params![interface_id, owner, turn_id],
+                    |row| {
+                        Ok(Delivery {
+                            id: row.get(0)?,
                             turn_id: row.get(1)?,
-                            accepted_at: row.get(7)?,
-                        },
-                        silence: optional_state_column(row, 8)?,
-                        files: Vec::new(),
-                    })
-                },
-            )
-            .optional()?;
-        if let Some(value) = &mut delivery {
-            value.files = answer_files(&transaction, &value.turn_id)?;
-            let changed = transaction.execute(
-                "UPDATE deliveries SET state = 'delivering', claim_owner = ?2, updated_at = ?3
-                 WHERE id = ?1 AND state = 'pending'",
-                params![value.id, owner, timestamp()?],
-            )?;
-            if changed == 0 {
-                let still_owned = transaction.query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM deliveries
-                        WHERE id = ?1 AND interface_id = ?2
-                          AND state = 'delivering' AND claim_owner = ?3
-                    )",
-                    params![value.id, interface_id, owner],
-                    |row| row.get::<_, bool>(0),
+                            target_id: row.get(2)?,
+                            feedback_target_id: row.get(3)?,
+                            content: row.get(4)?,
+                            turn_state: state_column::<TurnState>(row, 5)?,
+                            agent_id: row.get(6)?,
+                            origin: Origin {
+                                turn_id: row.get(1)?,
+                                accepted_at: row.get(7)?,
+                            },
+                            silence: optional_state_column(row, 8)?,
+                            files: Vec::new(),
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(value) = &mut delivery {
+                value.files = answer_files(transaction, &value.turn_id)?;
+                let changed = transaction.execute(
+                    "UPDATE deliveries SET state = 'delivering', claim_owner = ?2, updated_at = ?3
+                     WHERE id = ?1 AND state = 'pending'",
+                    params![value.id, owner, timestamp()?],
                 )?;
-                if !still_owned {
-                    bail!("delivery {} could not be claimed", value.id);
+                if changed == 0 {
+                    let still_owned = transaction.query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM deliveries
+                            WHERE id = ?1 AND interface_id = ?2
+                              AND state = 'delivering' AND claim_owner = ?3
+                        )",
+                        params![value.id, interface_id, owner],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    if !still_owned {
+                        bail!("delivery {} could not be claimed", value.id);
+                    }
                 }
             }
-        }
-        transaction.commit()?;
-        Ok(delivery)
+            Ok(delivery)
+        })
     }
 
     /// Records the reported outcome of a claimed delivery. Repeating the same
@@ -485,46 +390,44 @@ impl Database {
         outcome: DeliveryOutcome,
         native_ref: Option<&str>,
     ) -> Result<bool> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let desired = DeliveryState::from(outcome);
-        let changed = transaction.execute(
-            "UPDATE deliveries SET state = ?4, native_ref = ?5, claim_owner = NULL, updated_at = ?6
-             WHERE id = ?1 AND interface_id = ?2 AND claim_owner = ?3 AND state = 'delivering'",
-            params![
-                id,
-                interface_id,
-                owner,
-                desired.as_str(),
-                native_ref,
-                timestamp()?
-            ],
-        )?;
-        if changed == 1 {
-            transaction.commit()?;
-            return Ok(true);
-        }
-        let already_recorded = transaction
-            .query_row(
-                "SELECT state, native_ref FROM deliveries WHERE id = ?1 AND interface_id = ?2",
-                params![id, interface_id],
-                |row| {
-                    Ok((
-                        state_column::<DeliveryState>(row, 0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
-            )
-            .optional()?
-            .is_some_and(|(state, recorded_ref)| {
-                state == desired && recorded_ref.as_deref() == native_ref
-            });
-        transaction.commit()?;
-        Ok(already_recorded)
+        self.write(|transaction| {
+            let desired = DeliveryState::from(outcome);
+            let changed = transaction.execute(
+                "UPDATE deliveries SET state = ?4, native_ref = ?5, claim_owner = NULL, updated_at = ?6
+                 WHERE id = ?1 AND interface_id = ?2 AND claim_owner = ?3 AND state = 'delivering'",
+                params![
+                    id,
+                    interface_id,
+                    owner,
+                    desired.as_str(),
+                    native_ref,
+                    timestamp()?
+                ],
+            )?;
+            if changed == 1 {
+                return Ok(true);
+            }
+            let already_recorded = transaction
+                .query_row(
+                    "SELECT state, native_ref FROM deliveries WHERE id = ?1 AND interface_id = ?2",
+                    params![id, interface_id],
+                    |row| {
+                        Ok((
+                            state_column::<DeliveryState>(row, 0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .is_some_and(|(state, recorded_ref)| {
+                    state == desired && recorded_ref.as_deref() == native_ref
+                });
+            Ok(already_recorded)
+        })
     }
 
     pub(crate) fn turn_counts(&self) -> Result<StateCounts> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM turns GROUP BY state")?;
         let rows = statement.query_map([], |row| {
@@ -545,7 +448,7 @@ impl Database {
     }
 
     pub(crate) fn delivery_counts(&self) -> Result<StateCounts> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM deliveries GROUP BY state")?;
         let rows = statement.query_map([], |row| {
@@ -571,7 +474,7 @@ impl Database {
     /// Deliveries of `interfaces` their interface has not yet settled:
     /// waiting to be claimed, or claimed and not acknowledged.
     pub(crate) fn undelivered(&self, interfaces: &[&str]) -> Result<u64> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare(
             "SELECT interface_id, COUNT(*) FROM deliveries
              WHERE state IN ('pending', 'delivering') GROUP BY interface_id",
@@ -593,7 +496,7 @@ impl Database {
         event_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<TurnSummary>> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare(
             "SELECT t.id, t.event_id, t.state, t.accepted_at, d.state
              FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
@@ -611,13 +514,6 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
-}
-
-/// Every read-then-write sequence starts an immediate transaction so writers
-/// serialize up front under the busy timeout instead of failing later on a
-/// deferred read-to-write upgrade.
-fn write_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
-    Ok(connection.transaction_with_behavior(TransactionBehavior::Immediate)?)
 }
 
 /// A turn's final report as stored. The engine keeps it within
@@ -774,6 +670,7 @@ mod tests {
     mod history;
     mod jobs;
     mod ownership;
+    mod store;
 
     #[test]
     fn a_repeated_event_returns_its_first_queued_turn() -> Result<()> {
@@ -864,14 +761,17 @@ mod tests {
             let database = Database::create(&path)?;
             accept(&database, "one", "conversation")?;
             accept(&database, "two", "conversation")?;
-            database.connect()?.execute(
-                "UPDATE turns SET id = 'z-first', accepted_at = 100 WHERE event_id = 'one'",
-                [],
-            )?;
-            database.connect()?.execute(
-                "UPDATE turns SET id = 'a-second', accepted_at = ?1 WHERE event_id = 'two'",
-                [second_timestamp],
-            )?;
+            database.write(|transaction| {
+                transaction.execute(
+                    "UPDATE turns SET id = 'z-first', accepted_at = 100 WHERE event_id = 'one'",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE turns SET id = 'a-second', accepted_at = ?1 WHERE event_id = 'two'",
+                    [second_timestamp],
+                )?;
+                Ok(())
+            })?;
             drop(database);
             let database = Database::open(&path)?;
             let recent = database.recent_turns(None, 10)?;
