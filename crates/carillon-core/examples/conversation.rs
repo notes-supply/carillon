@@ -83,7 +83,7 @@ async fn conversation() -> Result<()> {
             // Opaque interface data is captured on acceptance, not supplied by a duplicate.
             assert_eq!(request.native, event.native);
             handed = Some(request);
-            Ok(())
+            Ok(Ok(()))
         })
         .await?;
     ensure!(step == WorkerStep::Advanced, "no turn handed over");

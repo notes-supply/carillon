@@ -82,10 +82,10 @@ async fn a_turn_its_runtime_refuses_is_heard_of() -> Result<()> {
     let refused = accept(&state, "refused", "conversation").await?;
     let changes = state.core.changes();
     let refuse = async |_| {
-        Err(InboxFailure::Refused {
+        Ok(Err(InboxFailure::Refused {
             status: 422,
             explanation: None,
-        })
+        }))
     };
     state
         .core

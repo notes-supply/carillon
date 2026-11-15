@@ -51,6 +51,10 @@ impl Core {
     /// until the runtime takes it, and then runs there until the runtime
     /// settles it; nothing here waits for its work. Once `stopping` is
     /// cancelled nothing more is handed over.
+    ///
+    /// `submit` runs only with a turn to hand over, so it resolves what a
+    /// hand-over alone needs, such as the runtime's credential. It returns
+    /// the runtime's answer, or fails when core could not ask the runtime.
     /// # Errors
     /// Returns why the turn stays queued: the runtime did not take it, or
     /// registry or storage errors.
@@ -58,7 +62,7 @@ impl Core {
         &self,
         runtime_id: &str,
         stopping: &CancellationToken,
-        submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<(), InboxFailure>,
+        submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<Result<(), InboxFailure>>,
     ) -> Result<WorkerStep, Stalled> {
         if !self
             .runtime(runtime_id)
@@ -82,7 +86,7 @@ impl Core {
             self.refuse(&turn, error, Some(explanation)).await?;
             return Ok(WorkerStep::Advanced);
         }
-        match submit(self.runtime_request(&turn)).await {
+        match submit(self.runtime_request(&turn)).await? {
             Ok(()) => {
                 let held = turn.clone();
                 self.blocking(move |core| core.database.dispatched(&held))

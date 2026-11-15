@@ -337,10 +337,10 @@ async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Resu
     let step = state
         .core
         .dispatch_next("test-runtime", &CancellationToken::new(), async |_| {
-            Err(InboxFailure::Refused {
+            Ok(Err(InboxFailure::Refused {
                 status: 422,
                 explanation: Some(" \n".to_owned()),
-            })
+            }))
         })
         .await?;
     assert_eq!(step, WorkerStep::Advanced);

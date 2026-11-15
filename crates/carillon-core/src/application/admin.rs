@@ -1227,8 +1227,8 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.dispatch_next("runtime-pi", &CancellationToken::new(), async |_| Ok(()))
-            .await?;
+        let (stopping, taken) = (CancellationToken::new(), async |_| Ok(Ok(())));
+        core.dispatch_next("runtime-pi", &stopping, taken).await?;
         let made = directory.path().join("made.txt");
         fs::write(&made, b"made file")?;
         let answer = serde_json::json!({"outcome": "answered", "output": "read", "files": [made]});
@@ -1278,7 +1278,7 @@ mod tests {
                     fs::read(root.join(&request.attachments[0].path)).ok(),
                     Some(b"queued file".to_vec())
                 );
-                Ok(())
+                Ok(Ok(()))
             })
             .await?;
 

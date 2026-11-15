@@ -197,8 +197,9 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
     }
 }
 
-/// One step of a runtime's dispatcher: its oldest queued turn,
-/// handed over.
+/// One step of a runtime's dispatcher: its oldest queued turn, handed
+/// over. Only a hand-over reads the runtime's credential, so a look that
+/// finds nothing queued cannot fail on it.
 pub(super) async fn dispatch_next(
     state: &AppState,
     runtime_id: &str,
@@ -209,15 +210,12 @@ pub(super) async fn dispatch_next(
     if !runtime.enabled {
         return Ok(WorkerStep::Backoff);
     }
-    let client = RuntimeClient::new(
-        state.client.clone(),
-        runtime.url.clone(),
-        runtime_token(&config, runtime)?,
-    );
     state
         .core
         .dispatch_next(runtime_id, stopping, async |request| {
-            client.submit(&request).await
+            let token = runtime_token(&config, runtime)?;
+            let client = RuntimeClient::new(state.client.clone(), runtime.url.clone(), token);
+            Ok(client.submit(&request).await)
         })
         .await
 }

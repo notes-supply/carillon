@@ -23,9 +23,11 @@ mise run example:core
   queued message, with no wait for the conversation's earlier turns. The
   turn becomes running once the runtime takes it; `InboxFailure::Later`
   and `Misinstalled` leave it queued to be handed over again, in order, and
-  `Refused` interrupts it with the runtime's explanation. Once `stopping` is
-  cancelled it hands over nothing more. A dispatcher that finds nothing
-  queued waits on `changes()` instead of polling; the service's
+  `Refused` interrupts it with the runtime's explanation. `submit` runs only
+  with a turn to hand over, and returns the runtime's answer. When core
+  cannot ask the runtime, `submit` fails and the turn stays queued. Once
+  `stopping` is cancelled it hands over nothing more. A dispatcher that
+  finds nothing queued waits on `changes()` instead of polling; the service's
   dispatcher backs off from 1 to 60 seconds while its runtime takes
   nothing, logging each new kind of failure and the recovery once.
 - Core marks `changes()` after every commit that changed a row of its

@@ -110,7 +110,7 @@ async fn hand_next(core: &Core, runtime_id: &str) -> Result<Option<RuntimeTurnRe
     let mut handed = None;
     core.dispatch_next(runtime_id, &CancellationToken::new(), async |request| {
         handed = Some(request);
-        Ok(())
+        Ok(Ok(()))
     })
     .await?;
     Ok(handed)
