@@ -28,6 +28,11 @@ mise run example:core
   have been queued, so a dispatcher waits instead of polling; the service's
   dispatcher backs off from 1 to 60 seconds while its runtime takes
   nothing, logging each new kind of failure and the recovery once.
+- Core marks `changes()` after every commit that changed a row of its
+  storage. A mark says to look again and no more. Marks coalesce, and
+  carry no count and no revision. A commit that changed no row is silent,
+  such as a repeated event or a delivery claim that found nothing. One
+  that wrote a row the values it already had may mark it.
 - `settle(runtime, turn, outcome)` records how a turn the runtime holds
   ended. An answer's files are copied first, unless the turn already ended.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
@@ -94,7 +99,8 @@ another runtime's turns never hold back a conversation's messages.
   its submodules for admission, job reads, history reads, recovery and held
   turns. [`db/store.rs`](src/db/store.rs) alone opens connections.
   `read()` gives one that cannot write. `write()` runs a closure in a
-  transaction and commits it, so every write commits in one place.
+  transaction, commits it and marks `changes()` if it changed a row. A new
+  write goes through `write()`, so its change cannot commit unannounced.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
   [`intake.rs`](src/intake.rs), [`answers.rs`](src/answers.rs): captured
   resources, messages' files and answers' files.

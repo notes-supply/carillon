@@ -1,6 +1,8 @@
-//! Core's SQLite file. The path is private to this module, so the rest of
-//! `db` reaches SQLite only through [`Database::read`] and
-//! [`Database::write`].
+//! Core's SQLite file and the one signal that what it stores changed. The
+//! path is private to this module, so the rest of `db` reaches SQLite only
+//! through [`Database::read`] and [`Database::write`]. A commit that changed
+//! a row marks [`Database::changes`], and a commit that changed none is
+//! silent.
 
 use std::{
     collections::BTreeSet,
@@ -11,6 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use tokio::sync::watch;
 
 use super::{OtherFormat, SCHEMA};
 
@@ -19,6 +22,7 @@ pub(crate) struct Database {
     path: PathBuf,
     /// The interfaces whose people read answers from core's record.
     retained: BTreeSet<String>,
+    changes: watch::Sender<()>,
 }
 
 impl Database {
@@ -59,6 +63,7 @@ impl Database {
         Self {
             path: path.to_path_buf(),
             retained: BTreeSet::new(),
+            changes: watch::Sender::new(()),
         }
     }
 
@@ -84,7 +89,9 @@ impl Database {
     }
 
     /// The one way to change what is stored. `work` commits when it returns
-    /// `Ok`, and what it wrote is discarded when it fails.
+    /// `Ok`, and a commit that changed a row marks [`Self::changes`] here,
+    /// so no caller announces its own write. A commit that changed no row
+    /// marks nothing; one that wrote a row the values it already had may.
     ///
     /// The transaction is immediate, so writers serialize up front under
     /// the busy timeout instead of failing later on a deferred
@@ -94,9 +101,21 @@ impl Database {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = transaction.total_changes();
         let value = work(&transaction)?;
+        let changed = transaction.total_changes() != before;
         transaction.commit()?;
+        // Closed before the mark. The last connection checkpoints as it
+        // closes, and a reader the mark woke would wait behind that.
+        drop(connection);
+        if changed {
+            self.changes.send_replace(());
+        }
         Ok(value)
+    }
+
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.changes.subscribe()
     }
 
     /// Validate without creating a missing database or repairing an old schema.
