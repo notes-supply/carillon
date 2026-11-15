@@ -473,3 +473,5 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
     supervisor.await?;
     Ok(())
 }
+
+mod handover;

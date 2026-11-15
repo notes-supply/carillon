@@ -203,18 +203,6 @@ impl Core {
         self.storage.wait().await;
     }
 
-    /// Marked after every commit that changed a row of this handle's
-    /// storage, through it or its clones. A commit that changed no row
-    /// leaves it unmarked, such as a repeated event or a claim that found
-    /// nothing; one that wrote a row the values it already had may mark it.
-    /// A mark says to look again and no more. Marks coalesce, and carry no
-    /// count and no revision. Marking the receiver seen before each look
-    /// means no change is missed.
-    #[must_use]
-    pub fn changes(&self) -> watch::Receiver<()> {
-        self.database.changes()
-    }
-
     /// Changes whenever a turn may have been queued through this handle or
     /// its clones, or the runtimes changed. A dispatcher that finds nothing
     /// to hand over waits for the next change rather than polling; marking

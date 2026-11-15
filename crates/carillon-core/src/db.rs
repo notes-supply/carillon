@@ -665,7 +665,6 @@ mod tests {
         Ok(())
     }
 
-    mod changes;
     mod deliveries;
     mod format;
     mod history;
