@@ -9,7 +9,7 @@
 //! the one before: a slow reader gets the latest state when it reads again,
 //! never a backlog, and a reader that goes away leaves nothing behind.
 
-use std::{convert::Infallible, future, time::Duration};
+use std::{convert::Infallible, future, io, time::Duration};
 
 use anyhow::Result;
 use axum::{
@@ -37,10 +37,26 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const COMPOSITION_GAP: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "this view's snapshot takes {0} bytes, over the {SNAPSHOT_LIMIT} a snapshot may take: ask for fewer turns"
-)]
-struct TooLarge(usize);
+#[error("this view's snapshot takes over {SNAPSHOT_LIMIT} bytes: ask for fewer turns")]
+struct TooLarge;
+
+/// The bytes of one snapshot, which take no more than [`SNAPSHOT_LIMIT`]:
+/// a snapshot over it stops being serialized there.
+struct Serialized(Vec<u8>);
+
+impl io::Write for Serialized {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.len() + bytes.len() > SNAPSHOT_LIMIT {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// One reader's stream of a view.
 struct Observation {
@@ -114,13 +130,18 @@ impl Observation {
             .core
             .snapshot(&self.interface_id, &self.view, sample)
             .await?;
-        let serialized = serde_json::to_string(&snapshot)?;
+        let mut serialized = Serialized(Vec::new());
+        // The writer fails for one reason only.
+        serde_json::to_writer(&mut serialized, &snapshot).map_err(|error| {
+            if error.is_io() {
+                TooLarge.into()
+            } else {
+                anyhow::Error::from(error)
+            }
+        })?;
         self.composed = Instant::now();
         self.running = shows_a_running_turn(&snapshot);
-        if serialized.len() > SNAPSHOT_LIMIT {
-            return Err(TooLarge(serialized.len()).into());
-        }
-        Ok(serialized)
+        Ok(String::from_utf8(serialized.0)?)
     }
 
     /// The next snapshot to send, once what the view shows differs from
