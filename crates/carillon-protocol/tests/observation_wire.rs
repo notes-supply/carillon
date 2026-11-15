@@ -2,8 +2,7 @@
 //! travels as a query string, and what neither may say is refused.
 use anyhow::{Context as _, Result, ensure};
 use carillon_protocol::observation::{
-    ConversationKey, InvalidView, KEY_PART_LIMIT, Limit, ObservedTurn, OpenView, Opened, Snapshot,
-    View,
+    ConversationKey, InvalidView, Limit, ObservedTurn, OpenView, Opened, Snapshot, View,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -109,7 +108,6 @@ fn a_view_travels_as_a_query_string_with_fifty_items_where_it_names_no_number() 
 #[test]
 fn a_view_is_refused_for_a_window_out_of_range_half_a_key_or_anything_else_it_names() -> Result<()>
 {
-    let long = "a".repeat(KEY_PART_LIMIT + 1);
     let window = InvalidView::Limit.to_string();
     let named = InvalidView::Key.to_string();
     for (query, reason) in [
@@ -123,8 +121,6 @@ fn a_view_is_refused_for_a_window_out_of_range_half_a_key_or_anything_else_it_na
         ("audience_id=b", &named),
         ("agent_id=&audience_id=b", &named),
         ("agent_id=a&audience_id=", &named),
-        (&format!("agent_id={long}&audience_id=b"), &named),
-        (&format!("agent_id=a&audience_id={long}"), &named),
         (
             "turns=10",
             &InvalidView::TurnsWithoutConversation.to_string(),
@@ -140,8 +136,6 @@ fn a_view_is_refused_for_a_window_out_of_range_half_a_key_or_anything_else_it_na
             "{query} was refused for another reason: {error}"
         );
     }
-    let longest = "a".repeat(KEY_PART_LIMIT);
-    assert_eq!(key(&longest, &longest)?.agent_id(), longest);
     assert_eq!(Limit::new(0), Err(InvalidView::Limit));
     assert_eq!(Limit::new(Limit::MAX).map(Limit::get), Ok(500));
     Ok(())

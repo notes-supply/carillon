@@ -178,6 +178,23 @@ async fn an_interface_is_shown_its_own_conversations_and_never_anothers() -> Res
 }
 
 #[tokio::test]
+async fn an_audience_no_key_can_name_is_refused_and_records_no_conversation() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let refused = say(&state, "test-interface", "one", "", "hello".to_owned())
+        .await
+        .err()
+        .context("accepted a message with no audience")?;
+    assert!(
+        matches!(refused.downcast_ref(), Some(CoreError::InvalidInput(_))),
+        "{refused:#}"
+    );
+    let snapshot = shown(&state.core, "test-interface", &View::default()).await?;
+    assert_eq!(snapshot.conversations, []);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_view_lists_the_latest_active_conversations_and_the_open_ones_newest_turns() -> Result<()>
 {
     let directory = tempdir()?;

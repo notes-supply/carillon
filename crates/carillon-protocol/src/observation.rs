@@ -25,17 +25,12 @@ pub const SNAPSHOT_EVENT: &str = "snapshot";
 /// keep-alive comment. A reader gives up on one silent for three of these.
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
-/// The most bytes either part of a [`ConversationKey`] takes.
-pub const KEY_PART_LIMIT: usize = 1024;
-
 /// Why a view cannot be asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidView {
     #[error("a window holds 1 to {} items", Limit::MAX)]
     Limit,
-    #[error(
-        "a conversation is named by its agent and its audience, each of 1 to {KEY_PART_LIMIT} bytes"
-    )]
+    #[error("a conversation is named by its agent and its audience, and neither is empty")]
     Key,
     #[error("a window of turns needs the conversation they belong to")]
     TurnsWithoutConversation,
@@ -86,7 +81,8 @@ impl From<Limit> for u16 {
 }
 
 /// One conversation of an interface, which its agent and its audience name
-/// together. Neither part is empty.
+/// together. Neither part is empty, and core asks no more of them when it
+/// accepts a message, so every conversation it records has a key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(try_from = "KeyParts", into = "KeyParts")]
 pub struct ConversationKey {
@@ -103,11 +99,9 @@ struct KeyParts {
 impl ConversationKey {
     /// # Errors
     ///
-    /// Returns [`InvalidView::Key`] when a part is empty or longer than
-    /// [`KEY_PART_LIMIT`].
+    /// Returns [`InvalidView::Key`] when a part is empty.
     pub fn new(agent_id: String, audience_id: String) -> Result<Self, InvalidView> {
-        let named = |part: &str| !part.is_empty() && part.len() <= KEY_PART_LIMIT;
-        if !named(&agent_id) || !named(&audience_id) {
+        if agent_id.is_empty() || audience_id.is_empty() {
             return Err(InvalidView::Key);
         }
         Ok(Self {

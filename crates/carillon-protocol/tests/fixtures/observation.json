@@ -281,7 +281,7 @@
           "audience_id": "someone"
         }
       },
-      "refused_for": "each of 1 to 1024 bytes"
+      "refused_for": "neither is empty"
     },
     {
       "open": {

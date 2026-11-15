@@ -18,6 +18,7 @@ use carillon_protocol::model::{
     EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
     RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
 };
+use carillon_protocol::observation::ConversationKey;
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
 use std::{
@@ -664,10 +665,12 @@ impl Core {
     }
 
     fn admit(&self, event: &ExternalEvent) -> Result<(), CoreError> {
-        if event.event_id.is_empty()
-            || event.agent_id.is_empty()
+        // An observation shows a conversation under the key its agent and
+        // its audience make, so the key decides which of them are accepted.
+        let named = ConversationKey::new(event.agent_id.clone(), event.audience_id.clone());
+        if named.is_err()
+            || event.event_id.is_empty()
             || event.user_id.is_empty()
-            || event.audience_id.is_empty()
             || event.delivery_target_id.is_empty()
             || event.feedback_target_id.is_empty()
             || (event.content.trim().is_empty()
