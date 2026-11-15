@@ -58,8 +58,8 @@ tailscale serve --bg --https=43804 http://127.0.0.1:43804
 
 Without `--https`, Tailscale takes 443, which other services often want and
 which Funnel can publish. Funnel uses only 443, 8443 and 10000, so keep the
-chat on any other port. The two do not collide: Tailscale
-listens on the tailnet, the provider on loopback.
+chat on any other port, even if the provider's own is one of them. The two do
+not collide: Tailscale listens on the tailnet, the provider on loopback.
 
 Tailscale asks you to enable HTTPS certificates for the tailnet the first
 time. Add the address it prints to the provider's settings file,
