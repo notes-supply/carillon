@@ -1,0 +1,80 @@
+id: svelte-raw-html
+language: html
+severity: error
+message: Only Prose.svelte inserts HTML, and only the provider's rendered answer.
+files:
+  - packages/web/src/**/*.svelte
+ignores:
+  - packages/web/src/transcript/Prose.svelte
+rule:
+  kind: text
+  regex: "\\{@html\\b"
+---
+id: svelte-inline-style
+language: html
+severity: error
+message: The page's policy refuses a style attribute. Use a class, or `style:property` for one computed value.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: attribute_name
+  regex: "^style$"
+---
+id: svelte-component-style
+language: html
+severity: error
+message: The page has one stylesheet, `public/style.css`. A component brings none.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: style_element
+---
+id: svelte-untyped-script
+language: html
+severity: error
+message: A component's script is TypeScript. Write `<script lang="ts">`.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: script_element
+  not:
+    has:
+      kind: start_tag
+      has:
+        kind: attribute
+        regex: "^lang=\"ts\"$"
+---
+id: svelte-markup-comment
+language: html
+severity: error
+message: The page's code has no comments.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: comment
+---
+id: svelte-inline-attachment
+language: html
+severity: error
+message: An attachment or action is written in a wrapper module and named here. One written inline is an effect in a component.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  any:
+    - kind: attribute_name
+      regex: "^use:"
+    - kind: attribute
+      regex: "^\\{@attach$"
+      precedes:
+        kind: attribute
+        regex: "^[^A-Za-z_$]"
+---
+id: svelte-options
+language: html
+severity: error
+message: Compiler options are set once, in vite.config.ts. A component does not override them.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: tag_name
+  regex: "^svelte:options$"

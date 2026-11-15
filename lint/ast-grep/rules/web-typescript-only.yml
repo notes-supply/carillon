@@ -1,0 +1,11 @@
+id: web-typescript-only
+language: javascript
+severity: error
+message: The page is TypeScript. A JavaScript file here is unchecked, or types itself in comments.
+files:
+  - packages/web/src/**/*.js
+  - packages/web/src/**/*.mjs
+  - packages/web/src/**/*.cjs
+  - packages/web/src/**/*.jsx
+rule:
+  kind: program

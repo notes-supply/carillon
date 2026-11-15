@@ -1,0 +1,20 @@
+{
+  "name": "@carillon/web",
+  "version": "0.1.0-beta.11",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings"
+  },
+  "dependencies": {
+    "eventsource-parser": "4.1.3",
+    "svelte": "5.57.3",
+    "typebox": "catalog:"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "svelte-check": "4.7.8",
+    "typescript": "6.0.3"
+  }
+}

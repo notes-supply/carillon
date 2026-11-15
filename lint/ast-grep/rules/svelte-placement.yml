@@ -1,0 +1,21 @@
+id: web-domain-directory-svelte
+language: html
+severity: error
+message: A module lives in the directory of what it is about, one of api, session, rail, transcript, activity, composer, time.
+note: A new directory is a new domain. Add it to this rule on purpose, in a change of its own.
+files:
+  - packages/web/src/*/**
+ignores:
+  - packages/web/src/{api,session,rail,transcript,activity,composer,time}/**
+rule:
+  kind: document
+---
+id: web-junk-drawer-svelte
+language: html
+severity: error
+message: A file or directory named for no subject collects unrelated code. Name it for what it holds.
+files:
+  - packages/web/src/**/{utils,util,helpers,helper,model,models,pure,common,shared,misc,lib,types}.*
+  - packages/web/src/**/{utils,util,helpers,helper,model,models,pure,common,shared,misc,lib,types}/**
+rule:
+  kind: document

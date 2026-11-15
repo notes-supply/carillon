@@ -77,6 +77,8 @@ run = [
   "oxlint packages crates/carillon-web --deny-warnings --report-unused-disable-directives-severity error",
   "tsc --noEmit",
   "tsc --noEmit -p crates/carillon-web",
+  "tsc --noEmit -p packages/web",
+  "pnpm --dir packages/web run check",
   "knip --no-progress",
   "vitest run",
 ]

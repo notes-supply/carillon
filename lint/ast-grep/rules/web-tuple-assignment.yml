@@ -1,0 +1,13 @@
+id: web-tuple-assignment
+language: typescript
+severity: error
+message: Assign each name on its own line. A tuple of names set from a list of values hides which value goes where.
+files:
+  - packages/web/src/**
+rule:
+  any:
+    - pattern: "[$$$NAMES] = [$$$VALUES]"
+    - kind: variable_declarator
+      all:
+        - has: { field: name, kind: array_pattern }
+        - has: { field: value, kind: array }

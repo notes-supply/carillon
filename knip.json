@@ -7,6 +7,9 @@
     },
     "packages/runtime-pi": {
       "entry": ["src/crash-worker.ts"]
+    },
+    "packages/web": {
+      "project": ["src/**"]
     }
   }
 }

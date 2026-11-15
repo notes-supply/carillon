@@ -1,0 +1,9 @@
+id: web-no-comments
+language: typescript
+severity: error
+message: The page's code has no comments. Say it in a name, a type or a test.
+note: A lint directive is a comment too. Fix what the lint found.
+files:
+  - packages/web/src/**
+rule:
+  kind: comment
