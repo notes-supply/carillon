@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    path::Path as FilePath,
     sync::{Arc, Mutex, PoisonError, Weak},
     time::Duration,
 };
@@ -16,15 +17,18 @@ use axum::{
     Json,
     extract::{
         Multipart, Path, Query, State,
-        multipart::{MultipartError, MultipartRejection},
+        multipart::{Field, MultipartError, MultipartRejection},
     },
     http::StatusCode,
 };
-use carillon_installation::config::AttachmentLimits;
+use carillon_installation::config::{AttachmentLimits, MIB};
 use carillon_interface::{Batch, InterfaceError, submit_event_with_retry};
 use carillon_protocol::{
     conversations::ConversationSummary,
-    model::{ExternalEvent, INTENT_COMMAND, NATIVE_INTENT, StagedAttachments, StagedFile},
+    model::{
+        EVENT_BODY_LIMIT, ExternalEvent, INTENT_COMMAND, NATIVE_INTENT, StagedAttachments,
+        StagedFile,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -116,82 +120,118 @@ fn as_chosen(name: &str) -> String {
         .replace("%0A", "\n")
 }
 
-/// Reads the request's parts: `text`, then any number of `file`. A part
-/// past core's limits is not kept, and the rest of the body is still read
-/// before the refusal is given: a browser that is answered while it
-/// uploads reports a broken connection and not the answer.
+fn too_long() -> InterfaceError {
+    refusal(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        &format!(
+            "A message takes about {} MiB of text at most.",
+            EVENT_BODY_LIMIT as u64 / MIB
+        ),
+    )
+}
+
+/// A `text` part, or `None` for one longer than any event core reads.
+async fn written(part: &mut Field<'_>) -> Result<Option<String>, InterfaceError> {
+    let mut text = Vec::new();
+    while let Some(chunk) = part.chunk().await.map_err(malformed)? {
+        if text.len() + chunk.len() > EVENT_BODY_LIMIT {
+            return Ok(None);
+        }
+        text.extend_from_slice(&chunk);
+    }
+    Ok(Some(String::from_utf8_lossy(&text).into_owned()))
+}
+
+/// Stages a `file` part at `path`, or `None` for one of more than `room`
+/// bytes.
+async fn staged(
+    part: &mut Field<'_>,
+    room: u64,
+    path: &FilePath,
+) -> Result<Option<StagedFile>, InterfaceError> {
+    let name = match part.file_name().map(as_chosen) {
+        Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ => "file".to_owned(),
+    };
+    let content_type = part.content_type().map(str::to_owned);
+    let mut file = File::create(path).await.context("stage a file")?;
+    let mut size = 0_u64;
+    while let Some(chunk) = part.chunk().await.map_err(malformed)? {
+        size += chunk.len() as u64;
+        if size > room {
+            return Ok(None);
+        }
+        file.write_all(&chunk).await.context("stage a file")?;
+    }
+    file.flush().await.context("stage a file")?;
+    Ok(Some(StagedFile {
+        name,
+        size,
+        content_type,
+    }))
+}
+
+/// Reads the request's parts: at most one `text`, and `file`s within
+/// core's limits, in any order. The first part that is something else or
+/// past a limit refuses the message, and no later part is kept. The rest
+/// of the body is still read before the refusal is given: a browser that
+/// is answered while it uploads reports a broken connection and not the
+/// answer.
 async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
     mut parts: Multipart,
 ) -> Result<(String, Vec<StagedFile>), InterfaceError> {
-    let (mut text, mut files) = (String::new(), Vec::new());
+    let (mut text, mut files) = (None, Vec::new());
     let mut total = 0_u64;
     let mut refused = None;
     while let Some(mut part) = parts.next_field().await.map_err(malformed)? {
-        match part.name() {
-            Some("text") => text = part.text().await.map_err(malformed)?,
-            Some("file") => {
-                if files.len() >= limits.max_files as usize {
-                    refused.get_or_insert_with(|| {
-                        refusal(
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            &format!("A message carries at most {} files.", limits.max_files),
-                        )
-                    });
-                }
-                let name = match part.file_name().map(as_chosen) {
-                    Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
-                    _ => "file".to_owned(),
-                };
-                let content_type = part.content_type().map(str::to_owned);
-                let mut file = match refused {
-                    None => Some(
-                        File::create(batch.file(files.len()))
-                            .await
-                            .context("stage a file")?,
-                    ),
-                    Some(_) => None,
-                };
-                let mut size = 0_u64;
-                while let Some(chunk) = part.chunk().await.map_err(malformed)? {
-                    size += chunk.len() as u64;
-                    if size > limits.max_file_bytes() || total + size > limits.max_event_bytes() {
-                        refused.get_or_insert_with(|| {
-                            refusal(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                &format!(
-                                    "A file may have at most {} MiB, and a message's files {} \
-                                     MiB together.",
-                                    limits.max_file_mib, limits.max_event_mib
-                                ),
-                            )
-                        });
-                        file = None;
-                    }
-                    if let Some(file) = &mut file {
-                        file.write_all(&chunk).await.context("stage a file")?;
-                    }
-                }
-                if let Some(mut file) = file {
-                    file.flush().await.context("stage a file")?;
-                }
-                total += size;
-                files.push(StagedFile {
-                    name,
-                    size,
-                    content_type,
-                });
-            }
-            _ => {
-                return Err(refusal(
-                    StatusCode::BAD_REQUEST,
-                    "A message's parts are `text` and `file`.",
-                ));
-            }
+        if refused.is_some() {
+            continue;
         }
+        refused = match part.name() {
+            Some("text") if text.is_none() => {
+                text = written(&mut part).await?;
+                text.is_none().then(too_long)
+            }
+            Some("text") => Some(refusal(
+                StatusCode::BAD_REQUEST,
+                "A message has one `text` part.",
+            )),
+            Some("file") if files.len() >= limits.max_files as usize => Some(refusal(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("A message carries at most {} files.", limits.max_files),
+            )),
+            Some("file") => {
+                let room = limits
+                    .max_file_bytes()
+                    .min(limits.max_event_bytes() - total);
+                match staged(&mut part, room, &batch.file(files.len())).await? {
+                    Some(file) => {
+                        total += file.size;
+                        files.push(file);
+                        None
+                    }
+                    None => Some(refusal(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        &format!(
+                            "A file may have at most {} MiB, and a message's files {} MiB \
+                             together.",
+                            limits.max_file_mib, limits.max_event_mib
+                        ),
+                    )),
+                }
+            }
+            _ => Some(refusal(
+                StatusCode::BAD_REQUEST,
+                "A message's parts are `text` and `file`.",
+            )),
+        };
     }
-    refused.map_or(Ok((text, files)), Err)
+    match refused {
+        Some(refused) => Err(refused),
+        None => Ok((text.unwrap_or_default(), files)),
+    }
 }
 
 /// `PUT /api/conversations/{id}/messages/{event_id}[?agent=][&command=true]`:
@@ -237,6 +277,12 @@ pub(crate) async fn send(
             files,
         }),
     };
+    // JSON escapes the text, so text read within the limit can make an
+    // event past it.
+    let event_bytes = serde_json::to_vec(&event).context("write a message as an event")?;
+    if event_bytes.len() > EVENT_BODY_LIMIT {
+        return Err(too_long());
+    }
     // Core copies the files before it answers, which can take minutes. The
     // submission runs in a task of its own, so a browser that leaves does
     // not end it and take the staged files from under core.
