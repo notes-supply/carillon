@@ -1,5 +1,6 @@
 //! Admission, runtime ownership, hand-over and delivery over one SQLite authority.
 mod dispatch;
+mod observation;
 mod ownership;
 mod settle;
 

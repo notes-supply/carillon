@@ -11,8 +11,9 @@ use carillon_protocol::conversations::{
 };
 
 use super::{
-    CapturedFile, Database, OptionalExtension, RUNTIME_EVENT_PREFIX, Result, answer_files,
-    captured_files, optional_json_column, optional_state_column, params, state_column,
+    CapturedFile, Database, OptionalExtension, Result, answer_files, captured_files,
+    observation::{CONVERSATION_COLUMNS, source},
+    optional_json_column, optional_state_column, params, state_column,
 };
 
 impl Database {
@@ -28,16 +29,12 @@ impl Database {
     ) -> Result<ConversationPage> {
         let connection = self.read()?;
         let mut conversations = connection
-            .prepare(
-                "SELECT agent_id, audience_id, channel_id, title, started_at, active_at, activity,
-                     (SELECT COUNT(*) FROM turns INDEXED BY turns_interface_unfinished
-                      WHERE interface_id = ?1 AND state IN ('queued', 'running')
-                        AND agent_id = c.agent_id AND audience_id = c.audience_id)
-                 FROM conversations c
+            .prepare(&format!(
+                "SELECT {CONVERSATION_COLUMNS} FROM conversations c
                  WHERE interface_id = ?1 AND activity < ?2
                    AND (?4 IS NULL OR audience_id = ?4)
-                 ORDER BY activity DESC LIMIT ?3",
-            )?
+                 ORDER BY activity DESC LIMIT ?3"
+            ))?
             .query_map(
                 params![
                     interface_id,
@@ -117,19 +114,6 @@ impl Database {
                     i64::try_from(HISTORY_PAGE_LIMIT + 1)?
                 ],
                 |row| {
-                    let (event_id, input): (String, String) = (row.get(1)?, row.get(2)?);
-                    let source = if event_id.starts_with(RUNTIME_EVENT_PREFIX) {
-                        TurnSource::Opened {
-                            label: Some(input).filter(|label| !label.is_empty()),
-                        }
-                    } else {
-                        TurnSource::Message {
-                            event_id,
-                            text: input,
-                            command: row.get(3)?,
-                            files: Vec::new(),
-                        }
-                    };
                     let answer = row
                         .get::<_, Option<String>>(8)?
                         .map(|content| {
@@ -143,7 +127,7 @@ impl Database {
                         .transpose()?;
                     Ok(TranscriptTurn {
                         turn_id: row.get(0)?,
-                        source,
+                        source: source(row.get(1)?, row.get(2)?, row.get(3)?),
                         state: state_column(row, 4)?,
                         accepted_at: row.get(5)?,
                         finished_at: row.get(6)?,

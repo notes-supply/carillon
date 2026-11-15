@@ -22,12 +22,6 @@ struct Fixture {
     client: Client,
 }
 
-impl Fixture {
-    fn snapshot_store(&self) -> PathBuf {
-        self.core.snapshot_store()
-    }
-}
-
 fn installation(root: &Path) -> Result<Fixture> {
     use carillon_installation::config::{AgentConfig, Config, CoreConfig};
 
@@ -422,7 +416,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
             .claim_delivery("test-interface", "instance")?
             .is_none()
     );
-    let snapshot = state.snapshot_store();
+    let snapshot = state.core.snapshot_store();
     fs::write(
         state.config.value.resource_roots()[0].join("SYSTEM.md"),
         "changed after acceptance",
@@ -923,6 +917,7 @@ mod health;
 mod held;
 mod live;
 mod maintenance;
+mod observe;
 mod reserved;
 mod retained;
 mod settings;
