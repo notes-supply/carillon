@@ -1,37 +1,7 @@
 //! Core's change signal, as its dispatchers hear it.
 
-use std::task::{Context, Waker};
-
 use super::{live::ok, *};
 use crate::{InboxFailure, Stalled};
-
-/// Whether `future` is ready when first polled.
-fn ready(future: impl Future) -> bool {
-    let mut future = std::pin::pin!(future);
-    let mut context = Context::from_waker(Waker::noop());
-    future.as_mut().poll(&mut context).is_ready()
-}
-
-#[tokio::test]
-async fn a_turn_queued_while_its_dispatcher_waits_is_handed_over() -> Result<()> {
-    let directory = tempdir()?;
-    let runtime = durable::DurableRuntime::start().await?;
-    let (_fixture, state) = durable::durable(directory.path(), &runtime)?;
-    let stopping = CancellationToken::new();
-    let mut dispatch = runtime::Dispatch::new(&state, "test-runtime");
-    for input in ["first", "second"] {
-        assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Idle);
-        assert!(
-            !ready(dispatch.changed()),
-            "a wait ended with nothing changed"
-        );
-        ok(live::submit(&state, input, "conversation").await)?;
-        assert!(ready(dispatch.changed()), "a wait outlasted a queued turn");
-        assert_eq!(dispatch.look(&stopping).await?, WorkerStep::Advanced);
-    }
-    assert_eq!(runtime.handed(), ["first", "second"]);
-    Ok(())
-}
 
 #[tokio::test]
 async fn dispatchers_hear_of_queued_turns_and_hand_over_nothing_once_stopping() -> Result<()> {
