@@ -37,6 +37,8 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+carillon-interface = { path = "../carillon-interface" }
+socket2 = "0.6.5"
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5.2", features = ["util"] }
 
