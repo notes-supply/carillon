@@ -4,7 +4,7 @@ use super::{
     live::{HeldRuntime, ok, serving, workers_are},
     *,
 };
-use crate::InboxFailure;
+use crate::{InboxFailure, Stalled};
 
 #[tokio::test]
 async fn a_turn_queued_while_its_dispatcher_waits_is_handed_over() -> Result<()> {
@@ -94,5 +94,25 @@ async fn a_turn_its_runtime_refuses_is_heard_of() -> Result<()> {
     assert!(changes.has_changed()?);
     let turn = state.core.inspect_turn(&refused.turn_id)?.context("turn")?;
     assert_eq!(turn.state, TurnState::Interrupted);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_credential_stalls_only_a_turn_to_hand_over() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = durable::DurableRuntime::start().await?;
+    let (_fixture, state) = durable::durable(directory.path(), &runtime)?;
+    let credential = directory.path().join("credentials/test-runtime.token");
+    fs::remove_file(&credential)?;
+    // Every commit makes a dispatcher look. A look that failed with nothing
+    // queued would have it back off, and sleep through the next turn.
+    assert_eq!(durable::dispatch(&state).await?, WorkerStep::Idle);
+    ok(live::submit(&state, "one", "conversation").await)?;
+    let stalled = durable::dispatch(&state).await.err();
+    let stalled = stalled.context("a turn was handed over with no credential")?;
+    assert!(matches!(stalled, Stalled::Core(_)), "{stalled}");
+    fs::write(&credential, "test-only")?;
+    assert_eq!(durable::dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(runtime.handed(), ["one"]);
     Ok(())
 }
