@@ -273,6 +273,23 @@ function rail(now: number): World {
   return held;
 }
 
+/** The rail's world with a second agent, a conversation of its own, and the owner's copy of the page. */
+function header(now: number): World {
+  const held = rail(now);
+  held.agents.push({ id: "scout", name: "Scout" });
+  held.custom_site = true;
+  ago(held, 120, () => {
+    const scouting = { agent_id: "scout", audience_id: audience(5) };
+    const eventId = `m-${audience(100_000 + held.events.size)}`;
+    admit(held, scouting, eventId, "Scout the changelog.", []);
+    const pair = turnOf(held, eventId);
+    if (pair === undefined) throw new Error("a seeded message has a turn");
+    const html = "<p>The changelog is two releases behind.</p>\n";
+    end(held, pair.conversation, pair.turn, { kind: "answered", html, files: [] });
+  });
+  return held;
+}
+
 const railSteps: Step[] = [
   {
     at: 5000,
@@ -472,6 +489,12 @@ export const scenarios: Record<string, Scenario> = {
   door: {
     about: "The rail's world, for signing in with a wrong password and then the right one.",
     world: rail,
+    steps: [],
+  },
+  header: {
+    about:
+      "The rail's world with two agents, each with a conversation, served from the owner's own copy of the page.",
+    world: header,
     steps: [],
   },
   turn: {

@@ -18,6 +18,11 @@
       ? open.conversation
       : snapshot?.conversations.find((listed) => addressOf(listed.key) === route.address),
   );
+  const agent = $derived(
+    snapshot !== null && snapshot.agents.length > 1 && conversation !== undefined
+      ? snapshot.agents.find((each) => each.id === conversation.key.agent_id)
+      : undefined,
+  );
 </script>
 
 <svelte:head>
@@ -28,10 +33,18 @@
   <Door />
 {:else}
   <div class="app in-room">
-    <Rail conversations={snapshot.conversations} seen={session.seen} open={route.address} />
+    <Rail
+      conversations={snapshot.conversations}
+      seen={session.seen}
+      open={route.address}
+      custom={snapshot.custom_site}
+    />
     <main class="room">
       <header class="room-head">
         <h2>{conversation === undefined ? "New conversation" : titleOf(conversation)}</h2>
+        {#if agent !== undefined}
+          <span class="with">with {agent.name}</span>
+        {/if}
       </header>
       <p class="notice" role="status" hidden={session.notice === ""}>
         <Words text={session.notice} />

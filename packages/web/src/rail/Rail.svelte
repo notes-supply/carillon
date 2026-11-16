@@ -9,7 +9,13 @@
     conversations,
     seen,
     open,
-  }: { conversations: readonly Conversation[]; seen: Seen; open: string } = $props();
+    custom,
+  }: {
+    conversations: readonly Conversation[];
+    seen: Seen;
+    open: string;
+    custom: boolean;
+  } = $props();
 </script>
 
 <nav class="rail" aria-label="Conversations">
@@ -39,5 +45,11 @@
   </ol>
   {#if conversations.length === 0}
     <p class="rail-note">No conversations yet. The ones you start are listed here, latest first.</p>
+  {/if}
+  {#if custom}
+    <footer class="rail-note">
+      This page is your own copy, served from the web provider's <code>site</code> folder in place of
+      the release's.
+    </footer>
   {/if}
 </nav>
