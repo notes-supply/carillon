@@ -56,8 +56,9 @@ pub(crate) struct Core {
     pub(crate) conversations: Vec<ConversationSummary>,
     /// By `agent/audience`.
     pub(crate) transcripts: HashMap<String, Transcript>,
-    /// Every event submitted, with the bytes of each file it staged as core
-    /// would read them then.
+    /// Every event admitted, once for each event ID, with the bytes of each
+    /// file it staged as core would read them then. A turn is named for its
+    /// place here.
     pub(crate) events: Vec<(ExternalEvent, Vec<Vec<u8>>)>,
     /// What the next submissions, controls and command reads are refused
     /// with.
@@ -132,29 +133,37 @@ async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> R
         hold.notified().await;
     }
     let mut core = locked(&core);
-    let staged = event.attachments.iter().flat_map(|attachments| {
-        (0..attachments.files.len()).map(|ordinal| {
-            let file = core
-                .staging
-                .join(&attachments.batch)
-                .join(ordinal.to_string());
-            std::fs::read(file).unwrap_or_default()
-        })
-    });
-    let staged = staged.collect();
-    let duplicate = core
-        .events
-        .iter()
-        .any(|(held, _)| held.event_id == event.event_id);
-    let receipt = EventReceipt {
-        event_id: event.event_id.clone(),
-        turn_id: format!("turn-{}", event.event_id),
-        state: TurnState::Queued,
-        duplicate,
-    };
     if let Some(refused) = refused(&core) {
         return refused;
     }
+    let admitted = core
+        .events
+        .iter()
+        .position(|(held, _)| held.event_id == event.event_id);
+    let receipt = EventReceipt {
+        event_id: event.event_id.clone(),
+        turn_id: format!("turn-{}", admitted.unwrap_or(core.events.len()) + 1),
+        state: TurnState::Queued,
+        duplicate: admitted.is_some(),
+    };
+    if admitted.is_some() {
+        return Json(receipt).into_response();
+    }
+    let files = event.attachments.iter().flat_map(|attachments| {
+        (0..attachments.files.len()).map(|ordinal| {
+            core.staging
+                .join(&attachments.batch)
+                .join(ordinal.to_string())
+        })
+    });
+    let staged = match files.map(std::fs::read).collect::<std::io::Result<_>>() {
+        Ok(staged) => staged,
+        Err(error) => {
+            let refused =
+                json!({ "error": format!("a staged attachment cannot be read: {error}") });
+            return (StatusCode::BAD_REQUEST, Json(refused)).into_response();
+        }
+    };
     if !core
         .conversations
         .iter()
