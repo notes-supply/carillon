@@ -13,5 +13,10 @@
   {#if message.files.length > 0}
     <Files files={message.files} />
   {/if}
-  <div class="said-foot"><Moment {at} /></div>
+  <div class="said-foot">
+    <Moment {at} />
+    {#if message.command}
+      <span>Command</span>
+    {/if}
+  </div>
 </div>

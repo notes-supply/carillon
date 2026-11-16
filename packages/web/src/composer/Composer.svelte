@@ -1,9 +1,13 @@
 <script lang="ts">
+  import type { Command } from "../api/requests.ts";
   import type { Agent, ConversationKey, Limits } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
   import { openConversation } from "../session/route.svelte.ts";
+  import { session } from "../session/session.svelte.ts";
   import Words from "../session/Words.svelte";
   import Attached from "./Attached.svelte";
+  import Commands from "./Commands.svelte";
+  import { loadCommands, offered } from "./commands.svelte.ts";
   import { overLimit } from "./limits.ts";
   import {
     attach,
@@ -32,23 +36,52 @@
 
   let field = $state<HTMLTextAreaElement>();
   let chooser = $state<HTMLInputElement>();
+  let pointed = $state.raw({ address: "", choice: 0 });
+  let dismissedAt = $state("");
 
   const address = $derived(addressOf(key));
   const sent = $derived(sentTo(address));
   const files = $derived(attachedTo(address));
   const busy = $derived(awaitingReceipt(address) !== undefined);
+  const text = $derived(draftOf(address));
+  const offers = $derived(dismissedAt === address ? [] : offered(address, text));
+  const choice = $derived(
+    pointed.address === address ? Math.min(pointed.choice, Math.max(offers.length - 1, 0)) : 0,
+  );
   const refusal = $derived(
     overLimit(files, limits) ?? (sent?.kind === "refused" ? sent.words : ""),
   );
 
-  function typed(event: Event & { currentTarget: HTMLTextAreaElement }): void {
-    write(address, event.currentTarget.value);
+  function wrote(written: string): void {
+    dismissedAt = "";
+    write(address, written);
+    if (written.startsWith("/")) void loadCommands(key, session.token);
+  }
+
+  function take(command: Command): void {
+    wrote(`/${command.name} `);
   }
 
   function pressed(event: KeyboardEvent & { currentTarget: HTMLTextAreaElement }): void {
-    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
-    event.preventDefault();
-    event.currentTarget.form?.requestSubmit();
+    if (event.isComposing) return;
+    const offer = offers[choice];
+    const enter = event.key === "Enter" && !event.shiftKey;
+    if (offer !== undefined && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : offers.length - 1;
+      pointed = { address, choice: (choice + step) % offers.length };
+    } else if (offer !== undefined && event.key === "Escape") {
+      dismissedAt = address;
+    } else if (
+      offer !== undefined &&
+      (event.key === "Tab" || (enter && text !== `/${offer.name}`))
+    ) {
+      event.preventDefault();
+      take(offer);
+    } else if (enter) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
   }
 
   function submitted(event: SubmitEvent): void {
@@ -87,15 +120,16 @@
     <p class="error" role="alert" hidden={refusal === ""}>
       <Words text={refusal} />
     </p>
+    <Commands {offers} {choice} {take} />
     <form class="composer" onsubmit={submitted}>
       <Attached {files} remove={(file) => detach(address, file)} after={field} />
       <textarea
         rows="1"
         aria-label="Message"
         placeholder="Write to Carillon"
-        value={draftOf(address)}
+        value={text}
         bind:this={field}
-        oninput={typed}
+        oninput={(event) => wrote(event.currentTarget.value)}
         onkeydown={pressed}
         onpaste={pasted}
       ></textarea>

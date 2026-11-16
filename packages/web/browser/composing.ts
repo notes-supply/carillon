@@ -52,12 +52,25 @@ export async function paste(page: Page, files: Chosen[]): Promise<void> {
   );
 }
 
-/** The messages the page has sent to the provider, each attempt once. */
-export function sends(page: Page): string[] {
+function asked(page: Page, method: string, part: string): string[] {
   const urls: string[] = [];
   page.on("request", (request) => {
-    if (request.method() === "PUT" && request.url().includes("/messages/"))
-      urls.push(request.url());
+    if (request.method() === method && request.url().includes(part)) urls.push(request.url());
   });
   return urls;
+}
+
+/** The messages the page sends to the provider from now on, each attempt once. */
+export function sends(page: Page): string[] {
+  return asked(page, "PUT", "/messages/");
+}
+
+/** The times the page asks the provider for a conversation's commands from now on. */
+export function commandReads(page: Page): string[] {
+  return asked(page, "GET", "/commands");
+}
+
+/** The commands the composer offers for what is written. */
+export function commands(page: Page): Locator {
+  return page.getByRole("listbox", { name: "Commands" }).getByRole("option");
 }
