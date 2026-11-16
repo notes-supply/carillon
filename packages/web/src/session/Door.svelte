@@ -1,7 +1,8 @@
 <script lang="ts">
   import { AWAY, SIGNED_OUT } from "../api/requests.ts";
   import { focusedWhen } from "./focus.svelte.ts";
-  import { session, signIn } from "./session.svelte.ts";
+  import { enter } from "./route.svelte.ts";
+  import { session } from "./session.svelte.ts";
   import Words from "./Words.svelte";
 
   let password = $state("");
@@ -11,7 +12,7 @@
   async function submitted(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     asking = true;
-    refusal = await signIn(password);
+    refusal = await enter(password);
     password = "";
     asking = false;
   }
@@ -26,6 +27,7 @@
       <label for="password">Password</label>
       <input
         id="password"
+        name="password"
         type="password"
         autocomplete="current-password"
         required

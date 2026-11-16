@@ -30,7 +30,7 @@ To see the page as the provider serves it, run `vite build --watch` beside the f
 
 | Fact | Owner | Changes when |
 |---|---|---|
-| The token | `localStorage`, read through `session/token.ts`. `session/session.svelte.ts` holds it as state. | A sign-in, or `signed_out` on the stream |
+| The token | `localStorage`, read through `session/token.ts`, for every tab. `session/session.svelte.ts` holds it as state. | A sign-in stores it and loads the page again, in this tab and in every tab at the door. `signed_out` on the stream drops it only when the refused token is still the stored one. Otherwise the tab goes on with the stored one. |
 | What the server knows | `session.snapshot`, one `$state.raw` value | A snapshot arrives and replaces it |
 | The notice | `session.notice` | `unavailable` or `unreadable` sets it. The next snapshot empties it |
 | What was seen of each conversation | `session.seen`, folded by `rail/unread.ts` | A snapshot arrives, or the address changes |
@@ -78,4 +78,5 @@ The modules that may reach outside the page's state are a short list, written in
 - `hear` in `session/session.svelte.ts` is the one place a snapshot is taken in. It also calls `see` and `settle`, because both remember something the next snapshot no longer says. `readAddress` calls `see` too, so that a conversation opened and left before its snapshot arrived still counts as seen.
 - "New conversation" links to `#new`, an address that names no conversation. Svelte's accessibility check refuses `href="#"`. `readAddress` then gives the address a new conversation to name.
 - A pressed control reads as pressed and holds its turn's other controls until the turn ends, or starts or stops waiting its turn. A runtime that still offers the control fifteen seconds later took it and changed nothing, so it is offered again. The press is kept by turn, outside the component, because the transcript is drawn again for each conversation opened.
+- A browser that cannot store the token keeps it in `session.token` alone: the person is signed in until the page is loaded again. `storeToken` says whether it stored, and `signIn` loads the page again only when it did, so a full store cannot turn a sign-in into a loop.
 - The transcript is inside `{#key route.address}`, so each conversation gets its own scrolling element and starts at its end.

@@ -26,18 +26,22 @@ export const session = {
   },
 };
 
-export async function signIn(password: string): Promise<string> {
+export type SignedIn = { kind: "refused"; words: string } | { kind: "stored" } | { kind: "held" };
+
+export async function signIn(password: string): Promise<SignedIn> {
   const answer = await requestSignIn(password);
-  if (answer.kind === "refused") return answer.words;
-  storeToken(answer.token);
+  if (answer.kind === "refused") return answer;
+  if (storeToken(answer.token)) return { kind: "stored" };
   token = answer.token;
-  return "";
+  return { kind: "held" };
 }
 
-function signOut(): void {
+function signOut(refused: string): void {
+  const stored = storedToken();
+  if (stored === refused) dropToken();
+  token = stored === refused ? null : stored;
+  if (token !== null) return;
   cancelSends();
-  dropToken();
-  token = null;
   snapshot = null;
   notice = "";
   seen = new Map();
@@ -47,7 +51,7 @@ export function see(open: string): void {
   if (snapshot !== null) seen = seenAfter(seen, snapshot.conversations, open);
 }
 
-export function hear(said: Received): void {
+export function hear(said: Received, carried: string): void {
   switch (said.kind) {
     case "snapshot":
       snapshot = said.snapshot;
@@ -62,7 +66,7 @@ export function hear(said: Received): void {
       notice = UNREADABLE;
       return;
     case "signed_out":
-      signOut();
+      signOut(carried);
       return;
   }
 }

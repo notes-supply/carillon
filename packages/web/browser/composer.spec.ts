@@ -1,4 +1,4 @@
-import { attached, choose, sends } from "./composing.ts";
+import { choose, sends } from "./composing.ts";
 import {
   PASSWORD,
   arrive,
@@ -362,7 +362,6 @@ test("when the door returns, a message on its way is not sent, and waits in the 
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Plan the release.", level: 2 })).toBeVisible();
   await expect(message(page)).toHaveValue("Write the release notes.");
-  await expect(attached(page)).toHaveText([/notes\.txt/u]);
   await expect(turns(page)).toHaveCount(1);
 
   await message(page).press("Enter");

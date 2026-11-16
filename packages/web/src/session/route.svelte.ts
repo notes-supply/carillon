@@ -2,7 +2,8 @@ import { WINDOW_START, mintAudienceId, widened, type View } from "../api/request
 import type { ChatSnapshot, ConversationKey } from "../api/stream.ts";
 import { watch } from "../api/watch.ts";
 import { addressOf, keyAt } from "./address.ts";
-import { hear, see, session } from "./session.svelte.ts";
+import { hear, see, session, signIn } from "./session.svelte.ts";
+import { namesToken } from "./token.ts";
 
 type EarlierRows = { state: "asked"; after: number } | { state: "listed"; first: string };
 
@@ -30,6 +31,16 @@ function readAddress(): void {
 }
 
 window.addEventListener("hashchange", readAddress);
+
+window.addEventListener("storage", (event) => {
+  if (session.token === null && namesToken(event.key) && event.newValue !== null) location.reload();
+});
+
+export async function enter(password: string): Promise<string> {
+  const entered = await signIn(password);
+  if (entered.kind === "stored") location.reload();
+  return entered.kind === "refused" ? entered.words : "";
+}
 
 export const route = {
   get key(): ConversationKey | null {
@@ -86,7 +97,7 @@ function listEarlierRows(asked: View, snapshot: ChatSnapshot): void {
 async function follow(asked: View, token: string, signal: AbortSignal): Promise<void> {
   for await (const said of watch(asked, token, signal)) {
     if (signal.aborted) return;
-    hear(said);
+    hear(said, token);
     if (said.kind !== "snapshot") continue;
     listEarlierRows(asked, said.snapshot);
     if (asked.open === null) readAddress();
