@@ -303,9 +303,11 @@ dependencies = [
  "anyhow",
  "axum",
  "carillon-installation",
+ "carillon-interface",
  "carillon-protocol",
  "clap",
  "flate2",
+ "futures-util",
  "hex",
  "http",
  "reqwest",
@@ -314,6 +316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tar",
  "tempfile",
  "thiserror",
@@ -410,11 +413,14 @@ version = "0.1.0-beta.11"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "carillon-installation",
  "carillon-protocol",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
+ "sse-core",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -429,6 +435,8 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "serde_urlencoded",
+ "thiserror",
 ]
 
 [[package]]
@@ -2114,6 +2122,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -2568,6 +2577,17 @@ checksum = "36bd8e29bf08189a005b2df1df99823aa0861cabe9044e5f31ed54ca292ee618"
 dependencies = [
  "cc",
  "rsqlite-vfs",
+]
+
+[[package]]
+name = "sse-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f4c044039e70ba5724b7e9dacf9fb610394773d15df2bb629170ca30391c88"
+dependencies = [
+ "bytes",
+ "memchr",
+ "thiserror",
 ]
 
 [[package]]

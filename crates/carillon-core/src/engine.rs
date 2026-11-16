@@ -1,5 +1,6 @@
 //! Admission, runtime ownership, hand-over and delivery over one SQLite authority.
 mod dispatch;
+mod observation;
 mod ownership;
 mod settle;
 
@@ -17,6 +18,7 @@ use carillon_protocol::model::{
     EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
     RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
 };
+use carillon_protocol::observation::ConversationKey;
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
 use std::{
@@ -180,27 +182,51 @@ impl Core {
     /// waits for the writer. The work finishes even if the caller stops
     /// waiting, and its outcome is the database's, as for a synchronous call.
     /// # Errors
-    /// Returns the work's error, or a storage error if it panicked.
+    /// Returns the work's error, a storage error if it panicked, or
+    /// [`CoreError::Unavailable`] with nothing run once
+    /// [`Self::storage_settled`] was called.
     pub async fn blocking<T, E>(
         &self,
         work: impl FnOnce(&Self) -> Result<T, E> + Send + 'static,
     ) -> Result<T, E>
     where
         T: Send + 'static,
-        E: From<anyhow::Error> + Send + 'static,
+        E: From<CoreError> + Send + 'static,
     {
         let core = self.clone();
-        self.storage
-            .spawn_blocking(move || work(&core))
-            .await
-            .map_err(|error| E::from(anyhow!(error).context("storage work did not finish")))?
+        // Counted before the look: `storage_settled` then either waits for
+        // this work or has closed storage to it, and never misses it.
+        let counted = self.storage.token();
+        if self.storage.is_closed() {
+            return Err(CoreError::Unavailable("Carillon is shutting down".into()).into());
+        }
+        tokio::task::spawn_blocking(move || {
+            let _counted = counted;
+            work(&core)
+        })
+        .await
+        .map_err(|error| {
+            CoreError::Storage(anyhow!(error).context("storage work did not finish"))
+        })?
     }
 
-    /// Wait until storage work started for async callers has finished, so
-    /// exclusive ownership can be released with no write still running.
+    /// Closes storage to work for async callers and waits until what they
+    /// started has finished, so exclusive ownership can be released with no
+    /// write still running and none to come.
     pub async fn storage_settled(&self) {
         self.storage.close();
         self.storage.wait().await;
+    }
+
+    /// Marked after every commit that changed a row of this handle's
+    /// storage, through it or its clones. A commit that changed no row
+    /// leaves it unmarked, such as a repeated event or a claim that found
+    /// nothing; one that wrote a row the values it already had may mark it.
+    /// A mark says to look again and no more. Marks coalesce, and carry no
+    /// count and no revision. Marking the receiver seen before each look
+    /// means no change is missed.
+    pub(crate) fn changes(&self) -> watch::Receiver<()> {
+        self.database.changes()
     }
 
     /// Changes whenever a turn may have been queued through this handle or
@@ -651,10 +677,12 @@ impl Core {
     }
 
     fn admit(&self, event: &ExternalEvent) -> Result<(), CoreError> {
-        if event.event_id.is_empty()
-            || event.agent_id.is_empty()
+        // An observation shows a conversation under the key its agent and
+        // its audience make, so the key decides which of them are accepted.
+        let named = ConversationKey::new(event.agent_id.clone(), event.audience_id.clone());
+        if named.is_err()
+            || event.event_id.is_empty()
             || event.user_id.is_empty()
-            || event.audience_id.is_empty()
             || event.delivery_target_id.is_empty()
             || event.feedback_target_id.is_empty()
             || (event.content.trim().is_empty()

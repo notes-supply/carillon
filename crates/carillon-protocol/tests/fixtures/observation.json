@@ -1,0 +1,293 @@
+{
+  "snapshots": [
+    {
+      "conversations": [],
+      "more": false,
+      "open": null
+    },
+    {
+      "conversations": [],
+      "more": false,
+      "open": {
+        "kind": "unrecorded",
+        "key": {
+          "agent_id": "assistant",
+          "audience_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11"
+        }
+      }
+    },
+    {
+      "conversations": [
+        {
+          "key": {
+            "agent_id": "assistant",
+            "audience_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11"
+          },
+          "channel_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11",
+          "title": "Plan the trip",
+          "started_at": 1783771200,
+          "active_at": 1783771300,
+          "activity": 42,
+          "at_work": 3
+        },
+        {
+          "key": {
+            "agent_id": "assistant",
+            "audience_id": "discord-100-300"
+          },
+          "channel_id": "300",
+          "title": "",
+          "started_at": 1783771100,
+          "active_at": 1783771100,
+          "activity": 17,
+          "at_work": 0
+        }
+      ],
+      "more": true,
+      "open": {
+        "kind": "recorded",
+        "conversation": {
+          "key": {
+            "agent_id": "assistant",
+            "audience_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11"
+          },
+          "channel_id": "0199b3a2-6c1e-7c55-9d0f-3f1f0f4d9a11",
+          "title": "Plan the trip",
+          "started_at": 1783771200,
+          "active_at": 1783771300,
+          "activity": 42,
+          "at_work": 3
+        },
+        "turns": [
+          {
+            "turn_id": "01a0fc1d-4683-7ea1-96a9-e57e9a67e63f",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000001",
+              "text": "What do you make of these?",
+              "command": false,
+              "files": [
+                {
+                  "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/0",
+                  "name": "holiday photo.png",
+                  "size": 48213,
+                  "content_type": "image/png",
+                  "sha256": "2209f2d23d0129ba9d9e6dc4d048509230a203ae6ed8539695b1818f99162b95"
+                }
+              ]
+            },
+            "accepted_at": 1783771200,
+            "progress": {
+              "state": "ended",
+              "finished_at": 1783771230,
+              "ending": {
+                "kind": "answered",
+                "text": "A beach at dusk. I wrote up the details.",
+                "files": [
+                  {
+                    "path": "01a0fc1d-5f02-7b11-8c2e-1d7a52c0b3aa/0",
+                    "name": "notes.md",
+                    "source": "/home/agent/work/notes.md",
+                    "size": 512,
+                    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                  }
+                ]
+              },
+              "report": {
+                "phase": "model",
+                "running": [],
+                "recent": [
+                  {
+                    "tool": "read",
+                    "detail": "holiday photo.png",
+                    "ok": true,
+                    "duration_ms": 40
+                  }
+                ],
+                "tool_calls": 1
+              }
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000002",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000002",
+              "text": "/compact",
+              "command": true
+            },
+            "accepted_at": 1783771240,
+            "progress": {
+              "state": "ended",
+              "finished_at": 1783771241,
+              "ending": {
+                "kind": "interrupted",
+                "notice": "That turn was interrupted. Send another message to continue in this conversation."
+              }
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000003",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000003",
+              "text": "And the second one?",
+              "command": false
+            },
+            "accepted_at": 1783771250,
+            "progress": {
+              "state": "ended",
+              "finished_at": 1783771251,
+              "ending": {
+                "kind": "steered"
+              }
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000004",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000004",
+              "text": "Never mind.",
+              "command": false
+            },
+            "accepted_at": 1783771260,
+            "progress": {
+              "state": "ended",
+              "finished_at": 1783771262,
+              "ending": {
+                "kind": "stopped"
+              }
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000005",
+            "source": {
+              "kind": "opened",
+              "label": "The nightly summary."
+            },
+            "accepted_at": 1783771270,
+            "progress": {
+              "state": "running",
+              "activity": {
+                "phase": "tools",
+                "running": [
+                  {
+                    "tool": "bash",
+                    "detail": "cargo test",
+                    "started_at": 1783771275
+                  }
+                ],
+                "recent": [],
+                "tool_calls": 1
+              }
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000006",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000006",
+              "text": "Start over, please.",
+              "command": false
+            },
+            "accepted_at": 1783771280,
+            "progress": {
+              "state": "running",
+              "activity": null
+            }
+          },
+          {
+            "turn_id": "01a0fc1d-4a00-7000-8000-000000000007",
+            "source": {
+              "kind": "message",
+              "event_id": "m-0199b3a2-7d10-7000-8000-000000000007",
+              "text": "And then this.",
+              "command": false
+            },
+            "accepted_at": 1783771300,
+            "progress": {
+              "state": "queued"
+            }
+          }
+        ],
+        "earlier": true
+      }
+    }
+  ],
+  "impossible_turns": [
+    {
+      "progress": {
+        "state": "running"
+      },
+      "refused_for": "missing field `activity`"
+    },
+    {
+      "progress": {
+        "state": "ended",
+        "finished_at": 1783771262
+      },
+      "refused_for": "missing field `ending`"
+    },
+    {
+      "progress": {
+        "state": "ended",
+        "ending": {
+          "kind": "stopped"
+        }
+      },
+      "refused_for": "missing field `finished_at`"
+    },
+    {
+      "progress": {
+        "state": "ended",
+        "finished_at": 1783771262,
+        "ending": {
+          "kind": "answered"
+        }
+      },
+      "refused_for": "missing field `text`"
+    },
+    {
+      "progress": {
+        "state": "completed"
+      },
+      "refused_for": "unknown variant `completed`"
+    }
+  ],
+  "impossible_openings": [
+    {
+      "open": {
+        "kind": "recorded",
+        "turns": [],
+        "earlier": false
+      },
+      "refused_for": "missing field `conversation`"
+    },
+    {
+      "open": {
+        "kind": "unrecorded",
+        "key": {
+          "agent_id": "assistant"
+        }
+      },
+      "refused_for": "missing field `audience_id`"
+    },
+    {
+      "open": {
+        "kind": "unrecorded",
+        "key": {
+          "agent_id": "",
+          "audience_id": "someone"
+        }
+      },
+      "refused_for": "neither is empty"
+    },
+    {
+      "open": {
+        "kind": "missing"
+      },
+      "refused_for": "unknown variant `missing`"
+    }
+  ]
+}

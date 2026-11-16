@@ -9,7 +9,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use super::*;
 use crate::{Settled, WorkerStep};
 use carillon_protocol::{
-    model::{DeliveryOutcome, JOB_READ_LIMIT, RuntimeTurnRequest, TurnState},
+    model::{DeliveryOutcome, JOB_READ_LIMIT, RuntimeTurnRequest, TurnActivity, TurnState},
     turns::TurnOutcome,
 };
 
@@ -20,12 +20,6 @@ struct Fixture {
     config: LoadedConfig,
     core: Core,
     client: Client,
-}
-
-impl Fixture {
-    fn snapshot_store(&self) -> PathBuf {
-        self.core.snapshot_store()
-    }
 }
 
 fn installation(root: &Path) -> Result<Fixture> {
@@ -102,6 +96,7 @@ fn configured(fixture: &Fixture) -> AppState {
         client: fixture.client.clone(),
         workers: Arc::new(watch::Sender::new(Census::default())),
         pause: Arc::new(watch::Sender::new(None)),
+        stopping: CancellationToken::new(),
     }
 }
 
@@ -422,7 +417,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
             .claim_delivery("test-interface", "instance")?
             .is_none()
     );
-    let snapshot = state.snapshot_store();
+    let snapshot = state.core.snapshot_store();
     fs::write(
         state.config.value.resource_roots()[0].join("SYSTEM.md"),
         "changed after acceptance",
@@ -644,17 +639,7 @@ fn activity_runtime(
 
 /// Registers `other-interface` and accepts one turn for it.
 async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventReceipt> {
-    let mut other = state
-        .config
-        .provider("test-interface", ProviderRole::Interface)?
-        .clone();
-    "other-interface".clone_into(&mut other.id);
-    other.token_hash = hash_token("other-only");
-    state.config.value.providers.push(other);
-    fs::write(
-        directory.join("credentials/other-interface.token"),
-        "other-only",
-    )?;
+    observe::second_interface(state, directory)?;
     Ok(configured(state)
         .core
         .accept(
@@ -923,6 +908,7 @@ mod health;
 mod held;
 mod live;
 mod maintenance;
+mod observe;
 mod reserved;
 mod retained;
 mod settings;

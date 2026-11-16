@@ -4,5 +4,6 @@
 pub mod conversations;
 mod fields;
 pub mod model;
+pub mod observation;
 pub mod settings;
 pub mod turns;
