@@ -40,6 +40,7 @@ jobs:
       release: ${{ steps.plan.outputs.release }}
       lint: ${{ steps.plan.outputs.lint }}
       workflows: ${{ steps.plan.outputs.workflows }}
+      browser: ${{ steps.plan.outputs.browser }}
       reason: ${{ steps.plan.outputs.reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -295,10 +296,54 @@ jobs:
           # zizmor's online audits check pinned actions against upstream.
           GH_TOKEN: ${{ github.token }}
 
+  browser:
+    needs: plan
+    if: needs.plan.outputs.browser == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: node pnpm
+          cache_key_prefix: mise-browser
+      - id: store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - id: pnpm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-
+      - run: mise run install
+      - name: Install headless Chromium and the system libraries it needs
+        # The task fetches the browser too, but only apt can add its libraries.
+        run: mise exec -- pnpm --dir packages/web run install:browser --with-deps
+      - run: mise run test:browser
+      - name: Keep the trace of each failed check
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-traces
+          path: packages/web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+      # Saved after a failed check too, but not once cancelled or never restored.
+      - if: ${{ !cancelled() && steps.pnpm.outcome == 'success' && steps.pnpm.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+
   # The one required check: the plan succeeded, every selected lane passed and
   # every other lane was deliberately skipped.
   ci-ok:
-    needs: [plan, rust, ts, release, lint, workflows]
+    needs: [plan, rust, ts, release, lint, workflows, browser]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions: {}
@@ -311,11 +356,13 @@ jobs:
           RELEASE: ${{ needs.plan.outputs.release }}/${{ needs.release.result }}
           LINT: ${{ needs.plan.outputs.lint }}/${{ needs.lint.result }}
           WORKFLOWS: ${{ needs.plan.outputs.workflows }}/${{ needs.workflows.result }}
+          BROWSER: ${{ needs.plan.outputs.browser }}/${{ needs.browser.result }}
         run: |
           [ "$PLAN" = success ] || { echo "the plan did not succeed: $PLAN"; exit 1; }
           echo "plan: $REASON"
           status=0 tested=0
-          for lane in "rust=$RUST" "ts=$TS" "release=$RELEASE" "lint=$LINT" "workflows=$WORKFLOWS"; do
+          for lane in "rust=$RUST" "ts=$TS" "release=$RELEASE" "lint=$LINT" "workflows=$WORKFLOWS" \
+            "browser=$BROWSER"; do
             case "${lane#*=}" in
               true/success) echo "${lane%%=*}: passed"; tested=$((tested + 1)) ;;
               false/skipped) echo "${lane%%=*}: not needed" ;;

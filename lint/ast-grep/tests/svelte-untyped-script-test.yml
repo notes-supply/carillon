@@ -1,0 +1,7 @@
+id: svelte-untyped-script
+valid:
+  - "<script lang=\"ts\">\n  let count = $state(0);\n</script>\n\n<p>{count}</p>"
+invalid:
+  - "<script>\n  let count = $state(0);\n</script>\n\n<p>{count}</p>"
+  - "<script lang=\"js\">\n  let count = $state(0);\n</script>"
+  - "<script module>\n  export const limit = 3;\n</script>"

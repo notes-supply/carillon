@@ -1,0 +1,10 @@
+id: svelte-effect
+valid:
+  - "const doubled = $derived(count * 2);"
+  - "let count = $state(0);"
+  - "const { title }: { title: string } = $props();"
+invalid:
+  - "$effect(() => {\n  doubled = count * 2;\n});"
+  - "$effect.pre(() => {\n  doubled = count * 2;\n});"
+  - "const stop = $effect.root(() => {});"
+  - "$inspect(count);"

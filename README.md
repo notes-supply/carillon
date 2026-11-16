@@ -65,12 +65,13 @@ installs the tools and runs the tasks:
 mise install
 mise run check            # format, lint, types and tests; or check:lint / check:rust / check:ts
 mise run test:integration # the services together
+mise run test:browser     # the web chat's page, built, in a headless browser
 mise run test:install     # build the release archive and test installing it
 ```
 
-`check:lint` runs the project's [ast-grep rules](lint/ast-grep/rules),
-ShellCheck and a size budget. Source files stay under 1,000 lines. The longer
-ones in `lint/size-budget.txt` may only shrink:
+`check:lint` runs the project's [ast-grep rules](lint/ast-grep/rules) and
+their tests, ShellCheck and a size budget. Source files stay under 1,000
+lines. The longer ones in `lint/size-budget.txt` may only shrink:
 `scripts/check-size.sh --update` records a shrink.
 
 `mise run build:module` builds the Discord module and the

@@ -1,0 +1,15 @@
+id: web-dom-write
+valid:
+  - "const label = item.textContent;"
+  - "const turns = snapshot.open.turns;"
+  - "const shown = turns.filter((turn) => turn.progress.state === \"running\");"
+invalid:
+  - "const item = document.createElement(\"li\");"
+  - "item.textContent = title;"
+  - "list.appendChild(item);"
+  - "node.innerHTML = html;"
+  - "node.classList.add(\"open\");"
+  - "node.style.color = \"red\";"
+  - "node.setAttribute(\"hidden\", \"\");"
+  - "const first = list.querySelector(\"li\");"
+  - "list.replaceChildren();"

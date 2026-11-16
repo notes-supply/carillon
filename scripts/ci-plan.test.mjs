@@ -21,7 +21,7 @@ it("selects each language with the release it ships in", () => {
   // The release ships the example module built.
   expect(lanes(["examples/card-colours/src/lib.rs"])).toEqual(["lint", "release", "rust"]);
   expect(lanes(["packages/runtime-t3/src/runtime.ts"])).toEqual(["lint", "release", "ts"]);
-  expect(lanes(["pnpm-lock.yaml"])).toEqual(["lint", "release", "ts"]);
+  expect(lanes(["pnpm-lock.yaml"])).toEqual(["browser", "lint", "release", "ts"]);
   expect(lanes(["scripts/package-release.sh"])).toEqual(["lint", "release"]);
   expect(lanes(["install.sh"])).toEqual(["lint", "release"]);
   expect(lanes(["scripts/test-integration.mjs"])).toEqual(["lint", "release", "ts"]);
@@ -57,15 +57,37 @@ it("follows inputs across languages", () => {
   ]);
 });
 
+it("checks the page in a browser when the page or what builds it changes", () => {
+  for (const path of [
+    "packages/web/src/rail/Rail.svelte",
+    "packages/web/src/api/stream.ts",
+    "packages/web/public/style.css",
+    "packages/web/index.html",
+    "packages/web/vite.config.ts",
+    "packages/web/package.json",
+  ])
+    expect(lanes([path])).toEqual(["browser", "lint", "release", "ts"]);
+  for (const path of ["package.json", "pnpm-workspace.yaml", "tsconfig.json"])
+    expect(lanes([path])).toEqual(["browser", "lint", "release", "ts"]);
+  // The checks and the fake provider they run against ship in no release.
+  expect(lanes(["packages/web/browser/door.spec.ts"])).toEqual(["browser", "lint", "ts"]);
+  expect(lanes(["packages/web/fake/scenarios.ts"])).toEqual(["browser", "lint", "ts"]);
+  expect(lanes(["packages/web/README.md", "packages/web/fake/README.md"])).toEqual([]);
+  expect(lanes(["packages/runtime/src/client.ts"])).toEqual(["lint", "release", "ts"]);
+});
+
 it("lints every change a lane builds, and lint configuration alone", () => {
   expect(lanes(["scripts/register-services.sh"])).toEqual(["lint", "release"]);
   expect(lanes(["sgconfig.yml", "lint/size-budget.txt"])).toEqual(["lint"]);
+  expect(lanes(["scripts/test-web-rules.sh", "lint/ast-grep/rules/svelte-effect.yml"])).toEqual([
+    "lint",
+  ]);
   expect(lanes([".oxlintrc.json"])).toEqual(["lint", "ts"]);
   expect(lanes([".coderabbit.yaml", "docs/product/PRODUCT.md"])).toEqual([]);
 });
 
 it("runs everything for tools, CI and anything unrecognised", () => {
-  const every = ["lint", "release", "rust", "ts", "workflows"];
+  const every = ["browser", "lint", "release", "rust", "ts", "workflows"];
   for (const path of ["mise.toml", "mise.lock", ".github/workflows/ci.yml", "scripts/ci-plan.mjs"])
     expect(lanes([path])).toEqual(every);
   expect(lanes(["docs/guide.md", ".gitignore"])).toEqual(every);
@@ -73,7 +95,7 @@ it("runs everything for tools, CI and anything unrecognised", () => {
 });
 
 it("keeps a path's newline from rewriting the lanes it selected", () => {
-  const injected = "x\nrust=false\nts=false\nrelease=false\nworkflows=false";
+  const injected = "x\nrust=false\nts=false\nrelease=false\nworkflows=false\nbrowser=false";
   const lines = outputs(plan([injected]))
     .trimEnd()
     .split("\n");
@@ -83,6 +105,7 @@ it("keeps a path's newline from rewriting the lanes it selected", () => {
     "release=true",
     "lint=true",
     "workflows=true",
+    "browser=true",
     `reason=${JSON.stringify(`no rule for ${injected}`)}`,
   ]);
 });
@@ -103,6 +126,7 @@ it("selects everything when it cannot compare, and nothing for no change", () =>
     release: "true",
     lint: "true",
     workflows: "true",
+    browser: "true",
   });
   expect(missing.reason).toMatch(/^cannot compare/u);
   expect(run("")).toMatchObject({ rust: "true", reason: "no comparison base" });
@@ -116,5 +140,6 @@ it("selects everything when it cannot compare, and nothing for no change", () =>
     release: "false",
     lint: "false",
     workflows: "false",
+    browser: "false",
   });
 });

@@ -5,7 +5,10 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings"
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "install:browser": "playwright install --only-shell chromium",
+    "test:browser": "playwright test --config browser"
   },
   "dependencies": {
     "eventsource-parser": "4.1.3",

@@ -1,0 +1,8 @@
+id: web-no-comments
+valid:
+  - "const count = 1;"
+  - "const address = \"#new\"; const slashes = \"//\";"
+invalid:
+  - "// What the count is for.\nconst count = 1;"
+  - "/** The count. */\nconst count = 1;"
+  - "const count = JSON.parse(text); // oxlint-disable-line"

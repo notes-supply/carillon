@@ -1,0 +1,5 @@
+id: svelte-component-style
+valid:
+  - "<p>{count}</p>"
+invalid:
+  - "<p>{count}</p>\n\n<style>\n  p {\n    margin: 0;\n  }\n</style>"

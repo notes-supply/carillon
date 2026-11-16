@@ -42,6 +42,12 @@ To see the page as the provider serves it, run `vite build --watch` beside the f
 
 Everything a component draws is a `$derived` of these, or a call to one of the display functions: `ledger`, `outcome`, `size`, `span` and `when`.
 
+## The rules
+
+The page's rules are lints, in `lint/ast-grep/rules/web-*.yml` and `svelte-*.yml` and in the `overrides` of `.oxlintrc.json`. `mise run check:lint` proves them twice: `lint/ast-grep/tests/` gives each rule code it must accept and code it must refuse, and `scripts/test-web-rules.sh` scans a small page to show that each rule reaches the files it names, which a test of one snippet cannot.
+
+The modules that may reach outside the page's state are a short list, written in three places: the `ignores` of `web-dom-write` and `svelte-effect`, the `.oxlintrc.json` overrides, and the list of findings in `scripts/test-web-rules.sh`. A new one is added to all three on purpose.
+
 ## What reaches outside the page's state
 
 - `followView` in `session/route.svelte.ts` is the page's one `$effect`. It keeps one stream open for the view, which is the address and the window of turns, and aborts it when either changes.

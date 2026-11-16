@@ -1,0 +1,5 @@
+id: svelte-raw-html
+valid:
+  - "<div class=\"prose\">{text}</div>"
+invalid:
+  - "<div>{@html text}</div>"

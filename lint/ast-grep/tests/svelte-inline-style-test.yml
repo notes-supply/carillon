@@ -1,0 +1,6 @@
+id: svelte-inline-style
+valid:
+  - "<p class=\"quiet\">Text.</p>"
+  - "<p style:color={shade}>A style directive.</p>"
+invalid:
+  - "<p style=\"color: red\">A style attribute written as text.</p>"
