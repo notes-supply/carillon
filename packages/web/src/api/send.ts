@@ -3,6 +3,13 @@ import { bearer, messageForm, messagePath, reading, refusalWords } from "./reque
 import { retryPause } from "./retry.ts";
 import type { ConversationKey } from "./stream.ts";
 
+export type Outgoing = {
+  key: ConversationKey;
+  eventId: string;
+  text: string;
+  files: readonly File[];
+};
+
 export type Sending =
   | { kind: "uploading" }
   | { kind: "receiving" }
@@ -32,14 +39,13 @@ function put(
 }
 
 export async function* deliver(
-  key: ConversationKey,
-  eventId: string,
-  text: string,
+  message: Outgoing,
   token: string,
 ): AsyncGenerator<Sending, void, void> {
+  const path = messagePath(message.key, message.eventId);
   for (let failures = 1; ; failures += 1) {
     yield { kind: "uploading" };
-    const request = put(messagePath(key, eventId), messageForm(text, []), token);
+    const request = put(path, messageForm(message.text, message.files), token);
     await Promise.race([request.uploaded, request.answered]);
     yield { kind: "receiving" };
     const answer = await request.answered;

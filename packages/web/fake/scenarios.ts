@@ -522,6 +522,15 @@ export const scenarios: Record<string, Scenario> = {
       },
     ],
   },
+  limits: {
+    about:
+      "A provider that takes three files of 2 kB each and 3 kB together, so that a few bytes are too many.",
+    world: (now) => ({
+      ...planning(now),
+      limits: { files: 3, file_bytes: 2000, message_bytes: 3000 },
+    }),
+    steps: [],
+  },
   "send-lost-receipt": {
     about:
       "Core takes a message and goes away before its receipt arrives. It returns, and the same event ID is answered as a duplicate.",

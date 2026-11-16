@@ -40,7 +40,7 @@
         {#key route.address}
           <Transcript {open} address={route.address} />
         {/key}
-        <Composer key={route.key} />
+        <Composer key={route.key} limits={snapshot.limits} />
       {/if}
     </main>
   </div>
