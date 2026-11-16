@@ -4,7 +4,7 @@
   import { titleOf } from "./rail/title.ts";
   import { addressOf, openedAt } from "./session/address.ts";
   import Door from "./session/Door.svelte";
-  import { followView, route, showConversations } from "./session/route.svelte.ts";
+  import { followView, route, showConversations, tabIs } from "./session/route.svelte.ts";
   import { session } from "./session/session.svelte.ts";
   import Words from "./session/Words.svelte";
   import Transcript from "./transcript/Transcript.svelte";
@@ -24,6 +24,8 @@
       : undefined,
   );
 </script>
+
+<svelte:document bind:visibilityState={null, tabIs} />
 
 <svelte:head>
   <title>{conversation === undefined ? "Carillon" : titleOf(conversation)}</title>

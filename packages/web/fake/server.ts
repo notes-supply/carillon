@@ -225,6 +225,10 @@ export async function serve(options: Options): Promise<Fake> {
     endStreams() {
       finish();
     },
+    mute() {
+      streams.clear();
+      notify();
+    },
     say(data) {
       for (const stream of streams) write(stream, data);
     },

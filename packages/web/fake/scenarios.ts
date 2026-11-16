@@ -25,6 +25,8 @@ export type Stage = {
   signOut(): void;
   /** The provider ends every stream and says nothing, as it does at UTC midnight. */
   endStreams(): void;
+  /** The provider keeps every stream open and writes nothing more to it, as a dead connection looks. */
+  mute(): void;
   /** Writes `data` to every stream as it is. */
   say(data: string): void;
   /** The provider reads the upload it held. */
@@ -723,6 +725,18 @@ export const scenarios: Record<string, Scenario> = {
     world: planning,
     steps: [
       { at: 2000, label: "the provider ends the stream", run: (stage) => stage.endStreams() },
+      {
+        at: 4000,
+        label: "the runtime answers a turn of its own",
+        run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
+      },
+    ],
+  },
+  "stream-silent": {
+    about: "The provider's stream stays open and says nothing more, and an answer lands after it.",
+    world: planning,
+    steps: [
+      { at: 2000, label: "the provider's stream goes silent", run: (stage) => stage.mute() },
       {
         at: 4000,
         label: "the runtime answers a turn of its own",

@@ -36,6 +36,9 @@ To see the page as the provider serves it, run `vite build --watch` beside the f
 | What was seen of each conversation | `session.seen`, folded by `rail/unread.ts` | A snapshot arrives, or the address changes |
 | The open conversation | The address. `session/route.svelte.ts` reads and writes it | `hashchange` |
 | The window of turns | `session/route.svelte.ts`, for the conversation it was widened in | "Show earlier turns" |
+| The window of conversations, and the first row a wider one added | `session/route.svelte.ts` | "Show earlier conversations", and the snapshot that answers it |
+| Which pane a narrow window shows | `session/route.svelte.ts` | Conversations, or a conversation chosen in the list |
+| Whether the tab is shown | The document. `session/route.svelte.ts` holds it as state | The browser hides or shows the tab |
 | What is being written | `composer/outbox.svelte.ts`, in memory for each conversation. `composer/draft.ts` keeps a copy in `localStorage`, which also holds a message on its way until its receipt | Typing, a send, its receipt, a refusal, another tab clearing the copy |
 | The files to send | `composer/outbox.svelte.ts`, in memory for each conversation | Attaching, removing, a send, a refusal |
 | A message on its way, or its refusal | `composer/outbox.svelte.ts`, one for each conversation | A send, its stages, the snapshot that has its turn, and a sign-out, which cancels it |
@@ -54,9 +57,12 @@ The modules that may reach outside the page's state are a short list, written in
 
 ## What reaches outside the page's state
 
-- `followView` in `session/route.svelte.ts` is the page's one `$effect`. It keeps one stream open for the view, which is the address and the window of turns, and aborts it when either changes.
+- `followView` in `session/route.svelte.ts` is the page's one `$effect`. It keeps one stream open for the view, which is the address and the two windows, and aborts it when one of them changes or the tab is hidden. A tab shown again opens it again.
+- `<svelte:document bind:visibilityState>` in `App.svelte` tells `tabIs` in `session/route.svelte.ts` whether the tab is shown. Svelte adds and removes the listener.
+- `watch` in `api/watch.ts` gives a stream up when it has brought no byte for 30 s, which is three of the keep-alive comments the contract promises every 10 s, and opens the next one as after any other ending. Every chunk counts, a comment too, so the bytes are counted before `streamMessages` parses them.
 - `followEnd` in `transcript/follow-end.svelte.ts` is an attachment on the element that scrolls. A `ResizeObserver` tells it the content changed, and a `scroll` listener tells it whether the person is still at the end.
-- `focusedWhen` in `session/focus.svelte.ts` is an attachment that focuses the password field whenever the door waits for a password. The composer uses it for the message field, which each conversation gets anew, when `composer/desktop.ts` says the window is as wide as a desktop's.
+- `focusedWhen` in `session/focus.svelte.ts` is an attachment that focuses the password field whenever the door waits for a password, and the first row "Show earlier conversations" added. The composer uses it for the message field, which each conversation gets anew, when `composer/desktop.ts` says the window is as wide as a desktop's.
+- `inViewWhen` in `session/focus.svelte.ts` is an attachment that scrolls the open conversation's row into view when it becomes the current one.
 - `whenClearedElsewhere` in `composer/draft.ts` listens for `storage`, so that what another tab cleared is stored again. `composer/outbox.svelte.ts` calls it once.
 - `takesDrops` in `composer/drop.svelte.ts` is an attachment on the composer that takes a file dropped anywhere on the page, and stops listening when the composer goes.
 - `api/send.ts` sends a message with the page's one `XMLHttpRequest`, the only request that reports its upload. It turns the request's events into a stream of stages, and aborts the request when the signal it was given does.

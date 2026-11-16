@@ -10,6 +10,7 @@ let hash = $state(location.hash);
 let earlier = $state.raw({ address: "", turns: WINDOW_START });
 let rows = $state(WINDOW_START);
 let pane = $state<"room" | "conversations">("room");
+let shown = $state(true);
 let earlierRows = $state.raw<EarlierRows | null>(null);
 
 const key = $derived(keyAt(hash.slice(1)));
@@ -59,6 +60,10 @@ export function showEarlierTurns(): void {
   earlier = { address, turns: widened(turns) };
 }
 
+export function tabIs(visibility: DocumentVisibilityState): void {
+  shown = visibility === "visible";
+}
+
 export function showRoom(): void {
   pane = "room";
 }
@@ -91,7 +96,7 @@ async function follow(asked: View, token: string, signal: AbortSignal): Promise<
 export function followView(): void {
   $effect(() => {
     const token = session.token;
-    if (token === null) return undefined;
+    if (token === null || !shown) return undefined;
     const stream = new AbortController();
     void follow(view, token, stream.signal);
     return () => stream.abort();
