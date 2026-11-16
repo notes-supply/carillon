@@ -28,7 +28,7 @@ pub(crate) struct HeldTurn {
 }
 
 /// What [`conversation`] reads of a conversation `c` of the interface `?1`.
-pub(super) const CONVERSATION_COLUMNS: &str =
+const CONVERSATION_COLUMNS: &str =
     "agent_id, audience_id, channel_id, title, started_at, active_at, activity,
          (SELECT COUNT(*) FROM turns INDEXED BY turns_interface_unfinished
           WHERE interface_id = ?1 AND state IN ('queued', 'running')
@@ -118,7 +118,7 @@ fn conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
 /// Where a turn with `event_id` came from: a runtime's opening, whose
 /// `input` is its label, or a person's message, whose `input` is its text.
 /// A message's files are read apart.
-pub(super) fn source(event_id: String, input: String, command: bool) -> TurnSource {
+fn source(event_id: String, input: String, command: bool) -> TurnSource {
     if event_id.starts_with(RUNTIME_EVENT_PREFIX) {
         TurnSource::Opened {
             label: Some(input).filter(|label| !label.is_empty()),

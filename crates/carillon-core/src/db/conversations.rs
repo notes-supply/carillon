@@ -1,8 +1,7 @@
 //! Each conversation's own facts. Its channel, title and start are written
 //! once, with its first admitted message. Its activity marker rises with
 //! every turn of it that is accepted, opened or ended, so its interface's
-//! conversations order by it and a reader that saw it unchanged missed
-//! nothing.
+//! conversations order by it, the latest active first.
 
 use carillon_protocol::conversations::TITLE_LENGTH;
 use rusqlite::Connection;

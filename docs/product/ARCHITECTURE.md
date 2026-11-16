@@ -23,8 +23,8 @@ share:
 - the outcomes runtimes report for the turns they hold, and the turns they
   open themselves;
 - delivery intents and their outcomes;
-- each interface's read of its own conversations and their turns, and its
-  stream of what it is looking at;
+- each interface's stream of what it is looking at of its own conversations
+  and their turns;
 - relaying settings to the runtime that serves the agent, and command reads
   and turn controls to the conversation's runtime; and
 - inspection, backup and restore.
@@ -38,34 +38,12 @@ runtime facts and knows nothing of Discord, Pi or the installation's files.
 The application around it authenticates HTTP, loads the registry and runs
 the dispatchers. See the [core guide](../../crates/carillon-core/README.md).
 
-An interface reads its own history from core, so it need store no
+An interface sees its own history through core, so it need store no
 transcript. Core keeps each conversation's title, the first non-blank line
 of its first message, and its activity marker, a number that rises in the
 transaction that accepts a message of the conversation, opens a turn in it
-or ends one of its turns. `GET /v1/conversations` lists the caller's
-conversations by that marker, the latest active first, 50 to a page. Each
-has its agent, audience, channel and title, when it started and was last
-active, its marker and how many of its turns are at work.
-`before=<activity>` reads the page below a marker, so a conversation that
-becomes active between two reads moves to the first page and is on no
-later one. `audience_id=<audience>` lists only that audience's
-conversations, one for each agent it has talked to, so an interface that
-knows a conversation by its audience alone finds its agent. The list reads no turn and no message text, so an interface may
-poll it and compare each conversation's marker and count of turns at work.
-While both are unchanged the conversation has no new turn and no new
-answer, and its transcript need not be read again. A turn's state while it
-is unfinished, and an external answer's delivery state, are not covered: an
-interface that shows them reads the jobs of its unfinished turns.
-
-`GET /v1/conversations/{agent_id}/{audience_id}` reads one conversation's
-turns, its newest 50 first and oldest first within a page, and
-`before=<turn>` reads the page before a turn. A turn is a person's
-message, with its event ID, text and files, or a turn the runtime opened,
-with its label. It has its state and times, an ended turn's final report,
-and the answer core recorded, with its silence, files and delivery state.
-Core scopes both reads to the authenticated interface before it reads a
-row. Neither returns the context an interface added for the model, an
-operator's error text or a snapshot.
+or ends one of its turns. No two conversations of an interface share a
+marker, and they are listed by it, the highest first.
 
 `GET /v1/observe` streams what the caller is looking at as server-sent
 events, each a complete snapshot. The view is the request's query:
@@ -74,11 +52,17 @@ events, each a complete snapshot. The view is the request's query:
 counts are 1 to 500, and 50 when absent. A snapshot holds the listed
 conversations, the latest active first, whether there are more, and the
 open conversation with those turns, oldest first, whether it is listed or
-not. A conversation core records nothing of reads as unrecorded, and so does
-another interface's. A turn is queued, or running with what its runtime
-last said it was doing, or ended with the time, its ending and its final
-report. An ending is an answer with its files, an interruption's notice,
-steered or stopped. An ended turn never changes again.
+not. A conversation has its agent, audience, channel and title, when it
+started and was last active, its marker and how many of its turns are at
+work. A conversation core records nothing of reads as unrecorded, and so
+does another interface's. A turn is a person's message, with its event ID,
+text and files, or a turn the runtime opened, with its label. It is queued,
+or running with what its runtime last said it was doing, or ended with the
+time, its ending and its final report. An ending is an answer with its
+files, an interruption's notice, steered or stopped. An ended turn never
+changes again. Core scopes a snapshot to the authenticated interface before
+it reads a row, and no snapshot holds the context an interface added for
+the model or an operator's error text.
 
 Core sends the first snapshot at once and another whenever what the view
 shows has changed, so a reader replaces what it had and merges nothing.
@@ -109,8 +93,6 @@ turn, core composes again a second later to ask the runtime again, and two
 compositions on one stream are at least half a second apart. A stream ends
 when core stops and when a snapshot cannot be composed. Nothing waits to
 try again: the reader opens another stream.
-
-The web provider still polls the two reads above, so they stay.
 
 Told to stop, core ends every observation and waits at most two seconds
 for the requests in flight to be answered. A request still in flight then
@@ -272,12 +254,16 @@ in `providers/<id>.toml`, such as `tailscale serve`'s. Setup registers it as `we
 entry with any other delivery, whose answers would wait for a claim it
 never makes.
 It keeps no conversation. The page is plain files with no build step, read
-from disk on each request. It lists conversations and reads turns
-through the provider from core's history, polls the list while it is
-visible, and asks for the live state of the unfinished turns on screen. In
-the browser it keeps its token and each conversation's unsent text. A conversation is one UUID
-the page mints, which is its audience, its channel and its delivery target
-in core, and its agent is chosen with its first message and never changes.
+from disk on each request. The provider shows it one stream of complete
+snapshots, each made from one of core's snapshots of the page's view: the
+configured agents and core's limits on a message's files, the conversations,
+and the open conversation's turns. The page replaces what it had with each
+one. The provider opens core's stream once for each stream of the page's,
+ends its own when core's ends or fails, when the password changes and at
+UTC midnight, and never opens core's again: the page opens the next stream.
+In the browser the page keeps its token and each conversation's unsent
+text. A conversation is named by its agent and one UUID the page mints,
+which is its audience, its channel and its delivery target in core.
 A message's event ID is the page's too, so a retry is the first message
 again. Uploads stream into a staging batch of the request's own. Answers
 are rendered to HTML by the provider, and files are read by signed links
@@ -288,7 +274,7 @@ browser trades the password for a bearer token made from the hash, one guess
 at a time, and a wrong guess holds the next for a second. A new password
 voids every token and file link. Every request must name one of the chat's
 addresses in `Host` and come from one of them. A failure of core reaches the page as one
-retryable status, and what core said is logged.
+retryable status, or as its stream's last message, and what core said is logged.
 See the [web guide](../../crates/carillon-web/README.md).
 
 ### Replaceable Discord module

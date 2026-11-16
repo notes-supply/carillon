@@ -1,9 +1,13 @@
+//! What storage shows an interface of its conversations: how they order,
+//! what each is called, and what a turn says of its message and its ending.
+
 use carillon_protocol::{
-    conversations::{
-        ConversationPage, ConversationSummary, HISTORY_PAGE_LIMIT, Transcript, TranscriptAnswer,
-        TranscriptTurn, TurnSource,
-    },
+    conversations::TurnSource,
     model::{AnswerFile, StagedAttachments, StagedFile, TurnAttachment},
+    observation::{
+        Conversation, ConversationKey, Ending, Limit, ObservedTurn, OpenView, Opened as Shown,
+        Progress, View,
+    },
     turns::{Silence, TurnOpening},
 };
 
@@ -51,22 +55,34 @@ fn settle(database: &Database, turn_id: &str, settlement: Settlement<'_>) -> Res
     Ok(())
 }
 
-fn listed(database: &Database, interface: &str) -> Result<Vec<ConversationSummary>> {
-    Ok(database.conversations(interface, None, None)?.conversations)
+/// The interface's conversations, the latest active first.
+fn listed(database: &Database, interface: &str) -> Result<Vec<Conversation>> {
+    Ok(database
+        .observed(interface, &View::default())?
+        .conversations)
 }
 
 /// The audiences of the conversations `discord` lists, in its order.
 fn order(database: &Database) -> Result<Vec<String>> {
     Ok(listed(database, "discord")?
         .into_iter()
-        .map(|conversation| conversation.audience_id)
+        .map(|conversation| conversation.key.audience_id().to_owned())
         .collect())
 }
 
-fn transcript(database: &Database, audience: &str) -> Result<Vec<TranscriptTurn>> {
-    Ok(database
-        .transcript("discord", "agent", audience, None)?
-        .turns)
+/// The turns `discord` is shown of its conversation with `audience`.
+fn turns(database: &Database, audience: &str) -> Result<Vec<ObservedTurn>> {
+    let view = View {
+        conversations: Limit::default(),
+        open: Some(OpenView {
+            conversation: ConversationKey::new("agent".to_owned(), audience.to_owned())?,
+            turns: Limit::default(),
+        }),
+    };
+    match database.observed("discord", &view)?.open {
+        Some(Shown::Recorded { turns, .. }) => Ok(turns),
+        other => bail!("no recorded conversation is open: {other:?}"),
+    }
 }
 
 #[test]
@@ -98,14 +114,14 @@ fn conversations_are_listed_by_whichever_last_gained_or_ended_a_turn() -> Result
         .try_into()
         .map_err(|listed| anyhow::anyhow!("expected two conversations: {listed:?}"))?;
     assert_eq!(
-        (a.agent_id.as_str(), a.channel_id.as_str(), a.title.as_str()),
+        (a.key.agent_id(), a.channel_id.as_str(), a.title.as_str()),
         ("agent", "channel", "Plan the trip")
     );
     assert_eq!((a.at_work, b.at_work), (0, 2));
     assert!(a.started_at > 0 && a.started_at <= a.active_at);
     let foreign = listed(&database, "other")?;
     assert_eq!(foreign.len(), 1);
-    assert_eq!(foreign[0].audience_id, "elsewhere");
+    assert_eq!(foreign[0].key.audience_id(), "elsewhere");
     assert!(listed(&database, "unknown")?.is_empty());
     Ok(())
 }
@@ -117,7 +133,7 @@ fn a_conversations_activity_rises_with_each_of_its_own_turns_events_alone() -> R
     let activity = |audience: &str| -> Result<i64> {
         Ok(listed(&database, "discord")?
             .iter()
-            .find(|conversation| conversation.audience_id == audience)
+            .find(|conversation| conversation.key.audience_id() == audience)
             .context("not listed")?
             .activity)
     };
@@ -171,7 +187,12 @@ fn a_title_is_the_first_line_that_says_anything_within_its_length() -> Result<()
     write(&database, "later", "plain", "Something else")?;
     let mut titles = listed(&database, "discord")?
         .into_iter()
-        .map(|conversation| (conversation.audience_id, conversation.title))
+        .map(|conversation| {
+            (
+                conversation.key.audience_id().to_owned(),
+                conversation.title,
+            )
+        })
         .collect::<Vec<_>>();
     titles.sort();
     assert_eq!(
@@ -186,120 +207,20 @@ fn a_title_is_the_first_line_that_says_anything_within_its_length() -> Result<()
     Ok(())
 }
 
-#[test]
-fn the_conversation_list_pages_below_the_last_one_listed_while_others_move_up() -> Result<()> {
-    let directory = tempdir()?;
-    let database = Database::create(&directory.path().join("state.sqlite3"))?;
-    let mut newest_first = Vec::new();
-    for index in 0..HISTORY_PAGE_LIMIT + 3 {
-        let audience = format!("conversation-{index}");
-        write(&database, &audience, &audience, "hello")?;
-        newest_first.insert(0, audience);
-    }
-    let audiences = |page: &ConversationPage| {
-        page.conversations
-            .iter()
-            .map(|conversation| conversation.audience_id.clone())
-            .collect::<Vec<_>>()
-    };
-    let page = database.conversations("discord", None, None)?;
-    assert_eq!(audiences(&page), newest_first[..HISTORY_PAGE_LIMIT]);
-    assert_eq!(
-        page.next,
-        page.conversations
-            .last()
-            .map(|conversation| conversation.activity)
-    );
-    let (listed, unlisted) = (&newest_first[3], &newest_first[HISTORY_PAGE_LIMIT + 1]);
-    write(&database, "again", listed, "more")?;
-    write(&database, "later", unlisted, "more")?;
-    let rest = database.conversations("discord", page.next, None)?;
-    assert_eq!(
-        audiences(&rest),
-        [
-            newest_first[HISTORY_PAGE_LIMIT].clone(),
-            newest_first[HISTORY_PAGE_LIMIT + 2].clone()
-        ]
-    );
-    assert_eq!(rest.next, None);
-    assert_eq!(order(&database)?[..2], [unlisted.clone(), listed.clone()]);
-    Ok(())
-}
-
-#[test]
-fn an_audience_names_its_conversations_of_one_interface_one_for_each_agent() -> Result<()> {
-    let directory = tempdir()?;
-    let database = Database::create(&directory.path().join("state.sqlite3"))?;
-    write(&database, "one", "wanted", "hello")?;
-    write(&database, "two", "another", "hello")?;
-    let second = ExternalEvent {
-        agent_id: "second".to_owned(),
-        ..event("three", "wanted")
-    };
-    say(&database, "discord", &second)?;
-    say(&database, "web", &event("four", "wanted"))?;
-    let named = |interface: &str, before, audience: &str| -> Result<Vec<(String, String)>> {
-        let page = database.conversations(interface, before, Some(audience))?;
-        assert_eq!(page.next, None);
-        Ok(page
-            .conversations
-            .into_iter()
-            .map(|conversation| (conversation.agent_id, conversation.audience_id))
-            .collect())
-    };
-    let wanted = |agent: &str| (agent.to_owned(), "wanted".to_owned());
-    assert_eq!(
-        named("discord", None, "wanted")?,
-        [wanted("second"), wanted("agent")],
-        "the latest active first, and no other audience"
-    );
-    assert_eq!(named("web", None, "wanted")?, [wanted("agent")]);
-    assert!(named("discord", None, "unknown")?.is_empty());
-    assert!(named("unknown", None, "wanted")?.is_empty());
-    let latest = listed(&database, "discord")?[0].activity;
-    assert_eq!(named("discord", Some(latest), "wanted")?, [wanted("agent")]);
-    Ok(())
-}
-
-/// What each turn of a transcript says, apart from its times.
-type Read<'a> = (
-    &'a str,
-    &'a TurnSource,
-    TurnState,
-    &'a Option<TurnActivity>,
-    &'a Option<TranscriptAnswer>,
-);
-
-fn read(turns: &[TranscriptTurn]) -> Vec<Read<'_>> {
-    turns
-        .iter()
-        .map(|turn| {
-            assert_eq!(turn.finished_at.is_some(), turn.answer.is_some());
-            (
-                turn.turn_id.as_str(),
-                &turn.source,
-                turn.state,
-                &turn.report,
-                &turn.answer,
-            )
-        })
-        .collect()
-}
-
-/// Nothing of `kept_back` is in what an interface reads of `turns`.
-fn keeps_back(turns: &[TranscriptTurn], kept_back: &[&str]) -> Result<()> {
+/// Nothing of `kept_back` is in what an interface is shown of `turns`.
+fn keeps_back(turns: &[ObservedTurn], kept_back: &[&str]) -> Result<()> {
     let wire = serde_json::to_string(turns)?;
     for text in kept_back
         .iter()
         .chain(&["provider snapshot", "resource snapshot"])
     {
-        assert!(!wire.contains(text), "{text} was read back");
+        assert!(!wire.contains(text), "{text} was shown");
     }
     Ok(())
 }
 
 #[test]
-fn a_message_reads_back_as_written_with_its_files_and_its_answers_in_order() -> Result<()> {
+fn a_message_is_shown_as_written_with_its_files_and_its_answer_s_in_order() -> Result<()> {
     let directory = tempdir()?;
     let database = Database::create(&directory.path().join("state.sqlite3"))?;
     let staged = |name: &str, size, content_type: Option<&str>| StagedFile {
@@ -374,54 +295,32 @@ fn a_message_reads_back_as_written_with_its_files_and_its_answers_in_order() -> 
             sent(1, "two.png", 2, None, "second digest"),
         ],
     };
-    let answer = Some(TranscriptAnswer {
-        content: content.to_owned(),
-        silence: None,
-        files: vec![attached(0, "b.pdf", 20), attached(1, "a.pdf", 10)],
-        delivery: DeliveryState::Pending,
-    });
-    let turns = transcript(&database, "conversation")?;
-    assert_eq!(
-        read(&turns),
-        [(
-            turn.as_str(),
-            &source,
-            TurnState::Completed,
-            &Some(final_report),
-            &answer
-        )]
-    );
-    keeps_back(&turns, &["quoted for the model"])
-}
-
-#[test]
-fn a_transcript_reads_each_answers_delivery_as_it_stands() -> Result<()> {
-    let directory = tempdir()?;
-    let database = Database::create(&directory.path().join("state.sqlite3"))?;
-    let turn = write(&database, "one", "conversation", "hello")?;
-    answer(&database, &turn, "done")?;
-    let delivery = || -> Result<Option<DeliveryState>> {
-        let turns = transcript(&database, "conversation")?;
-        Ok(turns[0].answer.as_ref().map(|answer| answer.delivery))
+    let shown = turns(&database, "conversation")?;
+    let [only] = shown.as_slice() else {
+        bail!("expected one turn: {shown:?}");
     };
-    assert_eq!(delivery()?, Some(DeliveryState::Pending));
-    let claimed = database
-        .claim_delivery("discord", "instance")?
-        .context("nothing to claim")?;
-    assert_eq!(delivery()?, Some(DeliveryState::Delivering));
-    database.acknowledge_delivery(
-        "discord",
-        claimed.id,
-        "instance",
-        DeliveryOutcome::Uncertain,
-        None,
-    )?;
-    assert_eq!(delivery()?, Some(DeliveryState::Uncertain));
-    Ok(())
+    assert_eq!(
+        (only.turn_id.as_str(), &only.source),
+        (turn.as_str(), &source)
+    );
+    let Progress::Ended { ending, report, .. } = &only.progress else {
+        bail!("not ended: {only:?}");
+    };
+    assert_eq!(
+        (ending, report),
+        (
+            &Ending::Answered {
+                text: content.to_owned(),
+                files: vec![attached(0, "b.pdf", 20), attached(1, "a.pdf", 10)],
+            },
+            &Some(final_report)
+        )
+    );
+    keeps_back(&shown, &["quoted for the model"])
 }
 
 #[test]
-fn a_transcript_tells_commands_silences_and_a_runtimes_own_turns_apart() -> Result<()> {
+fn commands_silences_and_a_runtime_s_own_turns_are_shown_apart() -> Result<()> {
     let directory = tempdir()?;
     let database = Database::create(&directory.path().join("state.sqlite3"))?;
     let command = ExternalEvent {
@@ -454,91 +353,48 @@ fn a_transcript_tells_commands_silences_and_a_runtimes_own_turns_apart() -> Resu
     let opened = |label: Option<&str>| TurnSource::Opened {
         label: label.map(str::to_owned),
     };
-    let told = |content: &str, silence| {
-        Some(TranscriptAnswer {
-            content: content.to_owned(),
-            silence,
-            files: Vec::new(),
-            delivery: DeliveryState::Pending,
-        })
+    // When a turn ended is not what tells these apart.
+    let ended = |ending| Progress::Ended {
+        finished_at: 0,
+        ending,
+        report: None,
     };
-    let (interrupted, completed) = (TurnState::Interrupted, TurnState::Completed);
+    let interrupted = Ending::Interrupted {
+        notice: "That turn was interrupted.".to_owned(),
+    };
+    let running = || Progress::Running { activity: None };
     let expected = [
         (
             failed,
             message("command", "/model", true),
-            interrupted,
-            told("That turn was interrupted.", None),
+            ended(interrupted),
         ),
         (
             steered,
             message("steered", "Actually", false),
-            completed,
-            told("", Some(Silence::Steered)),
+            ended(Ending::Steered),
         ),
         (
             stopped,
             message("stopped", "Never mind", false),
-            interrupted,
-            told("", Some(Silence::Stopped)),
+            ended(Ending::Stopped),
         ),
-        (labelled, opened(Some(label)), TurnState::Running, None),
-        (unlabelled, opened(None), TurnState::Running, None),
+        (labelled, opened(Some(label)), running()),
+        (unlabelled, opened(None), running()),
         (
             queued,
             message("queued", "Still there?", false),
-            TurnState::Queued,
-            None,
+            Progress::Queued,
         ),
     ];
-    let turns = transcript(&database, "conversation")?;
-    assert_eq!(
-        read(&turns),
-        expected
-            .iter()
-            .map(|(turn, source, state, answer)| (turn.as_str(), source, *state, &None, answer))
-            .collect::<Vec<_>>()
-    );
-    keeps_back(&turns, &["operator detail"])
-}
-
-#[test]
-fn a_transcript_pages_back_from_its_newest_turns_within_its_own_conversation() -> Result<()> {
-    let directory = tempdir()?;
-    let database = Database::create(&directory.path().join("state.sqlite3"))?;
-    let mut written = Vec::new();
-    for index in 0..HISTORY_PAGE_LIMIT + 3 {
-        written.push(write(
-            &database,
-            &format!("event-{index}"),
-            "conversation",
-            "hello",
-        )?);
-    }
-    let elsewhere = write(&database, "elsewhere", "another", "hello")?;
-    let foreign = say(&database, "other", &event("foreign", "conversation"))?;
-    let page =
-        |before: Option<&str>| database.transcript("discord", "agent", "conversation", before);
-    let ids = |turns: &[TranscriptTurn]| {
-        turns
-            .iter()
-            .map(|turn| turn.turn_id.clone())
-            .collect::<Vec<_>>()
-    };
-    let newest = page(None)?;
-    assert_eq!(ids(&newest.turns), written[3..]);
-    assert!(newest.earlier);
-    let oldest = page(Some(&newest.turns[0].turn_id))?;
-    assert_eq!(ids(&oldest.turns), written[..3]);
-    assert!(!oldest.earlier);
-    for cursor in [elsewhere.as_str(), foreign.as_str(), "unknown"] {
-        assert_eq!(page(Some(cursor))?, Transcript::default(), "{cursor}");
-    }
-    let others = database.transcript("other", "agent", "conversation", None)?;
-    assert_eq!(ids(&others.turns), [foreign]);
-    for (agent, audience) in [("agent", "unknown"), ("unknown", "conversation")] {
-        let empty = database.transcript("discord", agent, audience, None)?;
-        assert_eq!(empty, Transcript::default());
-    }
-    Ok(())
+    let shown = turns(&database, "conversation")?;
+    let came = shown.iter().map(|turn| {
+        let mut progress = turn.progress.clone();
+        if let Progress::Ended { finished_at, .. } = &mut progress {
+            *finished_at = 0;
+        }
+        (turn.turn_id.clone(), turn.source.clone(), progress)
+    });
+    assert_eq!(came.collect::<Vec<_>>(), expected);
+    keeps_back(&shown, &["operator detail"])
 }
