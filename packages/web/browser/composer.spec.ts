@@ -240,3 +240,48 @@ test("New conversation leaves the open one for an empty room", async ({ page, fa
   await expect(conversations(page).locator('[aria-current="page"]')).toHaveCount(0);
   await expect(page.getByText("Write below to start this conversation.")).toBeVisible();
 });
+
+test("the composer grows with what is written, up to two fifths of the window, and shrinks again", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "turn");
+  await open(page, "Plan the release.");
+  const height = async (): Promise<number> => (await message(page).boundingBox())?.height ?? 0;
+  const oneLine = await height();
+  expect(oneLine).toBeGreaterThan(0);
+  await message(page).fill("One\nTwo\nThree\nFour");
+  await expect.poll(height).toBeGreaterThan(oneLine * 3);
+  await expect.poll(height).toBeLessThan(oneLine * 5);
+  await message(page).fill(Array.from({ length: 80 }, () => "A line.").join("\n"));
+  await expect.poll(height).toBe(320);
+  await message(page).fill("");
+  await expect.poll(height).toBe(oneLine);
+});
+
+test("opening a conversation in a wide window puts the cursor in the message", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  await expect(message(page)).toBeFocused();
+  await open(page, "Plan the release.");
+  await expect(message(page)).toBeFocused();
+  await open(page, "Chart last week's numbers.");
+  await expect(message(page)).toBeFocused();
+});
+
+test("opening a conversation in a phone's window leaves the message unfocused", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  const address = await conversation(page, "Plan the release.")
+    .getByRole("link")
+    .getAttribute("href");
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${fake.origin}/${address ?? ""}`);
+  await expect(page.getByRole("heading", { name: "Plan the release.", level: 2 })).toBeVisible();
+  await expect(turns(page)).toHaveCount(1);
+  await expect(message(page)).not.toBeFocused();
+});

@@ -2,12 +2,14 @@
   import type { Command } from "../api/requests.ts";
   import type { Agent, ConversationKey, Limits } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
+  import { focusedWhen } from "../session/focus.svelte.ts";
   import { openConversation } from "../session/route.svelte.ts";
   import { session } from "../session/session.svelte.ts";
   import Words from "../session/Words.svelte";
   import Attached from "./Attached.svelte";
   import Commands from "./Commands.svelte";
   import { loadCommands, offered } from "./commands.svelte.ts";
+  import { onDesktop } from "./desktop.ts";
   import { overLimit } from "./limits.ts";
   import {
     attach,
@@ -123,16 +125,19 @@
     <Commands {offers} {choice} {take} />
     <form class="composer" onsubmit={submitted}>
       <Attached {files} remove={(file) => detach(address, file)} after={field} />
-      <textarea
-        rows="1"
-        aria-label="Message"
-        placeholder="Write to Carillon"
-        value={text}
-        bind:this={field}
-        oninput={(event) => wrote(event.currentTarget.value)}
-        onkeydown={pressed}
-        onpaste={pasted}
-      ></textarea>
+      {#key key.audience_id}
+        <textarea
+          rows="1"
+          aria-label="Message"
+          placeholder="Write to Carillon"
+          value={text}
+          bind:this={field}
+          oninput={(event) => wrote(event.currentTarget.value)}
+          onkeydown={pressed}
+          onpaste={pasted}
+          {@attach focusedWhen(onDesktop())}
+        ></textarea>
+      {/key}
       <div class="composer-foot">
         <button class="button" type="button" onclick={() => chooser?.click()}>Attach files</button>
         <input type="file" multiple hidden bind:this={chooser} onchange={chosen} />

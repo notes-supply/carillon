@@ -651,6 +651,7 @@ a.file:hover {
   display: block;
   width: 100%;
   max-height: 40vh;
+  field-sizing: content;
   padding: 0.2rem 0;
   border: 0;
   outline: 0;
