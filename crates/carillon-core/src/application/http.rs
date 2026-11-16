@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result, anyhow};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -28,9 +28,10 @@ use carillon_installation::{
 };
 use carillon_protocol::{
     model::{
-        ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
-        EventStatus, ExternalEvent, Health, INSTANCE_HEADER, JobPage, PROVIDER_HEADER,
-        SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState, TurnSummary,
+        ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation, EVENT_BODY_LIMIT,
+        EventReceipt, EventStatus, ExternalEvent, Health, INSTANCE_HEADER, JobPage,
+        PROVIDER_HEADER, SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState,
+        TurnSummary,
     },
     settings::{SettingsRequest, Subject},
 };
@@ -247,7 +248,10 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/v1/events", post(accept_event))
+        .route(
+            "/v1/events",
+            post(accept_event).layer(DefaultBodyLimit::max(EVENT_BODY_LIMIT)),
+        )
         .route("/v1/events/{event_id}", get(event_status))
         .route("/v1/events/{event_id}/control", post(controls::control))
         .route(

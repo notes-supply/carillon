@@ -441,10 +441,10 @@ The 200 is core's receipt: core has the message, files included.
 
 | Status | Meaning |
 | --- | --- |
-| 400 | The body is not a readable multipart form, or has neither text nor a file. |
+| 400 | The body is not a readable multipart form, has a part that is not `text` or `file`, has a second `text` part, or has neither text nor a file. |
 | 404 | The conversation is new and names no agent. |
 | 409 | The conversation has another agent. |
-| 413 | Too many files, or a file or the message is over core's limits. |
+| 413 | Too many files, a file or the message's files over core's limits, or text and file names that together make more than core reads in one event, which is about 2 MiB. |
 | 422 | Carillon has no agent of that name. |
 | 503 | Carillon cannot take it now. Send it again, unchanged. |
 | 507 | Core's file store is full. Sending again does not help. |
