@@ -2,7 +2,7 @@
   import { WINDOW_LIMIT, type Conversation } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
   import { focusedWhen, inViewWhen } from "../session/focus.svelte.ts";
-  import { route, showEarlierConversations } from "../session/route.svelte.ts";
+  import { route, showEarlierConversations, showRoom } from "../session/route.svelte.ts";
   import Moment from "../time/Moment.svelte";
   import { titleOf } from "./title.ts";
   import { unread, type Seen } from "./unread.ts";
@@ -25,7 +25,7 @@
 <nav class="rail" aria-label="Conversations">
   <header class="rail-head">
     <h1 class="wordmark">Carillon</h1>
-    <a class="button" href="#new">New conversation</a>
+    <a class="button" href="#new" onclick={showRoom}>New conversation</a>
   </header>
   <ol class="chats">
     {#each conversations as conversation (addressOf(conversation.key))}
@@ -35,6 +35,7 @@
           class="chat"
           href="#{address}"
           aria-current={address === open ? "page" : undefined}
+          onclick={showRoom}
           {@attach inViewWhen(address === open)}
           {@attach focusedWhen(address === route.firstEarlierRow)}
         >

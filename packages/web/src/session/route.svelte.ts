@@ -9,6 +9,7 @@ type EarlierRows = { state: "asked"; after: number } | { state: "listed"; first:
 let hash = $state(location.hash);
 let earlier = $state.raw({ address: "", turns: WINDOW_START });
 let rows = $state(WINDOW_START);
+let pane = $state<"room" | "conversations">("room");
 let earlierRows = $state.raw<EarlierRows | null>(null);
 
 const key = $derived(keyAt(hash.slice(1)));
@@ -42,6 +43,9 @@ export const route = {
   get rows(): number {
     return rows;
   },
+  get pane(): "room" | "conversations" {
+    return pane;
+  },
   get firstEarlierRow(): string {
     return earlierRows?.state === "listed" ? earlierRows.first : "";
   },
@@ -53,6 +57,14 @@ export function openConversation(next: ConversationKey): void {
 
 export function showEarlierTurns(): void {
   earlier = { address, turns: widened(turns) };
+}
+
+export function showRoom(): void {
+  pane = "room";
+}
+
+export function showConversations(): void {
+  pane = "conversations";
 }
 
 export function showEarlierConversations(): void {

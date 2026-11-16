@@ -4,7 +4,7 @@
   import { titleOf } from "./rail/title.ts";
   import { addressOf, openedAt } from "./session/address.ts";
   import Door from "./session/Door.svelte";
-  import { followView, route } from "./session/route.svelte.ts";
+  import { followView, route, showConversations } from "./session/route.svelte.ts";
   import { session } from "./session/session.svelte.ts";
   import Words from "./session/Words.svelte";
   import Transcript from "./transcript/Transcript.svelte";
@@ -32,7 +32,7 @@
 {#if snapshot === null}
   <Door />
 {:else}
-  <div class="app in-room">
+  <div class="app" class:in-room={route.pane === "room"}>
     <Rail
       conversations={snapshot.conversations}
       seen={session.seen}
@@ -42,6 +42,7 @@
     />
     <main class="room">
       <header class="room-head">
+        <button class="button back" type="button" onclick={showConversations}>Conversations</button>
         <h2>{conversation === undefined ? "New conversation" : titleOf(conversation)}</h2>
         {#if agent !== undefined}
           <span class="with">with {agent.name}</span>

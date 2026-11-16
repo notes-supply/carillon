@@ -156,3 +156,10 @@ test("a conversation's time becomes its date when the day changes, with no snaps
   await expect(conversation(page, "Plan the release.")).toContainText("15 Nov");
   await expect(conversation(page, "Chart last week's numbers.")).toContainText("15 Nov");
 });
+
+test("beside the room, the list needs no way back", async ({ page, fake }) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await expect(rail(page)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Conversations" })).toBeHidden();
+});
