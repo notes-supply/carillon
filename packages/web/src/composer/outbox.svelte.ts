@@ -88,6 +88,7 @@ export async function send(key: ConversationKey, limits: Limits): Promise<void> 
     if (!isOnItsWay(address, message.eventId)) return;
     if (stage.kind === "refused") {
       sent.set(address, stage);
+      attached.set(address, [...files, ...attachedTo(address)]);
       write(address, joined(text, draftOf(address)));
       return;
     }

@@ -561,6 +561,25 @@ export const scenarios: Record<string, Scenario> = {
       },
     ],
   },
+  "send-held-refused": {
+    about:
+      "The provider holds a message, then reads it and refuses it, so that a person has written more by then.",
+    world: (now) => ({ ...planning(now), sending: { kind: "hold_upload" } }),
+    steps: [
+      {
+        at: 6000,
+        label: "the provider reads the upload and refuses it",
+        run: (stage) => {
+          stage.world.sending = {
+            kind: "refuse",
+            status: 413,
+            error: "A file may have at most 1024 MiB, and a message's files 2048 MiB together.",
+          };
+          stage.release();
+        },
+      },
+    ],
+  },
   controls: {
     about:
       "A running answer that offers stop, and a waiting message that offers steer, interrupt and stop. The next step does what was pressed.",

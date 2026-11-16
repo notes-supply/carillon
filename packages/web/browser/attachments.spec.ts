@@ -182,3 +182,26 @@ test("a file on its way says how much of it has left the browser, beside the mes
   await expect(page.getByRole("progressbar")).toHaveCount(0);
   await expect(turns(page)).toHaveCount(2);
 });
+
+test("a refused message returns its text and its files ahead of what was written and attached since", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-held-refused");
+  await open(page, "Plan the release.");
+  await choose(page, [{ name: "first.txt", bytes: 10 }]);
+  await message(page).fill("First thought.");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(turns(page).last()).toContainText("Carillon is receiving it.");
+  await message(page).fill("Second thought.");
+  await choose(page, [{ name: "second.txt", bytes: 20 }]);
+
+  await fake.step("the provider reads the upload and refuses it");
+  await expect(page.getByRole("alert")).toHaveText(
+    "A file may have at most 1024 MiB, and a message's files 2048 MiB together.",
+  );
+  await expect(message(page)).toHaveValue("First thought.\n\nSecond thought.");
+  await expect(attached(page)).toHaveText([/first\.txt\s*10 B/u, /second\.txt\s*20 B/u]);
+  await expect(turns(page)).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+});
