@@ -2,7 +2,7 @@
   import type { Command } from "../api/requests.ts";
   import type { Agent, ConversationKey, Limits } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
-  import { focusedWhen } from "../session/focus.svelte.ts";
+  import { focusedWhen, messageField } from "../session/focus.svelte.ts";
   import { openConversation } from "../session/route.svelte.ts";
   import { session } from "../session/session.svelte.ts";
   import Words from "../session/Words.svelte";
@@ -128,6 +128,7 @@
           onkeydown={pressed}
           onpaste={pasted}
           {@attach focusedWhen(onDesktop())}
+          {@attach messageField}
         ></textarea>
       {/key}
       <div class="composer-foot">

@@ -41,6 +41,7 @@ To see the page as the provider serves it, run `vite build --watch` beside the f
 | A message on its way, or its refusal | `composer/outbox.svelte.ts`, one for each conversation | A send, its stages, the snapshot that has its turn, and a sign-out, which cancels it |
 | The agent's commands | `composer/commands.svelte.ts`, for each conversation | The first `/` written there asks the provider, once |
 | The command chosen in the menu, and whether Escape hid it | `composer/Composer.svelte`, for the conversation it was set in | The arrows, Escape, writing |
+| A control a person pressed, or why it was not taken | `activity/controls.svelte.ts`, one for each turn | A press and its answer |
 | The time | `time/clock.svelte.ts` | Each second, and `clock.today` each day |
 
 Everything a component draws is a `$derived` of these, or a call to one of the display functions: `ledger`, `outcome`, `size`, `span` and `when`.
@@ -59,6 +60,7 @@ The modules that may reach outside the page's state are a short list, written in
 - `whenClearedElsewhere` in `composer/draft.ts` listens for `storage`, so that what another tab cleared is stored again. `composer/outbox.svelte.ts` calls it once.
 - `takesDrops` in `composer/drop.svelte.ts` is an attachment on the composer that takes a file dropped anywhere on the page, and stops listening when the composer goes.
 - `api/send.ts` sends a message with the page's one `XMLHttpRequest`, the only request that reports its upload. It turns the request's events into a stream of stages, and aborts the request when the signal it was given does.
+- `messageField` in `session/focus.svelte.ts` is an attachment on the composer's text field. It holds the field so that `focusMessage` can give it the keyboard after a control is pressed, on a window wide enough to show the rail beside the room.
 - `clock` subscribes to a one-second interval with `createSubscriber`, so the interval runs only while something on the page reads the time.
 
 ## What the tools do not tell you
@@ -69,4 +71,5 @@ The modules that may reach outside the page's state are a short list, written in
 - The effect in `followView` tracks only what it reads before the first `await`. `follow` and `watch` must read no state there.
 - `hear` in `session/session.svelte.ts` is the one place a snapshot is taken in. It also calls `see` and `settle`, because both remember something the next snapshot no longer says. `readAddress` calls `see` too, so that a conversation opened and left before its snapshot arrived still counts as seen.
 - "New conversation" links to `#new`, an address that names no conversation. Svelte's accessibility check refuses `href="#"`. `readAddress` then gives the address a new conversation to name.
+- A pressed control reads as pressed and holds its turn's other controls until the turn ends, or starts or stops waiting its turn. A runtime that still offers the control fifteen seconds later took it and changed nothing, so it is offered again. The press is kept by turn, outside the component, because the transcript is drawn again for each conversation opened.
 - The transcript is inside `{#key route.address}`, so each conversation gets its own scrolling element and starts at its end.

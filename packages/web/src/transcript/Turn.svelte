@@ -21,6 +21,11 @@
   {#if turn.progress.state === "ended"}
     <Ended progress={turn.progress} acceptedAt={turn.accepted_at} />
   {:else}
-    <Ledger progress={turn.progress} acceptedAt={turn.accepted_at} />
+    <Ledger
+      progress={turn.progress}
+      acceptedAt={turn.accepted_at}
+      turnId={turn.turn_id}
+      message={turn.source.kind === "message" ? turn.source : undefined}
+    />
   {/if}
 </li>
