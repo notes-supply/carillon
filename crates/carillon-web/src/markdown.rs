@@ -2,7 +2,8 @@
 //! and never sees markup a model wrote: this is the one place that decides
 //! what markup an answer makes.
 
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html};
+use pulldown_cmark::{Alignment, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, html};
+use pulldown_cmark_escape::{escape_href, escape_html};
 
 /// `markdown` as HTML that runs nothing and loads nothing. Raw HTML is
 /// shown as the text it is. A link stays one only to `http`, `https` or
@@ -12,52 +13,115 @@ use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html};
 pub(crate) fn render(markdown: &str) -> String {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut became_anchor = Vec::new();
-    let events = Parser::new_ext(markdown, options).filter_map(|event| match event {
-        Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
-        Event::Start(
-            Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            }
-            | Tag::Image {
-                link_type,
-                dest_url,
-                title,
-                id,
-            },
-        ) => {
-            let kept = !became_anchor.contains(&true)
-                && (link_type == LinkType::Email || allowed(&dest_url));
-            became_anchor.push(kept);
-            kept.then_some(Event::Start(Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            }))
-        }
-        Event::End(TagEnd::Link | TagEnd::Image) => became_anchor
-            .pop()
-            .unwrap_or_default()
-            .then_some(Event::End(TagEnd::Link)),
-        event => Some(event),
-    });
+    let mut tags = Tags::default();
+    let events = Parser::new_ext(markdown, options).filter_map(|event| tags.written(event));
     let mut rendered = String::new();
     html::push_html(&mut rendered, events);
-    // Every `<` of the source is escaped by now, so each tag here is one the
-    // renderer wrote. It aligns a table's column with an inline style, which
-    // the page's policy refuses, so the alignment becomes a class the page's
-    // stylesheet knows.
     rendered
-        .replace(
-            "<a href=",
-            "<a target=\"_blank\" rel=\"noreferrer noopener\" href=",
-        )
-        .replace("<th style=\"text-align: ", "<th class=\"align-")
-        .replace("<td style=\"text-align: ", "<td class=\"align-")
+}
+
+/// Where the walk of the parser's events stands, for the tags this file
+/// writes in place of the renderer's.
+#[derive(Default)]
+struct Tags {
+    /// For each link or image the walk is inside, whether it became an
+    /// anchor.
+    became_anchor: Vec<bool>,
+    /// The alignment of each column of the table the walk is inside.
+    alignments: Vec<Alignment>,
+    /// The walk is in that table's head.
+    heading: bool,
+    /// The column the next cell is in.
+    column: usize,
+}
+
+impl Tags {
+    /// `event` as the renderer is given it, or `None` for one that leaves
+    /// nothing. The source's own HTML goes on as text, so every `Html`
+    /// event the renderer sees is a tag written here.
+    fn written<'a>(&mut self, event: Event<'a>) -> Option<Event<'a>> {
+        Some(match event {
+            Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+            Event::Start(
+                Tag::Link {
+                    link_type,
+                    dest_url,
+                    title,
+                    ..
+                }
+                | Tag::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    ..
+                },
+            ) => {
+                let email = link_type == LinkType::Email;
+                let kept = !self.became_anchor.contains(&true) && (email || allowed(&dest_url));
+                self.became_anchor.push(kept);
+                Event::InlineHtml(kept.then(|| anchor(email, &dest_url, &title))?.into())
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => self
+                .became_anchor
+                .pop()
+                .unwrap_or_default()
+                .then_some(Event::End(TagEnd::Link))?,
+            Event::Start(Tag::Table(alignments)) => {
+                self.alignments.clone_from(&alignments);
+                Event::Start(Tag::Table(alignments))
+            }
+            Event::Start(Tag::TableHead) => {
+                (self.heading, self.column) = (true, 0);
+                event
+            }
+            Event::Start(Tag::TableRow) => {
+                (self.heading, self.column) = (false, 0);
+                event
+            }
+            Event::Start(Tag::TableCell) => {
+                let alignment = self.alignments.get(self.column).copied();
+                self.column += 1;
+                Event::Html(CowStr::Borrowed(cell(
+                    self.heading,
+                    alignment.unwrap_or(Alignment::None),
+                )))
+            }
+            event => event,
+        })
+    }
+}
+
+/// The opening tag of a link to `url`, which opens in a tab of its own that
+/// learns nothing of this one.
+fn anchor(email: bool, url: &str, title: &str) -> String {
+    let mut tag = String::from("<a target=\"_blank\" rel=\"noreferrer noopener\" href=\"");
+    if email {
+        tag.push_str("mailto:");
+    }
+    // Writing to a `String` cannot fail.
+    let _ = escape_href(&mut tag, url);
+    if !title.is_empty() {
+        tag.push_str("\" title=\"");
+        let _ = escape_html(&mut tag, title);
+    }
+    tag.push_str("\">");
+    tag
+}
+
+/// The opening tag of a table's cell. The renderer aligns a column with an
+/// inline style, which the page's policy refuses, so the alignment is a
+/// class the page's stylesheet knows.
+const fn cell(heading: bool, alignment: Alignment) -> &'static str {
+    match (heading, alignment) {
+        (true, Alignment::None) => "<th>",
+        (true, Alignment::Left) => "<th class=\"align-left\">",
+        (true, Alignment::Center) => "<th class=\"align-center\">",
+        (true, Alignment::Right) => "<th class=\"align-right\">",
+        (false, Alignment::None) => "<td>",
+        (false, Alignment::Left) => "<td class=\"align-left\">",
+        (false, Alignment::Center) => "<td class=\"align-center\">",
+        (false, Alignment::Right) => "<td class=\"align-right\">",
+    }
 }
 
 fn allowed(url: &str) -> bool {
@@ -149,6 +213,15 @@ mod tests {
             render("[![alt](https://example.com/a.png)](https://example.com)"),
             "<p><a target=\"_blank\" rel=\"noreferrer noopener\" \
              href=\"https://example.com\">alt</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn a_link_s_title_is_an_attribute_that_cannot_end_its_tag() {
+        assert_eq!(
+            render("[site](https://example.com 'a \"quoted\" <b>title</b>')"),
+            "<p><a target=\"_blank\" rel=\"noreferrer noopener\" href=\"https://example.com\" \
+             title=\"a &quot;quoted&quot; &lt;b&gt;title&lt;/b&gt;\">site</a></p>\n"
         );
     }
 

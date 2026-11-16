@@ -464,6 +464,7 @@ dependencies = [
  "hmac",
  "libc",
  "pulldown-cmark",
+ "pulldown-cmark-escape",
  "serde",
  "serde_json",
  "sha2",
