@@ -3,7 +3,6 @@ import { mintEventId } from "../api/requests.ts";
 import { deliver, type Sending } from "../api/send.ts";
 import type { ConversationKey, Limits, Opened } from "../api/stream.ts";
 import { addressOf } from "../session/address.ts";
-import { storedToken } from "../session/token.ts";
 import { addressOfDraft, storeDraft, storedDraft } from "./draft.ts";
 import { overLimit } from "./limits.ts";
 
@@ -98,11 +97,14 @@ export function sentTo(address: string): OnItsWay | Refused | undefined {
   return sent.get(address);
 }
 
-export async function send(key: ConversationKey, limits: Limits): Promise<void> {
+export async function send(
+  key: ConversationKey,
+  token: string | null,
+  limits: Limits,
+): Promise<void> {
   const address = addressOf(key);
   const text = draftOf(address);
   const files = attachedTo(address);
-  const token = storedToken();
   if (token === null || awaitingReceipt(address) !== undefined) return;
   if (text.trim() === "" && files.length === 0) return;
   if (overLimit(files, limits) !== undefined) return;

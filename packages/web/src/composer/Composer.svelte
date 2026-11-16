@@ -88,7 +88,7 @@
 
   function submitted(event: SubmitEvent): void {
     event.preventDefault();
-    void send(key, limits);
+    void send(key, session.token, limits);
   }
 
   function picked(event: Event & { currentTarget: HTMLSelectElement }): void {

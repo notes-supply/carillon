@@ -285,3 +285,59 @@ test("opening a conversation in a phone's window leaves the message unfocused", 
   await expect(turns(page)).toHaveCount(1);
   await expect(message(page)).not.toBeFocused();
 });
+
+const FILL_STORAGE = `(() => {
+  let chunk = "x".repeat(1 << 22);
+  for (let count = 0; chunk.length > 0; )
+    try {
+      localStorage.setItem("filler" + count, chunk);
+      count += 1;
+    } catch {
+      chunk = chunk.slice(0, chunk.length >> 1);
+    }
+})()`;
+
+const REFUSE_STORAGE = `for (const name of ["getItem", "setItem", "removeItem", "key"])
+  Storage.prototype[name] = () => {
+    throw new DOMException("The browser refuses storage.", "SecurityError");
+  };`;
+
+test("when the browser's storage is full, what is written stays in the composer and is sent, and no older text returns", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await message(page).fill("Stored in time.");
+  await page.evaluate(FILL_STORAGE);
+  await message(page).fill("Written while the storage is full.");
+  await open(page, "Chart last week's numbers.");
+  await expect(message(page)).toHaveValue("");
+  await open(page, "Plan the release.");
+  await expect(message(page)).toHaveValue("Written while the storage is full.");
+  await message(page).press("Enter");
+  await expect(turns(page).last()).toContainText("Written while the storage is full.");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(message(page)).toHaveValue("");
+  await page.reload();
+  await expect(turns(page).last()).toContainText("Written while the storage is full.");
+  await expect(message(page)).toHaveValue("");
+});
+
+test("when the browser refuses storage, what is written stays in the composer and is sent", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await page.evaluate(REFUSE_STORAGE);
+  await message(page).fill("Written while storage is refused.");
+  await open(page, "Chart last week's numbers.");
+  await expect(message(page)).toHaveValue("");
+  await open(page, "Plan the release.");
+  await expect(message(page)).toHaveValue("Written while storage is refused.");
+  await message(page).press("Enter");
+  await expect(turns(page).last()).toContainText("Written while storage is refused.");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(message(page)).toHaveValue("");
+});
