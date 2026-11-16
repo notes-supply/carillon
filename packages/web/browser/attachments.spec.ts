@@ -160,3 +160,25 @@ test("a file too large, and files too large together, are refused with their siz
   ]);
   expect(sent).toHaveLength(1);
 });
+
+test("a file on its way says how much of it has left the browser, beside the message it goes with", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-held");
+  await open(page, "Plan the release.");
+  await choose(page, [{ name: "film.mov", bytes: 40_000_000 }]);
+  await message(page).fill("Watch this.");
+  await page.getByRole("button", { name: "Send" }).click();
+  const waiting = turns(page).last();
+  await expect(waiting).toContainText("Watch this.");
+  await expect(waiting.getByRole("listitem")).toHaveText([/film\.mov\s*40 MB/u]);
+  await expect(waiting.getByRole("status")).toHaveText(/^Sending, \d{1,2}%\s*$/u);
+  await expect(waiting.getByRole("progressbar")).toBeVisible();
+
+  await fake.step("the provider reads the upload");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(turns(page).last().getByRole("link")).toHaveText([/film\.mov\s*40 MB/u]);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(turns(page)).toHaveCount(2);
+});

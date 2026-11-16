@@ -10,11 +10,9 @@ export type Outgoing = {
   files: readonly File[];
 };
 
-export type Sending =
-  | { kind: "uploading" }
-  | { kind: "receiving" }
-  | { kind: "retrying" }
-  | { kind: "refused"; words: string };
+type Leaving = { kind: "uploading"; sent: number; total: number } | { kind: "receiving" };
+
+export type Sending = Leaving | { kind: "retrying" } | { kind: "refused"; words: string };
 
 type Answer = { status: number; body: string };
 
@@ -22,12 +20,20 @@ function put(
   path: string,
   body: FormData,
   token: string,
-): { uploaded: Promise<void>; answered: Promise<Answer> } {
+): { leaving: ReadableStream<Leaving>; answered: Promise<Answer> } {
   const request = new XMLHttpRequest();
   request.open("PUT", ORIGIN + path);
   request.setRequestHeader("authorization", bearer(token));
-  const uploaded = new Promise<void>((resolve) => {
-    request.upload.addEventListener("loadend", () => resolve());
+  const leaving = new ReadableStream<Leaving>({
+    start(steps) {
+      request.upload.addEventListener("progress", ({ loaded, total }) =>
+        steps.enqueue({ kind: "uploading", sent: loaded, total }),
+      );
+      request.upload.addEventListener("load", () => {
+        if (request.readyState !== XMLHttpRequest.DONE) steps.enqueue({ kind: "receiving" });
+      });
+      request.addEventListener("loadend", () => steps.close());
+    },
   });
   const answered = new Promise<Answer>((resolve) => {
     request.addEventListener("loadend", () =>
@@ -35,7 +41,12 @@ function put(
     );
   });
   request.send(body);
-  return { uploaded, answered };
+  return { leaving, answered };
+}
+
+async function* each<Value>(stream: ReadableStream<Value>): AsyncGenerator<Value, void, void> {
+  const reader = stream.getReader();
+  for (let read = await reader.read(); !read.done; read = await reader.read()) yield read.value;
 }
 
 export async function* deliver(
@@ -44,10 +55,9 @@ export async function* deliver(
 ): AsyncGenerator<Sending, void, void> {
   const path = messagePath(message.key, message.eventId);
   for (let failures = 1; ; failures += 1) {
-    yield { kind: "uploading" };
+    yield { kind: "uploading", sent: 0, total: 0 };
     const request = put(path, messageForm(message.text, message.files), token);
-    await Promise.race([request.uploaded, request.answered]);
-    yield { kind: "receiving" };
+    yield* each(request.leaving);
     const answer = await request.answered;
     const read = reading(answer.status);
     if (read === "ok") return;

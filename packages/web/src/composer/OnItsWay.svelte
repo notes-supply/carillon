@@ -2,13 +2,9 @@
   import { size } from "../transcript/files.ts";
   import type { OnItsWay } from "./outbox.svelte.ts";
 
-  const STANDS: Record<OnItsWay["stage"], string> = {
-    uploading: "Sending",
-    receiving: "Carillon is receiving it.",
-    retrying: "Carillon is not answering. This message will be sent when it does.",
-  };
-
   let { message }: { message: OnItsWay } = $props();
+
+  const stage = $derived(message.stage);
 </script>
 
 <li class="turn">
@@ -26,6 +22,17 @@
         {/each}
       </ul>
     {/if}
-    <div class="said-foot" role="status">{STANDS[message.stage]}</div>
+    <div class="said-foot" role="status">
+      {#if stage.kind === "receiving"}
+        Carillon is receiving it.
+      {:else if stage.kind === "retrying"}
+        Carillon is not answering. This message will be sent when it does.
+      {:else if message.files.length === 0}
+        Sending
+      {:else}
+        Sending{#if stage.total > 0}, {Math.floor((stage.sent / stage.total) * 100)}%{/if}
+        <progress max={Math.max(stage.total, 1)} value={stage.sent}></progress>
+      {/if}
+    </div>
   </div>
 </li>

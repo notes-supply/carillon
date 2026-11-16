@@ -12,7 +12,7 @@ export type OnItsWay = {
   eventId: string;
   text: string;
   files: readonly File[];
-  stage: Exclude<Sending["kind"], "refused">;
+  stage: Exclude<Sending, { kind: "refused" }>;
 };
 export type Refused = { kind: "refused"; words: string };
 
@@ -79,19 +79,19 @@ export async function send(key: ConversationKey, limits: Limits): Promise<void> 
     eventId: mintEventId(),
     text,
     files,
-    stage: "uploading",
+    stage: { kind: "uploading", sent: 0, total: 0 },
   };
   sent.set(address, message);
   attached.delete(address);
   write(address, "");
-  for await (const stage of deliver({ key, ...message }, token)) {
+  for await (const stage of deliver({ key, eventId: message.eventId, text, files }, token)) {
     if (!isOnItsWay(address, message.eventId)) return;
     if (stage.kind === "refused") {
       sent.set(address, stage);
       write(address, joined(text, draftOf(address)));
       return;
     }
-    sent.set(address, { ...message, stage: stage.kind });
+    sent.set(address, { ...message, stage });
   }
 }
 
