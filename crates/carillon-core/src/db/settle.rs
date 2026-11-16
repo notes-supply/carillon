@@ -7,7 +7,7 @@ use crate::answers::KeptFile;
 
 use super::{
     Database, OptionalExtension, Result, optional_state_column, params, report_json, state_column,
-    timestamp, write_transaction,
+    timestamp,
 };
 
 /// How a turn a runtime holds ended, as core records it.
@@ -65,7 +65,7 @@ impl Database {
         turn_id: &str,
     ) -> Result<Option<String>> {
         Ok(self
-            .connect()?
+            .read()?
             .query_row(
                 "SELECT interface_id FROM turns
                  WHERE id = ?1 AND runtime_id = ?2 AND state IN ('queued', 'running')",
@@ -84,79 +84,78 @@ impl Database {
         turn_id: &str,
         settlement: Settlement<'_>,
     ) -> Result<Settled> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let found = transaction
-            .query_row(
-                "SELECT t.state, d.silence FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
-                 WHERE t.id = ?1 AND t.runtime_id = ?2",
-                params![turn_id, runtime_id],
-                |row| {
-                    Ok((
-                        state_column::<TurnState>(row, 0)?,
-                        optional_state_column::<Silence>(row, 1)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let (state, silence) = settlement.ends();
-        let settled = match found {
-            None => Settled::Unknown,
-            Some((TurnState::Queued | TurnState::Running, _)) => {
-                let (output, error, notice, activity) = match settlement {
-                    Settlement::Answered {
-                        output,
-                        content,
-                        activity,
-                        ..
-                    } => (Some(output), None, content, activity),
-                    Settlement::Failed {
-                        error,
-                        notice,
-                        activity,
-                    } => (None, Some(error), notice, activity),
-                    Settlement::Silent(Silence::Steered) => (None, None, "", None),
-                    Settlement::Silent(Silence::Stopped) => (None, Some("stopped"), "", None),
-                };
-                let now = timestamp()?;
-                transaction.execute(
-                    "UPDATE turns SET state = ?2, output = ?3, error = ?4, activity_json = ?5,
-                         finished_at = ?6
-                     WHERE id = ?1 AND state IN ('queued', 'running')",
-                    params![
-                        turn_id,
-                        state.as_str(),
-                        output,
-                        error,
-                        report_json(activity)?,
-                        now
-                    ],
-                )?;
-                self.record_delivery(&transaction, turn_id, notice, silence, now)?;
-                if let Settlement::Answered { files, .. } = settlement {
-                    for (ordinal, file) in files.iter().enumerate() {
-                        transaction.execute(
-                            "INSERT INTO answer_files(turn_id, ordinal, capture_id, name, source,
-                                 size, sha256)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![
-                                turn_id,
-                                u32::try_from(ordinal)?,
-                                file.capture,
-                                file.name,
-                                file.source,
-                                i64::try_from(file.size)?,
-                                file.sha256
-                            ],
-                        )?;
+        self.write(|transaction| {
+            let found = transaction
+                .query_row(
+                    "SELECT t.state, d.silence FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
+                     WHERE t.id = ?1 AND t.runtime_id = ?2",
+                    params![turn_id, runtime_id],
+                    |row| {
+                        Ok((
+                            state_column::<TurnState>(row, 0)?,
+                            optional_state_column::<Silence>(row, 1)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let (state, silence) = settlement.ends();
+            let settled = match found {
+                None => Settled::Unknown,
+                Some((TurnState::Queued | TurnState::Running, _)) => {
+                    let (output, error, notice, activity) = match settlement {
+                        Settlement::Answered {
+                            output,
+                            content,
+                            activity,
+                            ..
+                        } => (Some(output), None, content, activity),
+                        Settlement::Failed {
+                            error,
+                            notice,
+                            activity,
+                        } => (None, Some(error), notice, activity),
+                        Settlement::Silent(Silence::Steered) => (None, None, "", None),
+                        Settlement::Silent(Silence::Stopped) => (None, Some("stopped"), "", None),
+                    };
+                    let now = timestamp()?;
+                    transaction.execute(
+                        "UPDATE turns SET state = ?2, output = ?3, error = ?4, activity_json = ?5,
+                             finished_at = ?6
+                         WHERE id = ?1 AND state IN ('queued', 'running')",
+                        params![
+                            turn_id,
+                            state.as_str(),
+                            output,
+                            error,
+                            report_json(activity)?,
+                            now
+                        ],
+                    )?;
+                    self.record_delivery(transaction, turn_id, notice, silence, now)?;
+                    if let Settlement::Answered { files, .. } = settlement {
+                        for (ordinal, file) in files.iter().enumerate() {
+                            transaction.execute(
+                                "INSERT INTO answer_files(turn_id, ordinal, capture_id, name, source,
+                                     size, sha256)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                params![
+                                    turn_id,
+                                    u32::try_from(ordinal)?,
+                                    file.capture,
+                                    file.name,
+                                    file.source,
+                                    i64::try_from(file.size)?,
+                                    file.sha256
+                                ],
+                            )?;
+                        }
                     }
+                    Settled::Recorded
                 }
-                Settled::Recorded
-            }
-            Some(ended) if ended == (state, silence) => Settled::Recorded,
-            Some(_) => Settled::Superseded,
-        };
-        transaction.commit()?;
-        Ok(settled)
+                Some(ended) if ended == (state, silence) => Settled::Recorded,
+                Some(_) => Settled::Superseded,
+            };
+            Ok(settled)
+        })
     }
 }

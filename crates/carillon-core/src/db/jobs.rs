@@ -24,7 +24,7 @@ impl Database {
         interface_id: &str,
         after: Option<&str>,
     ) -> Result<Option<JobPage>> {
-        let mut connection = self.connect()?;
+        let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         let after = match after {
             None => 0,
@@ -67,7 +67,7 @@ impl Database {
         interface_id: &str,
         named: &[String],
     ) -> Result<Vec<(String, Job)>> {
-        let mut connection = self.connect()?;
+        let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         jobs(&transaction, interface_id, named)
     }

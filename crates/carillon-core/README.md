@@ -92,7 +92,9 @@ another runtime's turns never hold back a conversation's messages.
   record what they say of them.
 - [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
   its submodules for admission, job reads, history reads, recovery and held
-  turns.
+  turns. [`db/store.rs`](src/db/store.rs) alone opens connections.
+  `read()` gives one that cannot write. `write()` runs a closure in a
+  transaction and commits it, so every write commits in one place.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
   [`intake.rs`](src/intake.rs), [`answers.rs`](src/answers.rs): captured
   resources, messages' files and answers' files.

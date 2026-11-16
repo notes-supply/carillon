@@ -80,7 +80,7 @@ impl Database {
         agent_id: &str,
         audience_id: &str,
     ) -> Result<Option<String>> {
-        Ok(channel(&self.connect()?, interface_id, agent_id, audience_id).optional()?)
+        Ok(channel(&self.read()?, interface_id, agent_id, audience_id).optional()?)
     }
 }
 

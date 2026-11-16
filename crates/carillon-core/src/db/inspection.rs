@@ -7,7 +7,7 @@ use super::{
 
 impl Database {
     pub(crate) fn inspect_turn(&self, turn_id: &str) -> Result<Option<TurnInspection>> {
-        let connection = self.connect()?;
+        let connection = self.read()?;
         let inspection = connection
             .query_row(
                 "SELECT t.id, t.event_id, t.audience_id, t.user_id, t.input, t.state, t.output,

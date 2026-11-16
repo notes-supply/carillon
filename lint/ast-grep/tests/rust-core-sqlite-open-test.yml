@@ -1,0 +1,16 @@
+id: rust-core-sqlite-open
+valid:
+  - "fn turns(database: &Database) -> Result<u32> { count(&database.read()?) }"
+  - "fn settle(database: &Database) -> Result<()> { database.write(|transaction| end(transaction)) }"
+  - "fn open(path: &Path) -> io::Result<File> { File::open(path) }"
+  - "#[cfg(test)]\nmod tests { fn damage(path: &Path) { rusqlite::Connection::open(path); } }"
+  - "#[cfg(test)]\nmod tests { mod format { fn damage(path: &Path) { Connection::open(path); } } }"
+invalid:
+  - "fn bypass(path: &Path) -> rusqlite::Result<Connection> { Connection::open(path) }"
+  - "fn bypass(path: &Path) { rusqlite::Connection::open(path); }"
+  - "fn bypass(path: &Path) { Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE); }"
+  - "fn bypass(path: &Path) { rusqlite::Connection::open_with_flags(path, flags); }"
+  - "fn scratch() { Connection::open_in_memory(); }"
+  - "fn scratch() { rusqlite::Connection::open_in_memory(); }"
+  - "fn bypass(paths: &[PathBuf]) { paths.iter().map(Connection::open); }"
+  - "mod recovery { fn bypass(path: &Path) { Connection::open(path); } }"

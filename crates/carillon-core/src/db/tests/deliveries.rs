@@ -238,7 +238,7 @@ fn every_ending_of_a_retained_interfaces_turn_is_delivered_as_it_is_recorded() -
                 .reconcile_delivery_claims(INTERFACE, "next")?
                 .is_empty()
         );
-        let id: i64 = database.connect()?.query_row(
+        let id: i64 = database.read()?.query_row(
             "SELECT id FROM deliveries WHERE turn_id = ?1",
             [&turn],
             |row| row.get(0),
@@ -310,10 +310,12 @@ fn a_retained_answer_commits_with_its_turns_end_or_not_at_all() -> Result<()> {
         .retaining([INTERFACE.to_owned()].into());
     accept(&database, "one", "conversation")?;
     let held = hold(&database, "runtime")?;
-    database.connect()?.execute_batch(
-        "CREATE TRIGGER refuse_deliveries BEFORE INSERT ON deliveries
-         BEGIN SELECT RAISE(ABORT, 'no delivery'); END",
-    )?;
+    database.write(|transaction| {
+        Ok(transaction.execute_batch(
+            "CREATE TRIGGER refuse_deliveries BEFORE INSERT ON deliveries
+             BEGIN SELECT RAISE(ABORT, 'no delivery'); END",
+        )?)
+    })?;
     let answered = Settlement::Answered {
         output: "done",
         content: "done",
@@ -330,8 +332,7 @@ fn a_retained_answer_commits_with_its_turns_end_or_not_at_all() -> Result<()> {
     assert_eq!((turn.state, turn.output), (TurnState::Running, None));
     assert_eq!(database.delivery_counts()?.completed, 0);
     database
-        .connect()?
-        .execute_batch("DROP TRIGGER refuse_deliveries")?;
+        .write(|transaction| Ok(transaction.execute_batch("DROP TRIGGER refuse_deliveries")?))?;
     answer(&database, &held.turn_id, "done")?;
     assert_eq!(
         delivery_state(&database, &held.turn_id)?,

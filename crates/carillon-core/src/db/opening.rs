@@ -3,10 +3,7 @@ use carillon_protocol::{
     turns::TurnOpening,
 };
 
-use super::{
-    Database, OptionalExtension, Result, conversations, params, state_column, timestamp,
-    write_transaction,
-};
+use super::{Database, OptionalExtension, Result, conversations, params, state_column, timestamp};
 
 /// How the event identities of turns runtimes open begin, followed by the
 /// runtime's ID and the opening's key. Interfaces may not use them: their
@@ -41,95 +38,94 @@ impl Database {
         opening: &TurnOpening,
     ) -> Result<Opened> {
         let event_id = format!("{RUNTIME_EVENT_PREFIX}{runtime_id}:{}", opening.key);
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let earlier = transaction
-            .query_row(
-                "SELECT id, state, agent_id = ?3 AND audience_id = ?4 FROM turns
-                 WHERE interface_id = ?1 AND event_id = ?2",
+        self.write(|transaction| {
+            let earlier = transaction
+                .query_row(
+                    "SELECT id, state, agent_id = ?3 AND audience_id = ?4 FROM turns
+                     WHERE interface_id = ?1 AND event_id = ?2",
+                    params![
+                        opening.interface_id,
+                        event_id,
+                        opening.agent_id,
+                        opening.audience_id
+                    ],
+                    |row| Ok((row.get::<_, String>(0)?, state_column(row, 1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let channel = |transaction: &rusqlite::Transaction<'_>| {
+                conversations::channel(
+                    transaction,
+                    &opening.interface_id,
+                    &opening.agent_id,
+                    &opening.audience_id,
+                )
+            };
+            match earlier {
+                Some((turn_id, state, true)) => {
+                    return Ok(Opened::Receipt(OpenedTurn {
+                        receipt: EventReceipt {
+                            event_id,
+                            turn_id,
+                            state,
+                            duplicate: true,
+                        },
+                        channel_id: channel(transaction)?,
+                    }));
+                }
+                Some((_, _, false)) => return Ok(Opened::Elsewhere),
+                None => {}
+            }
+            if agent_runtime != Some(runtime_id) {
+                return Ok(Opened::Moved);
+            }
+            let latest = transaction
+                .query_row(
+                    "SELECT id, runtime_id FROM turns
+                     WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+                     ORDER BY acceptance_sequence DESC LIMIT 1",
+                    params![opening.interface_id, opening.agent_id, opening.audience_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let latest = match latest {
+                None => return Ok(Opened::NoConversation),
+                Some((_, owner)) if owner != runtime_id => return Ok(Opened::OwnedBy(owner)),
+                Some((latest, _)) => latest,
+            };
+            let turn_id = uuid::Uuid::now_v7().to_string();
+            let now = timestamp()?;
+            transaction.execute(
+                "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
+                     target_id, feedback_target_id, input, native_json, runtime_id,
+                     provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+                 SELECT ?2, interface_id, ?3, agent_id, audience_id, '', target_id, '', ?4, '{}',
+                     runtime_id, provider_snapshot_json, resource_snapshot_id, 'running', ?5
+                 FROM turns WHERE id = ?1",
                 params![
-                    opening.interface_id,
+                    latest,
+                    turn_id,
                     event_id,
-                    opening.agent_id,
-                    opening.audience_id
+                    opening.label.as_deref().unwrap_or_default(),
+                    now,
                 ],
-                |row| Ok((row.get::<_, String>(0)?, state_column(row, 1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let channel = |transaction: &rusqlite::Transaction<'_>| {
-            conversations::channel(
+            )?;
+            conversations::active(
                 transaction,
                 &opening.interface_id,
                 &opening.agent_id,
                 &opening.audience_id,
-            )
-        };
-        match earlier {
-            Some((turn_id, state, true)) => {
-                return Ok(Opened::Receipt(OpenedTurn {
-                    receipt: EventReceipt {
-                        event_id,
-                        turn_id,
-                        state,
-                        duplicate: true,
-                    },
-                    channel_id: channel(&transaction)?,
-                }));
-            }
-            Some((_, _, false)) => return Ok(Opened::Elsewhere),
-            None => {}
-        }
-        if agent_runtime != Some(runtime_id) {
-            return Ok(Opened::Moved);
-        }
-        let latest = transaction
-            .query_row(
-                "SELECT id, runtime_id FROM turns
-                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
-                 ORDER BY acceptance_sequence DESC LIMIT 1",
-                params![opening.interface_id, opening.agent_id, opening.audience_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let latest = match latest {
-            None => return Ok(Opened::NoConversation),
-            Some((_, owner)) if owner != runtime_id => return Ok(Opened::OwnedBy(owner)),
-            Some((latest, _)) => latest,
-        };
-        let turn_id = uuid::Uuid::now_v7().to_string();
-        let now = timestamp()?;
-        transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
-                 target_id, feedback_target_id, input, native_json, runtime_id,
-                 provider_snapshot_json, resource_snapshot_id, state, accepted_at)
-             SELECT ?2, interface_id, ?3, agent_id, audience_id, '', target_id, '', ?4, '{}',
-                 runtime_id, provider_snapshot_json, resource_snapshot_id, 'running', ?5
-             FROM turns WHERE id = ?1",
-            params![
-                latest,
-                turn_id,
-                event_id,
-                opening.label.as_deref().unwrap_or_default(),
                 now,
-            ],
-        )?;
-        conversations::active(
-            &transaction,
-            &opening.interface_id,
-            &opening.agent_id,
-            &opening.audience_id,
-            now,
-        )?;
-        let channel_id = channel(&transaction)?;
-        transaction.commit()?;
-        Ok(Opened::Receipt(OpenedTurn {
-            receipt: EventReceipt {
-                event_id,
-                turn_id,
-                state: TurnState::Running,
-                duplicate: false,
-            },
-            channel_id,
-        }))
+            )?;
+            let channel_id = channel(transaction)?;
+            Ok(Opened::Receipt(OpenedTurn {
+                receipt: EventReceipt {
+                    event_id,
+                    turn_id,
+                    state: TurnState::Running,
+                    duplicate: false,
+                },
+                channel_id,
+            }))
+        })
     }
 }
