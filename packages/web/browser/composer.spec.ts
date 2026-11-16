@@ -1,5 +1,6 @@
-import { sends } from "./composing.ts";
+import { attached, choose, sends } from "./composing.ts";
 import {
+  PASSWORD,
   arrive,
   atWork,
   conversation,
@@ -128,12 +129,13 @@ test("when a message sent in another tab clears what is stored, this tab stores 
   await send(other, "Theirs, sent.");
   await expect(atWork(turns(other).last())).toContainText("Waiting its turn");
   await expect(message(other)).toHaveValue("");
-  await expect(async () => {
-    await other.reload();
-    await expect(message(other)).toHaveValue("Mine, unsent.", { timeout: 2000 });
-  }).toPass();
+  await expect
+    .poll(() => page.evaluate('Object.values({ ...localStorage }).includes("Mine, unsent.")'))
+    .toBe(true);
   await page.reload();
   await expect(message(page)).toHaveValue("Mine, unsent.");
+  await other.reload();
+  await expect(message(other)).toHaveValue("Mine, unsent.");
 });
 
 test("what is being written belongs to its conversation", async ({ page, fake }) => {
@@ -340,4 +342,33 @@ test("when the browser refuses storage, what is written stays in the composer an
   await expect(turns(page).last()).toContainText("Written while storage is refused.");
   await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
   await expect(message(page)).toHaveValue("");
+});
+
+test("when the door returns, a message on its way is not sent, and waits in the composer for the next sign-in", async ({
+  page,
+  fake,
+}) => {
+  const sent = sends(page);
+  await arrive(page, fake, "send-signed-out");
+  await open(page, "Plan the release.");
+  await choose(page, [{ name: "notes.txt", bytes: 10 }]);
+  await send(page, "Write the release notes.");
+  await expect(turns(page).last()).toContainText("Carillon is receiving it.");
+  await fake.step("the password changes");
+  await expect(page.getByLabel("Password")).toBeVisible();
+  await fake.step("the provider reads the upload");
+
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Plan the release.", level: 2 })).toBeVisible();
+  await expect(message(page)).toHaveValue("Write the release notes.");
+  await expect(attached(page)).toHaveText([/notes\.txt/u]);
+  await expect(turns(page)).toHaveCount(1);
+
+  await message(page).press("Enter");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).getByText("Write the release notes.")).toHaveCount(1);
+  await expect(message(page)).toHaveValue("");
+  expect(sent).toHaveLength(2);
 });

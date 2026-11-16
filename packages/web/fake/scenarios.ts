@@ -592,6 +592,22 @@ export const scenarios: Record<string, Scenario> = {
       },
     ],
   },
+  "send-signed-out": {
+    about:
+      "The password changes while the provider holds a message. The provider then reads what it was sent.",
+    world: (now) => ({ ...planning(now), sending: { kind: "hold_upload" } }),
+    steps: [
+      { at: 2000, label: "the password changes", run: (stage) => stage.signOut() },
+      {
+        at: 6000,
+        label: "the provider reads the upload",
+        run: (stage) => {
+          stage.world.sending = { kind: "accept" };
+          stage.release();
+        },
+      },
+    ],
+  },
   controls: {
     about:
       "A running answer that offers stop, and a waiting message that offers steer, interrupt and stop. The next step does what was pressed.",

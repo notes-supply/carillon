@@ -11,7 +11,7 @@ export type OnItsWay = {
   eventId: string;
   text: string;
   files: readonly File[];
-  stage: Exclude<Sending, { kind: "refused" }> | { kind: "received" };
+  stage: Exclude<Sending, { kind: "refused" | "cancelled" }>;
 };
 export type Refused = { kind: "refused"; words: string };
 
@@ -20,6 +20,7 @@ const NO_FILES: readonly File[] = [];
 const written = new SvelteMap<string, string>();
 const attached = new SvelteMap<string, readonly File[]>();
 const sent = new SvelteMap<string, OnItsWay | Refused>();
+let signedIn = new AbortController();
 
 function joined(first: string, second: string): string {
   return first !== "" && second !== "" ? `${first}\n\n${second}` : first + second;
@@ -115,23 +116,32 @@ export async function send(
     files,
     stage: { kind: "uploading", sent: 0, total: 0 },
   };
+  const { signal } = signedIn;
   sent.set(address, message);
   attached.delete(address);
   write(address, "");
-  for await (const stage of deliver({ key, eventId: message.eventId, text, files }, token)) {
-    if (onItsWay(address, message.eventId) === undefined) return;
-    if (stage.kind === "refused") {
-      sent.set(address, stage);
+  for await (const stage of deliver(
+    { key, eventId: message.eventId, text, files },
+    token,
+    signal,
+  )) {
+    const waiting = onItsWay(address, message.eventId);
+    if (waiting === undefined) return;
+    if (stage.kind === "refused" || stage.kind === "cancelled") {
+      if (stage.kind === "refused") sent.set(address, stage);
+      else sent.delete(address);
       attached.set(address, [...files, ...attachedTo(address)]);
       write(address, joined(text, draftOf(address)));
       return;
     }
+    if (stage.kind === "received") clearSent(address, waiting);
     sent.set(address, { ...message, stage });
   }
-  const received = onItsWay(address, message.eventId);
-  if (received === undefined) return;
-  clearSent(address, received);
-  sent.set(address, { ...received, stage: { kind: "received" } });
+}
+
+export function cancelSends(): void {
+  signedIn.abort();
+  signedIn = new AbortController();
 }
 
 export function settle(open: Opened | null): void {

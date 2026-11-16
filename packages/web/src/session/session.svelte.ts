@@ -1,7 +1,7 @@
 import { AWAY, UNREADABLE } from "../api/requests.ts";
 import { requestSignIn } from "../api/sign-in.ts";
 import type { ChatSnapshot, Received } from "../api/stream.ts";
-import { settle } from "../composer/outbox.svelte.ts";
+import { cancelSends, settle } from "../composer/outbox.svelte.ts";
 import { seenAfter, type Seen } from "../rail/unread.ts";
 import { openAddress } from "./address.ts";
 import { dropToken, storeToken, storedToken } from "./token.ts";
@@ -35,6 +35,7 @@ export async function signIn(password: string): Promise<string> {
 }
 
 function signOut(): void {
+  cancelSends();
   dropToken();
   token = null;
   snapshot = null;

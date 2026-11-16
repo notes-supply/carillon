@@ -12,7 +12,12 @@ export type Outgoing = {
 
 type Leaving = { kind: "uploading"; sent: number; total: number } | { kind: "receiving" };
 
-export type Sending = Leaving | { kind: "retrying" } | { kind: "refused"; words: string };
+export type Sending =
+  | Leaving
+  | { kind: "retrying" }
+  | { kind: "received" }
+  | { kind: "refused"; words: string }
+  | { kind: "cancelled" };
 
 type Answer = { status: number; body: string };
 
@@ -20,8 +25,10 @@ function put(
   path: string,
   body: FormData,
   token: string,
+  signal: AbortSignal,
 ): { leaving: ReadableStream<Leaving>; answered: Promise<Answer> } {
   const request = new XMLHttpRequest();
+  const cancel = (): void => request.abort();
   request.open("PUT", ORIGIN + path);
   request.setRequestHeader("authorization", bearer(token));
   const leaving = new ReadableStream<Leaving>({
@@ -36,10 +43,12 @@ function put(
     },
   });
   const answered = new Promise<Answer>((resolve) => {
-    request.addEventListener("loadend", () =>
-      resolve({ status: request.status, body: request.responseText }),
-    );
+    request.addEventListener("loadend", () => {
+      signal.removeEventListener("abort", cancel);
+      resolve({ status: request.status, body: request.responseText });
+    });
   });
+  signal.addEventListener("abort", cancel);
   request.send(body);
   return { leaving, answered };
 }
@@ -52,20 +61,27 @@ async function* each<Value>(stream: ReadableStream<Value>): AsyncGenerator<Value
 export async function* deliver(
   message: Outgoing,
   token: string,
+  signal: AbortSignal,
 ): AsyncGenerator<Sending, void, void> {
   const path = messagePath(message.key, message.eventId);
   for (let failures = 1; ; failures += 1) {
     yield { kind: "uploading", sent: 0, total: 0 };
-    const request = put(path, messageForm(message.text, message.files), token);
+    const request = put(path, messageForm(message.text, message.files), token, signal);
     yield* each(request.leaving);
     const answer = await request.answered;
     const read = reading(answer.status);
-    if (read === "ok") return;
+    if (read === "ok") {
+      yield { kind: "received" };
+      return;
+    }
+    if (signal.aborted) break;
     if (read !== "away") {
       yield { kind: "refused", words: refusalWords(answer.status, answer.body) };
       return;
     }
     yield { kind: "retrying" };
-    await retryPause(failures);
+    await retryPause(failures, signal);
+    if (signal.aborted) break;
   }
+  yield { kind: "cancelled" };
 }
