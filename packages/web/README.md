@@ -1,8 +1,30 @@
 # Carillon's web chat, in Svelte 5
 
-One slice of the page, built for the framework bakeoff: the door, the rail, the transcript and the composer, against the stream contract in `src/api/stream.ts` and `src/api/requests.ts`.
+The page: the door, the rail, the transcript and the composer, against [the stream contract](src/api/README.md) in `src/api/stream.ts` and `src/api/requests.ts`.
 
-`vite build` writes a flat folder to `dist/`, which the provider serves as it is. The code has no comments, so this file holds what a comment would have said.
+`mise run build:web` writes a flat folder to `dist/`, which the provider serves as it is. The code has no comments, so this file holds what a comment would have said.
+
+## Where each kind of file lives
+
+| Path | Holds | Checked by |
+|---|---|---|
+| `src/<domain>/` | The page, by what each module is about: `api`, `session`, `rail`, `transcript`, `activity`, `composer`, `time`. A module's test sits beside it as `<module>.test.ts`. | The page's lint rules, `svelte-check`, and `vitest` |
+| `fake/` | A provider that serves the contract and plays named scenarios. [Its README](fake/README.md) lists them. | The repository's Node lint and types, and `fake.test.ts` |
+| `browser/` | What a person can see and do, as Playwright checks against the built page served by the fake. | `mise run test:browser` |
+| `public/` | The page's one stylesheet, its typeface and its icon. | The formatter |
+
+A test of one module is beside that module, so the lint that says where the page may use `JSON`, `Date` or a timer says the same of its tests. A browser check is about the built page as a whole and not about one module, and the fake is a Node program the page never loads, so both stay outside `src`, which holds only what Vite builds.
+
+## The browser checks
+
+- `browser/fixtures.ts` starts one fake provider for each Playwright worker, on a port of its own, serving `dist/`. The page and the API then share an origin, as with the real provider.
+- A check begins with `fake.play(scenario)`, which starts that scenario over on the manual clock. It then acts as a person does: it types the password, clicks, types a message.
+- `fake.step(label)` plays the scenario's next step and fails if that step is not the one named. A check never waits for time to pass. It steps the fake and waits for what the page shows.
+- The page's clock is set to the scenario's beginning, 2026-11-15T12:00:00Z, and `clockAt(page, seconds)` moves it. Timers in the page still run. The locale is `en-GB` and the time zone UTC.
+- Every check also fails when the page logs a refusal by the provider's policy, throws, or opens a dialog.
+- `test-results/` holds a trace for each failed check.
+
+To see the page as the provider serves it, run `vite build --watch` beside the fake. Vite's development server injects styles and scripts the provider's policy refuses.
 
 ## Where each fact lives
 
@@ -18,7 +40,7 @@ One slice of the page, built for the framework bakeoff: the door, the rail, the 
 | A message on its way, or its refusal | `composer/outbox.svelte.ts`, one for each conversation | A send, its stages, and the snapshot that has its turn |
 | The time | `time/clock.svelte.ts` | Each second, and `clock.today` each day |
 
-Everything a component draws is a `$derived` of these, or a call to one of the given display functions.
+Everything a component draws is a `$derived` of these, or a call to one of the display functions: `ledger`, `outcome`, `size`, `span` and `when`.
 
 ## What reaches outside the page's state
 

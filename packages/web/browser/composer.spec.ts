@@ -1,0 +1,182 @@
+import {
+  arrive,
+  atWork,
+  conversation,
+  conversations,
+  expect,
+  message,
+  open,
+  send,
+  test,
+  turns,
+} from "./fixtures.ts";
+
+const AWAY = "Carillon is not answering. Trying again.";
+
+test("a sent message shows at once as on its way, then as its turn, once", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-held");
+  await open(page, "Plan the release.");
+  await send(page, "Write the release notes.");
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).last()).toContainText("Write the release notes.");
+  await expect(turns(page).last()).toContainText("Carillon is receiving it.");
+  await expect(message(page)).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+
+  await fake.step("the provider reads the upload");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).getByText("Write the release notes.")).toHaveCount(1);
+  await expect(page.getByText("Carillon is receiving it.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+});
+
+test("Enter sends, and Shift+Enter starts a new line", async ({ page, fake }) => {
+  await arrive(page, fake, "turn");
+  await open(page, "Plan the release.");
+  await message(page).pressSequentially("Line one");
+  await message(page).press("Shift+Enter");
+  await message(page).pressSequentially("Line two");
+  await expect(message(page)).toHaveValue("Line one\nLine two");
+  await expect(turns(page)).toHaveCount(1);
+  await message(page).press("Enter");
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).last().getByText("Line one")).toHaveText(/^Line one\nLine two$/u, {
+    useInnerText: true,
+  });
+  await expect(message(page)).toHaveValue("");
+});
+
+test("a message of nothing but space is not sent", async ({ page, fake }) => {
+  await arrive(page, fake, "turn");
+  await open(page, "Plan the release.");
+  await send(page, "   ");
+  await send(page, "Something to send.");
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).last()).toContainText("Something to send.");
+});
+
+test("what is being written survives a reload, and a sent message leaves nothing behind", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "turn");
+  await open(page, "Plan the release.");
+  await message(page).fill("Half a thought");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Plan the release.", level: 2 })).toBeVisible();
+  await expect(message(page)).toHaveValue("Half a thought");
+  await message(page).press("Enter");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await page.reload();
+  await expect(turns(page)).toHaveCount(2);
+  await expect(message(page)).toHaveValue("");
+});
+
+test("what is being written belongs to its conversation", async ({ page, fake }) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await message(page).fill("About the release");
+  await open(page, "Chart last week's numbers.");
+  await expect(message(page)).toHaveValue("");
+  await message(page).fill("About the chart");
+  await open(page, "Plan the release.");
+  await expect(message(page)).toHaveValue("About the release");
+  await open(page, "Chart last week's numbers.");
+  await expect(message(page)).toHaveValue("About the chart");
+});
+
+test("a snapshot does not disturb what is being written", async ({ page, fake }) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await message(page).pressSequentially("Half a");
+  await fake.step("the runtime answers a turn of its own in the standup conversation");
+  await expect(conversations(page).first()).toContainText("Summarise the standup notes.");
+  await expect(message(page)).toBeFocused();
+  await page.keyboard.type(" thought");
+  await expect(message(page)).toHaveValue("Half a thought");
+});
+
+test("a refused message comes back to be changed, with the provider's words", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-refused");
+  await open(page, "Plan the release.");
+  await send(page, "Write the release notes.");
+  await expect(page.getByRole("alert")).toHaveText(
+    "A file may have at most 1024 MiB, and a message's files 2048 MiB together.",
+  );
+  await expect(message(page)).toHaveValue("Write the release notes.");
+  await expect(turns(page)).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+
+  await fake.step("the provider takes messages again");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(turns(page).getByText("Write the release notes.")).toHaveCount(1);
+  await expect(message(page)).toHaveValue("");
+  await expect(page.getByText("A file may have at most 1024 MiB")).toHaveCount(0);
+});
+
+test("a message core took before it went away is sent again and arrives once", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-lost-receipt");
+  await open(page, "Plan the release.");
+  await send(page, "Write the release notes.");
+  await expect(page.getByText(AWAY)).toBeVisible();
+  await expect(turns(page).last()).toContainText("Write the release notes.");
+  await expect(turns(page).last()).toContainText(
+    "Carillon is not answering. This message will be sent when it does.",
+  );
+  await expect(message(page)).toHaveValue("");
+
+  await fake.step("core returns");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(page.getByText(AWAY)).toBeHidden();
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(turns(page)).toHaveCount(2);
+  await expect(turns(page).getByText("Write the release notes.")).toHaveCount(1);
+  await expect(page.getByText("This message will be sent when it does.")).toHaveCount(0);
+});
+
+test("a new conversation is recorded by its first message", async ({ page, fake }) => {
+  await arrive(page, fake, "first-message");
+  await expect(page.getByRole("heading", { name: "New conversation", level: 2 })).toBeVisible();
+  await expect(page.getByText("Write below to start this conversation.")).toBeVisible();
+  await expect(page).toHaveTitle("Carillon");
+  await send(page, "Name the new release.");
+  await expect(
+    page.getByRole("heading", { name: "Name the new release.", level: 2 }),
+  ).toBeVisible();
+  await expect(conversations(page)).toHaveCount(1);
+  await expect(conversation(page, "Name the new release.").getByRole("link")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page).toHaveTitle("Name the new release.");
+  await expect(page.getByText("Write below to start this conversation.")).toBeHidden();
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Name the new release.", level: 2 }),
+  ).toBeVisible();
+  await expect(turns(page)).toHaveCount(1);
+});
+
+test("New conversation leaves the open one for an empty room", async ({ page, fake }) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  await message(page).fill("About the release");
+  await page.getByRole("link", { name: "New conversation" }).click();
+  await expect(page.getByRole("heading", { name: "New conversation", level: 2 })).toBeVisible();
+  await expect(turns(page)).toHaveCount(0);
+  await expect(message(page)).toHaveValue("");
+  await expect(conversations(page).locator('[aria-current="page"]')).toHaveCount(0);
+  await expect(page.getByText("Write below to start this conversation.")).toBeVisible();
+});

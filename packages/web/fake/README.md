@@ -1,0 +1,63 @@
+# The fake provider
+
+One Node program that serves the contract in `../src/api` over HTTP, with the headers a real page meets, and plays named scenarios. It depends on the contract and on nothing else. It skips the provider's Host and Origin gate, and its sign-in has no delay.
+
+Run it from the repository's root, after `mise run build:web`:
+
+```sh
+mise exec -- node packages/web/fake/main.ts --port 4400 [--site packages/web/dist] [--scenario rail] [--clock live|manual]
+```
+
+`--port 0` takes any free port. The program prints one line of JSON with the port it listens on. The password is `correct horse battery staple`.
+
+- `world.ts`: what the fake holds of core, and how a view of it becomes a `ChatSnapshot`.
+- `scenarios.ts`: each scenario's starting world and its steps.
+- `server.ts`: the routes of [the contract](../src/api/README.md), the page's files, and the control routes below.
+- `start.ts`: runs the fake as a process of its own, for the browser checks.
+- `fake.test.ts`: plays every scenario over HTTP twice, and fails when a message is not one the contract reads or the two runs differ.
+
+## Two clocks
+
+On the `live` clock a scenario begins at the present, and each step happens when its time comes. A step that follows a message waits for the page to send one. A person uses this clock: open `http://127.0.0.1:4400/?scenario=turn` and the scenario starts over.
+
+On the `manual` clock a scenario begins at 2026-11-15T12:00:00Z, and nothing happens until a caller asks for the next step. Every time in a snapshot then comes from the scenario, so a scenario replays to the byte. A test uses this clock.
+
+## Control routes
+
+These are the fake's own and need no token.
+
+| Route                                                            | Does                                                                                                                                |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /fake/scenarios`                                            | Lists every scenario with its steps.                                                                                                |
+| `POST /fake/scenario` with `{"name": "turn", "clock": "manual"}` | Starts a scenario over and ends every open stream. The clock is `manual` unless named.                                              |
+| `POST /fake/step` with `{"expect": "the model is asked"}`        | Plays the next step. With `expect`, answers 409 when the next step is another. The answer has the step's label and the state below. |
+| `GET /fake/state`                                                | The scenario, the steps that remain, how many stream messages were written and streams ended, and the requests the page made.       |
+| `GET /fake/state?wait=holding` or `?wait=streams&count=1`        | Answers once the provider holds an upload, or has that many streams open. A script waits on this and never sleeps.                  |
+
+## Scenarios
+
+| Name                | What it is                                                                                                                                  | Steps                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `empty`             | An installation with no conversation yet.                                                                                                   | None                                                                                                                                                                                                                                 |
+| `rail`              | Four conversations: one at work, one of files only. An answer then lands in one that is not open.                                           | `the runtime answers a turn of its own in the standup conversation`<br>`the chart conversation's turn is answered`                                                                                                                   |
+| `door`              | The rail's world, for signing in with a wrong password and then the right one.                                                              | None                                                                                                                                                                                                                                 |
+| `turn`              | A message from its send to its answer: queued, running through every kind of activity, answered with Markdown and files.                    | `core hands the turn to its runtime`<br>`the model is asked`<br>`a tool call is under way`<br>`one call is done, one failed and one is under way`<br>`work is delegated, with notes`<br>`the turn ends with an answer and two files` |
+| `first-message`     | A conversation core has not recorded becomes recorded with its first message.                                                               | `core hands the turn to its runtime`<br>`the model is asked`<br>`a tool call is under way`<br>`one call is done, one failed and one is under way`<br>`work is delegated, with notes`<br>`the turn ends with an answer and two files` |
+| `endings`           | One conversation with every ending: interrupted, steered, stopped, a runtime-opened turn, a running turn with no activity and a queued one. | `the running turn reports its activity`                                                                                                                                                                                              |
+| `send-refused`      | The provider refuses a message as too large, then takes messages again.                                                                     | `the provider takes messages again`                                                                                                                                                                                                  |
+| `send-lost-receipt` | Core takes a message and goes away before its receipt arrives. It returns, and the same event ID is answered as a duplicate.                | `core returns`                                                                                                                                                                                                                       |
+| `send-held`         | The provider holds a message, reading none of its upload, until the next step. Until then the page shows it as pending.                     | `the provider reads the upload`                                                                                                                                                                                                      |
+| `controls`          | A running answer that offers stop, and a waiting message that offers steer, interrupt and stop. The next step does what was pressed.        | `the runtime acts on the control`<br>`the turn that goes on is answered`                                                                                                                                                             |
+| `commands`          | A runtime with three commands. A message that begins with one is marked as a command.                                                       | `the command is answered`                                                                                                                                                                                                            |
+| `unavailable`       | Core goes away while a turn runs. It returns having ended that turn.                                                                        | `core goes away`<br>`core returns, and the turn it held did not finish`                                                                                                                                                              |
+| `stream-ends`       | The provider ends the stream without a word, and an answer lands after it.                                                                  | `the provider ends the stream`<br>`the runtime answers a turn of its own`                                                                                                                                                            |
+| `signed-out`        | The password changes while the page is open.                                                                                                | `the password changes`                                                                                                                                                                                                               |
+| `unreadable`        | The provider sends a message this page's contract does not have, then a snapshot.                                                           | `the provider sends what the page cannot read`<br>`the runtime answers a turn of its own`                                                                                                                                            |
+| `earlier`           | One conversation of 120 turns, more than two windows.                                                                                       | None                                                                                                                                                                                                                                 |
+| `long`              | Thirty turns, each taller than a window. Turns the runtime opens then arrive at its end.                                                    | `a first turn arrives`<br>`a second turn arrives`                                                                                                                                                                                    |
+| `large`             | One conversation of 500 turns, the newest running. Each of 240 steps changes that one turn.                                                 | 240 steps, `tick 1` to `tick 240`                                                                                                                                                                                                    |
+| `large-all`         | The large conversation, sent whole whatever window the view asks for: a measuring device, not what a provider does.                         | 240 steps, `tick 1` to `tick 240`                                                                                                                                                                                                    |
+
+How the provider answers a message is part of a scenario's world: it accepts it, refuses it, takes it and loses the receipt, or holds its upload.
+
+The `controls` scenario does what was pressed, as the provider's guide tells it for Pi: `steer` on the waiting message ends the running turn as steered, `interrupt` ends it as stopped and runs the message, `stop` on the waiting message stops that one, and `stop` on the running answer stops it and runs the message.
