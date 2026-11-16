@@ -12,6 +12,8 @@ mod markdown;
 mod send;
 mod serve;
 mod site;
+mod snapshot;
+mod stream;
 
 use std::{
     io::{IsTerminal as _, stdin},

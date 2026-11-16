@@ -5,96 +5,34 @@
 //! nothing is submitted twice. Files stream into a staging batch of this
 //! request's own, which goes when core has answered.
 
-use std::{
-    collections::HashMap,
-    path::Path as FilePath,
-    sync::{Arc, Mutex, PoisonError, Weak},
-    time::Duration,
-};
+use std::{path::Path as FilePath, sync::Arc};
 
 use anyhow::Context as _;
 use axum::{
     Json,
     extract::{
-        Multipart, Path, Query, State,
+        Multipart, Path, State,
         multipart::{Field, MultipartError, MultipartRejection},
     },
     http::StatusCode,
 };
 use carillon_installation::config::{AttachmentLimits, MIB};
 use carillon_interface::{Batch, InterfaceError, submit_event_with_retry};
-use carillon_protocol::{
-    conversations::ConversationSummary,
-    model::{
-        EVENT_BODY_LIMIT, ExternalEvent, INTENT_COMMAND, NATIVE_INTENT, StagedAttachments,
-        StagedFile,
-    },
+use carillon_protocol::model::{
+    EVENT_BODY_LIMIT, ExternalEvent, INTENT_COMMAND, NATIVE_INTENT, RuntimeCommand,
+    StagedAttachments, StagedFile,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
-use tokio::{
-    fs::File,
-    io::AsyncWriteExt as _,
-    sync::{Mutex as Turn, OwnedMutexGuard},
-    time::sleep,
-};
+use tokio::{fs::File, io::AsyncWriteExt as _};
 use tracing::warn;
 
 use crate::{
     api::{AWAY, from_core},
     browser::refusal,
-    identity::{ConversationId, EventId, agent_of},
+    identity::{ConversationId, ConversationKey, EventId},
     serve::Web,
 };
-
-/// One lock for each conversation with a send under way. Core keys a
-/// conversation by its agent too, so it would take two first messages
-/// that name different agents, and the conversation would then have both.
-/// A send holds its conversation's lock from its look at core to core's
-/// receipt, so the second finds what the first began. Other conversations
-/// are not held up.
-#[derive(Default)]
-pub(crate) struct Sends(Mutex<HashMap<String, Weak<Turn<()>>>>);
-
-impl Sends {
-    async fn turn(&self, id: &ConversationId) -> OwnedMutexGuard<()> {
-        let turn = {
-            let mut waiting = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            waiting.retain(|_, turn| turn.strong_count() > 0);
-            let held = waiting.entry(id.as_str().to_owned()).or_default();
-            let turn = held.upgrade().unwrap_or_default();
-            *held = Arc::downgrade(&turn);
-            turn
-        };
-        turn.lock_owned().await
-    }
-}
-
-const RETRY: Duration = Duration::from_millis(250);
-
-/// What core has of conversation `id`, asked until core answers. Core is
-/// away for a moment at every restart, and the submission that follows
-/// waits for it the same way.
-async fn found(web: &Web, id: &ConversationId) -> Result<Vec<ConversationSummary>, InterfaceError> {
-    loop {
-        match web.core.conversations_of(id.as_str()).await {
-            Err(failure) if failure.is_transient() && !web.stopping.is_cancelled() => {
-                warn!(error = %failure.message, "waiting to read a conversation from core");
-                web.stopping.run_until_cancelled(sleep(RETRY)).await;
-            }
-            found => return found.map_err(from_core),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-pub(crate) struct Sending {
-    /// The agent of a conversation's first message.
-    agent: Option<String>,
-    /// The text invokes one of the runtime's commands.
-    #[serde(default)]
-    command: bool,
-}
 
 #[derive(Serialize)]
 pub(crate) struct Sent {
@@ -176,20 +114,21 @@ async fn stage_file(
 }
 
 /// Reads the request's parts: at most one `text`, and `file`s within
-/// core's limits, in any order. The first part that is something else or
-/// past a limit refuses the message, and no later part is kept. The later
-/// parts are still read before the refusal is given: a browser that is
-/// answered while it uploads reports a broken connection and not the
-/// answer. A form that cannot be read, or a file that cannot be staged,
-/// is answered at once.
+/// core's limits, in any order. A message `refused` before its parts were
+/// read keeps none of them. Otherwise the first part that is something
+/// else or past a limit refuses the message, and no later part is kept.
+/// The later parts are still read before the refusal is given: a browser
+/// that is answered while it uploads reports a broken connection and not
+/// the answer. A form that cannot be read, or a file that cannot be
+/// staged, is answered at once.
 async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
     mut parts: Multipart,
+    mut refused: Option<InterfaceError>,
 ) -> Result<(String, Vec<StagedFile>), InterfaceError> {
     let (mut text, mut files) = (None, Vec::new());
     let mut total = 0_u64;
-    let mut refused = None;
     while let Some(mut part) = parts.next_field().await.map_err(malformed)? {
         if refused.is_some() {
             continue;
@@ -239,12 +178,42 @@ async fn stage(
     }
 }
 
-/// `PUT /api/conversations/{id}/messages/{event_id}[?agent=][&command=true]`:
+/// Whether `text` invokes one of `commands`: `/` and a command's name, and
+/// then nothing or its arguments.
+fn invokes(text: &str, commands: &[RuntimeCommand]) -> bool {
+    text.split(char::is_whitespace)
+        .next()
+        .and_then(|first| first.strip_prefix('/'))
+        .is_some_and(|name| commands.iter().any(|command| command.name == name))
+}
+
+/// Whether the message invokes one of the commands the conversation's
+/// runtime offers. Only the runtime knows its commands, so a text that
+/// begins with `/` asks it, once. A runtime that does not say leaves the
+/// text a message: the person's words reach the agent either way, and no
+/// message waits for a list.
+async fn is_command(web: &Web, key: &ConversationKey, text: &str) -> bool {
+    if !text.starts_with('/') {
+        return false;
+    }
+    match web.core.commands(&key.query()).await {
+        Ok(offered) => invokes(text, &offered.commands),
+        Err(failure) => {
+            warn!(
+                status = %failure.status,
+                error = %failure.message,
+                "the runtime's commands could not be read, so a text is sent as a message"
+            );
+            false
+        }
+    }
+}
+
+/// `PUT /api/conversations/{agent_id}/{audience_id}/messages/{event_id}`:
 /// submits the message and answers once core has it.
 pub(crate) async fn send(
     State(web): State<Arc<Web>>,
-    Path((id, event_id)): Path<(ConversationId, EventId)>,
-    Query(Sending { agent, command }): Query<Sending>,
+    Path((agent_id, audience_id, event_id)): Path<(String, ConversationId, EventId)>,
     parts: Result<Multipart, MultipartRejection>,
 ) -> Result<Json<Sent>, InterfaceError> {
     let parts = parts.map_err(|rejection| {
@@ -253,24 +222,29 @@ pub(crate) async fn send(
             "A message is sent as multipart form data.",
         )
     })?;
-    let turn = web.sends.turn(&id).await;
-    let agent_id = agent_of(&web, found(&web, &id).await?, agent)?;
+    let key = ConversationKey {
+        agent_id,
+        audience_id,
+    };
     let batch = web.staging.batch().context("stage a message's files")?;
-    let (text, files) = stage(&web.registry.value.core.attachments, &batch, parts).await?;
+    let limits = &web.registry.value.core.attachments;
+    let (text, files) = stage(limits, &batch, parts, key.configured(&web).err()).await?;
     if text.trim().is_empty() && files.is_empty() {
         return Err(refusal(
             StatusCode::BAD_REQUEST,
             "A message needs text or a file.",
         ));
     }
+    let command = is_command(&web, &key, &text).await;
+    let audience = key.audience_id.as_str();
     let event = ExternalEvent {
         event_id: event_id.as_str().to_owned(),
-        agent_id,
         user_id: web.user.clone(),
-        audience_id: id.as_str().to_owned(),
-        channel_id: id.as_str().to_owned(),
-        delivery_target_id: id.as_str().to_owned(),
+        audience_id: audience.to_owned(),
+        channel_id: audience.to_owned(),
+        delivery_target_id: audience.to_owned(),
         feedback_target_id: event_id.as_str().to_owned(),
+        agent_id: key.agent_id,
         content: text,
         native: if command {
             json!({ NATIVE_INTENT: INTENT_COMMAND })
@@ -294,7 +268,6 @@ pub(crate) async fn send(
     let submission = tokio::spawn(async move {
         let outcome = submit_event_with_retry(&web.core, &web.stopping, &event).await;
         let _ = tokio::task::spawn_blocking(move || drop(batch)).await;
-        drop(turn);
         outcome
     });
     match submission.await.context("submit a message")? {

@@ -19,8 +19,14 @@ use carillon_installation::config::LoadedConfig;
 use hmac::{Hmac, Mac as _};
 use serde_json::json;
 use sha2::Sha256;
-use tokio::time::Instant;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::{TcpListener, TcpStream},
+    sync::Notify,
+    time::Instant,
+};
 
+use super::until_stopped;
 use crate::{
     browser::{Address, addresses, password_file, set_password},
     fixture::{
@@ -29,19 +35,25 @@ use crate::{
     },
 };
 
+/// A signed-in browser's stream. Opening one asks core nothing, so it
+/// answers 200 on the token alone.
+const STREAM: &str = "/api/stream?conversations=1";
+
 /// One route of each class the provider serves.
 const ROUTES: [(Method, &str); 12] = [
     (Method::GET, "/"),
     (Method::GET, "/app.js"),
     (Method::GET, "/health"),
     (Method::POST, "/api/sign-in"),
-    (Method::GET, "/api/session"),
-    (Method::GET, "/api/conversations"),
+    (Method::GET, STREAM),
+    (
+        Method::GET,
+        "/api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/commands",
+    ),
     (
         Method::PUT,
-        "/api/conversations/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b",
+        "/api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b",
     ),
-    (Method::GET, "/api/turns?ids=a"),
     (
         Method::POST,
         "/api/messages/m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/control",
@@ -49,19 +61,27 @@ const ROUTES: [(Method, &str); 12] = [
     (Method::GET, "/v1/channels"),
     (Method::PUT, "/v1/channels/300/settings"),
     (Method::GET, "/files/capture/0?name=a&exp=1&sig=00"),
+    (Method::GET, "/api/unknown"),
 ];
 
 #[tokio::test]
 async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<()> {
     let fixture = Fixture::new().await?;
+    let browser = fixture.sign_in().await?;
     for (method, path) in ROUTES {
+        // The credential its route takes, so only the name refuses it.
+        let credential = if path.starts_with("/v1") {
+            OPERATOR_TOKEN
+        } else {
+            browser.as_str()
+        };
         let named = |hosts: &[&str]| {
             let mut request = Request::builder().method(method.clone()).uri(path);
             for host in hosts {
                 request = request.header(HOST, *host);
             }
             request
-                .header(AUTHORIZATION, format!("Bearer {OPERATOR_TOKEN}"))
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
                 .body(Body::empty())
         };
         for hosts in [
@@ -83,6 +103,7 @@ async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<(
             );
         }
     }
+    assert!(fixture.core().asked.is_empty(), "core was asked");
     let rebound = Request::builder()
         .uri("/")
         .header(HOST, "rebound.example")
@@ -137,10 +158,11 @@ async fn another_origin_and_every_preflight_are_refused() -> Result<()> {
             );
         }
     }
-    let own = bearer(Method::GET, "/api/session", &token)
+    assert!(fixture.core().asked.is_empty(), "core was asked");
+    let own = bearer(Method::GET, STREAM, &token)
         .header(ORIGIN, "http://127.0.0.1:45404")
         .body(Body::empty())?;
-    assert_eq!(fixture.send(own).await?.status, StatusCode::OK);
+    assert_eq!(fixture.status(own).await?, StatusCode::OK);
     Ok(())
 }
 
@@ -156,9 +178,9 @@ async fn the_page_answers_at_an_address_the_owner_named() -> Result<()> {
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
     };
-    for path in ["/", "/api/session"] {
+    for path in ["/", STREAM] {
         assert_eq!(
-            fixture.send(named(path)?).await?.status,
+            fixture.status(named(path)?).await?,
             StatusCode::OK,
             "{path}"
         );
@@ -170,30 +192,14 @@ async fn the_page_answers_at_an_address_the_owner_named() -> Result<()> {
 async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let session = |token: Option<&str>| {
+    let stream = |token: Option<&str>| {
         match token {
-            Some(token) => bearer(Method::GET, "/api/session", token),
-            None => request(Method::GET, "/api/session"),
+            Some(token) => bearer(Method::GET, STREAM, token),
+            None => request(Method::GET, STREAM),
         }
         .body(Body::empty())
     };
-    let signed_in = fixture.send(session(Some(&token))?).await?;
-    assert_eq!(signed_in.status, StatusCode::OK);
-    assert_eq!(
-        signed_in.json()?,
-        json!({
-            "agents": [
-                {"id": "assistant", "name": "Assistant"},
-                {"id": "second", "name": "Second"},
-            ],
-            "limits": {
-                "files": 3,
-                "file_bytes": 1024 * 1024,
-                "message_bytes": 2 * 1024 * 1024,
-            },
-            "custom_site": false,
-        })
-    );
+    assert_eq!(fixture.status(stream(Some(&token))?).await?, StatusCode::OK);
     for refused in [
         None,
         Some("wrong"),
@@ -201,7 +207,7 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
         Some(INTERFACE_TOKEN),
         Some(OPERATOR_TOKEN),
     ] {
-        let answer = fixture.send(session(refused)?).await?;
+        let answer = fixture.send(stream(refused)?).await?;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{refused:?}");
     }
     // A path under `/api` that is no route asks for the token all the same.
@@ -215,7 +221,7 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
     assert!(!before.contains(&token), "the token is not the hash");
     set_password(&file, PASSWORD)?;
     assert_ne!(std::fs::read_to_string(&file)?, before);
-    let after = fixture.send(session(Some(&token))?).await?;
+    let after = fixture.send(stream(Some(&token))?).await?;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
     let again = fixture.sign_in().await?;
     assert_ne!(again, token);
@@ -241,7 +247,7 @@ async fn the_api_needs_the_token_the_current_password_gives() -> Result<()> {
             None => std::fs::remove_file(&file)?,
         }
         for token in [again.clone(), guessed(no_key.unwrap_or_default())?] {
-            let answer = fixture.send(session(Some(&token))?).await?;
+            let answer = fixture.send(stream(Some(&token))?).await?;
             assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{no_key:?}");
         }
     }
@@ -260,8 +266,8 @@ async fn the_password_alone_signs_a_browser_in() -> Result<()> {
             .as_str()
             .context("no token")?
             .to_owned();
-        let session = bearer(Method::GET, "/api/session", &token).body(Body::empty())?;
-        assert_eq!(fixture.send(session).await?.status, StatusCode::OK);
+        let stream = bearer(Method::GET, STREAM, &token).body(Body::empty())?;
+        assert_eq!(fixture.status(stream).await?, StatusCode::OK);
     }
     for wrong in ["correct horse batter", "Correct horse battery", ""] {
         let answer = fixture.send(guess(wrong)?).await?;
@@ -493,8 +499,8 @@ async fn an_operator_route_takes_only_the_operator_credential() -> Result<()> {
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "{path}");
     }
     assert!(fixture.core().asked.is_empty(), "core was asked");
-    let session = bearer(Method::GET, "/api/session", &browser).body(Body::empty())?;
-    assert_eq!(fixture.send(session).await?.status, StatusCode::OK);
+    let stream = bearer(Method::GET, STREAM, &browser).body(Body::empty())?;
+    assert_eq!(fixture.status(stream).await?, StatusCode::OK);
     Ok(())
 }
 
@@ -573,8 +579,8 @@ async fn a_complete_copy_of_the_page_in_the_provider_s_state_is_served_instead()
             .await
     };
     let custom_site = || async {
-        let session = bearer(Method::GET, "/api/session", &token).body(Body::empty())?;
-        anyhow::Ok(fixture.send(session).await?.json()?["custom_site"].clone())
+        let mut page = fixture.stream("conversations=1", &token).await?;
+        anyhow::Ok(page.snapshot().await?["custom_site"].clone())
     };
     assert_eq!(script().await?.body, b"// release script");
     assert_eq!(custom_site().await?, false);
@@ -639,5 +645,46 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     std::fs::remove_dir_all(&custom)?;
     symlink(&elsewhere, &custom)?;
     assert_eq!(page("/").await?.body, b"<main>linked page</main>");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_of_a_paused_clock()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+
+    // A message whose upload never comes: the provider says it is ready
+    // for the body, and the browser sends none of it.
+    let mut browser = TcpStream::connect(address).await?;
+    let upload = format!(
+        "PUT /api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/\
+         m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b HTTP/1.1\r\nHost: {AUTHORITY}\r\n\
+         Authorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary=b\r\n\
+         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n"
+    );
+    browser.write_all(upload.as_bytes()).await?;
+    let mut ready = [0; 25];
+    browser.read_exact(&mut ready).await?;
+    assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
+
+    tokio::time::pause();
+    let told = Instant::now();
+    stop.notify_one();
+    serving.await??;
+    // A timer is a millisecond coarse.
+    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
     Ok(())
 }

@@ -3,6 +3,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Result, bail};
@@ -24,15 +25,17 @@ use carillon_interface::{
     CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
 };
 use carillon_protocol::{model::Health, settings::Page};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::{
+    net::TcpListener,
+    signal::unix::{SignalKind, signal},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     api,
     browser::{self, Browser, Key, refusal},
     files,
-    send::Sends,
     site::{self, Site},
 };
 
@@ -46,7 +49,6 @@ pub(crate) struct Web {
     pub(crate) health: Health,
     pub(crate) browser: Browser,
     pub(crate) staging: Staging,
-    pub(crate) sends: Sends,
     pub(crate) site: Site,
     /// The installing user's login name, the `user_id` of every message.
     pub(crate) user: String,
@@ -107,7 +109,6 @@ pub(crate) async fn serve(
             addresses,
         ),
         staging,
-        sends: Sends::default(),
         site: Site {
             custom: component_directory(data_dir, &provider.id).join("site"),
             release: site,
@@ -121,16 +122,45 @@ pub(crate) async fn serve(
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     info!(url = %web.browser.listen.origin, "web interface provider ready");
-    axum::serve(listener, router(web))
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = terminate.recv() => {}
-                _ = interrupt.recv() => {}
-            }
-            stopping.cancel();
-        })
-        .await?;
-    Ok(())
+    let asked_to_stop = async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    };
+    Ok(until_stopped(listener, web, asked_to_stop).await?)
+}
+
+/// How long the requests in flight have to be answered once the provider
+/// is told to stop.
+const DRAIN: Duration = Duration::from_secs(2);
+
+/// Serves `web` on `listener` until `asked_to_stop` completes, then lets
+/// the requests in flight be answered for at most [`DRAIN`]. Every stream
+/// ends as soon as its page reads again.
+pub(crate) async fn until_stopped(
+    listener: TcpListener,
+    web: Arc<Web>,
+    asked_to_stop: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let stopping = web.stopping.clone();
+    let stopped = stopping.clone();
+    let graceful = axum::serve(listener, router(web)).with_graceful_shutdown(async move {
+        asked_to_stop.await;
+        stopping.cancel();
+    });
+    tokio::select! {
+        served = graceful => served,
+        // A browser that stops reading, or stops sending, holds its
+        // connection open, and with it the graceful shutdown, for as long
+        // as it likes. Past the bound it is left to the end of the process.
+        // A message it was sending is not lost: the page sends it again
+        // under the same event ID.
+        () = async { stopped.cancelled().await; tokio::time::sleep(DRAIN).await } => {
+            warn!("connections were still open {DRAIN:?} after the provider was told to stop");
+            Ok(())
+        }
+    }
 }
 
 /// Every route. The gate wraps them all, the fallback included, so a route

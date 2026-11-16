@@ -11,6 +11,7 @@
 use std::{
     path::{Component, Path as FilePath},
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
@@ -42,9 +43,10 @@ use crate::{
 const DAY: u64 = 24 * 60 * 60;
 const BINARY: &str = "application/octet-stream";
 
-/// A file as the page shows it. Never where it is on this host.
+/// A file as the page shows it: what a person may see of it, and never
+/// where it is on this host.
 #[derive(Serialize)]
-pub(crate) struct FileView {
+pub(crate) struct FileLink {
     name: String,
     size: u64,
     /// The type the link answers with: a raster image's own, which the
@@ -52,6 +54,34 @@ pub(crate) struct FileView {
     #[serde(rename = "type")]
     media_type: &'static str,
     url: String,
+}
+
+/// A UTC day, counted from the epoch.
+#[derive(Clone, Copy)]
+pub(crate) struct Day(u64);
+
+impl Day {
+    /// The day of `now`, in Unix seconds, and how long it has left.
+    pub(crate) const fn at(now: u64) -> (Self, Duration) {
+        (Self(now / DAY), Duration::from_secs(DAY - now % DAY))
+    }
+
+    /// When a link minted on this day stops working: the end of the next
+    /// day, in Unix seconds.
+    const fn links_expire(self) -> u64 {
+        (self.0 + 2) * DAY
+    }
+}
+
+/// What a stream mints its links with: the key its token was checked
+/// against, and the day it opened on. Every link of one stream is minted
+/// for that day, so a snapshot sent again has the same links and the
+/// browser fetches no image twice. The stream ends with its day, and the
+/// next one mints links that work a day longer.
+pub(crate) struct Links<'a> {
+    pub(crate) web: &'a Web,
+    pub(crate) key: &'a Key,
+    pub(crate) day: Day,
 }
 
 /// What a link's query carries beside the path it signs.
@@ -107,25 +137,26 @@ async fn stored(web: &Web, path: &str) -> Option<(File, Option<&'static str>)> {
     Some((file, raster))
 }
 
-/// The stored file `path` as the page shows it, with a link that reads it
-/// until the end of the next day. The link is the same all day, so a
-/// transcript read again does not make the browser fetch its images again.
-pub(crate) async fn view(web: &Web, key: &Key, path: &str, name: &str, size: u64) -> FileView {
-    let expires = ((now() / DAY + 2) * DAY).to_string();
-    let signature = key.sign(&signed(path, name, &expires));
-    let segments: Vec<String> = path.split('/').map(encoded).collect();
-    FileView {
-        name: name.to_owned(),
-        size,
-        media_type: stored(web, path)
-            .await
-            .and_then(|(_, raster)| raster)
-            .unwrap_or(BINARY),
-        url: format!(
-            "/files/{}?name={}&exp={expires}&sig={signature}",
-            segments.join("/"),
-            encoded(name)
-        ),
+impl Links<'_> {
+    /// The stored file `path` as the page shows it, with a link that reads
+    /// it until the day after this stream's ends.
+    pub(crate) async fn to(&self, path: &str, name: &str, size: u64) -> FileLink {
+        let expires = self.day.links_expire().to_string();
+        let signature = self.key.sign(&signed(path, name, &expires));
+        let segments: Vec<String> = path.split('/').map(encoded).collect();
+        FileLink {
+            name: name.to_owned(),
+            size,
+            media_type: stored(self.web, path)
+                .await
+                .and_then(|(_, raster)| raster)
+                .unwrap_or(BINARY),
+            url: format!(
+                "/files/{}?name={}&exp={expires}&sig={signature}",
+                segments.join("/"),
+                encoded(name)
+            ),
+        }
     }
 }
 
@@ -143,7 +174,7 @@ pub(crate) async fn file(
     {
         return Err(refusal(
             StatusCode::FORBIDDEN,
-            "This file link is no longer good. Read the conversation again for a new one.",
+            "This file link is no longer good. Reload the page for a new one.",
         ));
     }
     let gone = || refusal(StatusCode::NOT_FOUND, "Carillon does not have this file.");

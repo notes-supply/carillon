@@ -6,20 +6,21 @@
 //! | `audience_id`        | the conversation's UUID, which the page mints |
 //! | `channel_id`         | the same UUID: a chat is its own settings subject |
 //! | `delivery_target_id` | the same UUID, so a turn the runtime opens lands in the conversation |
-//! | `agent_id`           | chosen with the first message, then fixed   |
+//! | `agent_id`           | named by the page with every request        |
 //! | `event_id`           | `m-<uuid>`, minted by the page once per send |
 //! | `feedback_target_id` | the event ID                                |
 //! | `user_id`            | the installing user's login name            |
 //!
-//! The provider stores none of it. A conversation exists in core from its
+//! The provider stores none of it. A conversation is named by its agent and
+//! its audience together, as core keys it, and exists in core from its
 //! first admitted message.
 
 use std::fmt;
 
 use axum::http::StatusCode;
 use carillon_interface::InterfaceError;
-use carillon_protocol::conversations::ConversationSummary;
-use serde::Deserialize;
+use carillon_protocol::{model::ConversationQuery, observation};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{browser::refusal, serve::Web};
@@ -30,10 +31,51 @@ pub(crate) fn canonical(text: &str) -> bool {
     Uuid::try_parse(text).is_ok_and(|uuid| uuid.hyphenated().to_string() == text)
 }
 
-/// A conversation: its audience, channel and delivery target in core.
-#[derive(Deserialize)]
+/// The UUID the page minted for a conversation: its audience, channel and
+/// delivery target in core.
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(try_from = "String")]
 pub(crate) struct ConversationId(String);
+
+/// A conversation as the page names one everywhere: its agent and the
+/// audience the page minted.
+#[derive(Clone, Serialize)]
+pub(crate) struct ConversationKey {
+    pub(crate) agent_id: String,
+    pub(crate) audience_id: ConversationId,
+}
+
+impl ConversationKey {
+    /// The key of a conversation core lists, or `None` for one the page did
+    /// not make, whose audience is no UUID.
+    pub(crate) fn of(key: &observation::ConversationKey) -> Option<Self> {
+        Some(Self {
+            agent_id: key.agent_id().to_owned(),
+            audience_id: ConversationId::try_from(key.audience_id().to_owned()).ok()?,
+        })
+    }
+
+    /// Refuses a key whose agent this installation does not have, in words
+    /// a person can read and before anything is staged or asked of core.
+    pub(crate) fn configured(&self, web: &Web) -> Result<(), InterfaceError> {
+        match web.registry.value.agent(&self.agent_id) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("Carillon has no agent {}.", self.agent_id),
+            )),
+        }
+    }
+
+    /// What core is asked about the conversation's runtime.
+    pub(crate) fn query(&self) -> ConversationQuery {
+        ConversationQuery {
+            agent_id: self.agent_id.clone(),
+            channel_id: self.audience_id.0.clone(),
+            audience_id: Some(self.audience_id.0.clone()),
+        }
+    }
+}
 
 /// A message's event ID, `m-<uuid>`: the page mints it before the first
 /// attempt and sends it again with every retry, and core answers a repeat
@@ -94,40 +136,5 @@ impl TryFrom<String> for EventId {
         } else {
             Err(Malformed::Message)
         }
-    }
-}
-
-/// The agent of a conversation, from what core has `found` of its
-/// audience. Core keys a conversation by its agent too, so it answers an
-/// audience with one conversation for each agent. The page gives an
-/// audience one agent for good: a conversation core has keeps its agent,
-/// naming another is refused, and more than one is nothing the page made. A
-/// conversation core does not have yet takes the agent `named` with its
-/// first message, which must be configured.
-pub(crate) fn agent_of(
-    web: &Web,
-    mut found: Vec<ConversationSummary>,
-    named: Option<String>,
-) -> Result<String, InterfaceError> {
-    let existing = found.pop().map(|conversation| conversation.agent_id);
-    match (existing, named) {
-        (Some(_), _) if !found.is_empty() => Err(refusal(
-            StatusCode::CONFLICT,
-            "This conversation has more than one agent, which the web chat never makes.",
-        )),
-        (Some(existing), Some(named)) if existing != named => Err(refusal(
-            StatusCode::CONFLICT,
-            &format!("This conversation is with {existing}, and a conversation keeps its agent."),
-        )),
-        (Some(existing), _) => Ok(existing),
-        (None, Some(named)) if web.registry.value.agent(&named).is_ok() => Ok(named),
-        (None, Some(named)) => Err(refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("Carillon has no agent {named}."),
-        )),
-        (None, None) => Err(refusal(
-            StatusCode::NOT_FOUND,
-            "Carillon has no such web conversation. A first message names its agent.",
-        )),
     }
 }

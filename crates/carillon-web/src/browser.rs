@@ -210,6 +210,12 @@ impl Key {
         self.matches(&["token"], token)
     }
 
+    /// Whether the password in `password_file` is still the one this key
+    /// was read from.
+    pub(crate) fn is_current(&self, password_file: &Path) -> bool {
+        Self::read(password_file).is_some_and(|current| current.0 == self.0)
+    }
+
     /// Whether this is the hash of `password`.
     fn admits(&self, password: &str) -> bool {
         PasswordHash::new(&self.0).is_ok_and(|hash| {
