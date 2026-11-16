@@ -41,6 +41,7 @@ use hmac::{Hmac, Mac as _};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::sync::Mutex;
+use tracing::error;
 use url::Url;
 
 pub(crate) struct Browser {
@@ -290,14 +291,26 @@ impl Browser {
             let checked =
                 tokio::task::spawn_blocking(move || key.admits(password.trim()).then_some(key))
                     .await;
-            if let Ok(Some(key)) = checked {
-                return Ok(key.token());
+            match checked {
+                Ok(Some(key)) => return Ok(key.token()),
+                Ok(None) => {}
+                Err(failed) => log_sign_in_task_failure(&failed),
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             Err(refusal(StatusCode::UNAUTHORIZED, WRONG))
         });
-        guess
-            .await
-            .unwrap_or_else(|_| Err(refusal(StatusCode::UNAUTHORIZED, WRONG)))
+        guess.await.unwrap_or_else(|failed| {
+            log_sign_in_task_failure(&failed);
+            Err(refusal(StatusCode::UNAUTHORIZED, WRONG))
+        })
     }
+}
+
+/// The person sees a wrong password. A panic's message could quote what was
+/// typed, so only the kind of failure is logged.
+fn log_sign_in_task_failure(failed: &tokio::task::JoinError) {
+    error!(
+        panicked = failed.is_panic(),
+        "a sign-in to the web chat ended before the password was checked"
+    );
 }

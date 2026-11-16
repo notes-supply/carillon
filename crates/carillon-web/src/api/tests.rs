@@ -319,6 +319,11 @@ async fn a_conversation_is_named_by_one_lowercase_uuid_that_core_knows() -> Resu
     ] {
         let answer = fixture.get(&turns(malformed), &token).await?;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{malformed}");
+        assert_eq!(
+            String::from_utf8_lossy(&answer.body),
+            "Invalid URL: a conversation is a lowercase UUID",
+            "{malformed}"
+        );
     }
     assert!(
         fixture
@@ -507,6 +512,13 @@ async fn a_control_reaches_core_for_the_message_it_names_and_a_refusal_comes_bac
     ] {
         let answer = fixture.send(control(event, body)?).await?;
         assert_eq!(answer.status, refused, "{event} {body}");
+        if refused == id {
+            assert_eq!(
+                String::from_utf8_lossy(&answer.body),
+                "Invalid URL: a message is `m-` and a lowercase UUID",
+                "{event}"
+            );
+        }
     }
     assert_eq!(
         fixture.core().controls.len(),

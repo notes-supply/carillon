@@ -14,6 +14,8 @@
 //! The provider stores none of it. A conversation exists in core from its
 //! first admitted message.
 
+use std::fmt;
+
 use axum::http::StatusCode;
 use carillon_interface::InterfaceError;
 use carillon_protocol::conversations::ConversationSummary;
@@ -52,26 +54,45 @@ impl EventId {
     }
 }
 
+/// Why a path names no conversation or message. The provider answers the page
+/// with its text.
+#[derive(Debug)]
+pub(crate) enum Malformed {
+    Conversation,
+    Message,
+}
+
+impl fmt::Display for Malformed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Conversation => "a conversation is a lowercase UUID",
+            Self::Message => "a message is `m-` and a lowercase UUID",
+        })
+    }
+}
+
+impl std::error::Error for Malformed {}
+
 impl TryFrom<String> for ConversationId {
-    type Error = &'static str;
+    type Error = Malformed;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
         if canonical(&text) {
             Ok(Self(text))
         } else {
-            Err("a conversation is a lowercase UUID")
+            Err(Malformed::Conversation)
         }
     }
 }
 
 impl TryFrom<String> for EventId {
-    type Error = &'static str;
+    type Error = Malformed;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
         if text.strip_prefix("m-").is_some_and(canonical) {
             Ok(Self(text))
         } else {
-            Err("a message is `m-` and a lowercase UUID")
+            Err(Malformed::Message)
         }
     }
 }

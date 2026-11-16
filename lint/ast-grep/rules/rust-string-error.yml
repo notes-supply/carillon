@@ -2,16 +2,23 @@ id: rust-string-error
 language: rust
 severity: error
 message: A string error gives callers nothing to match on.
-note: Return a typed error, or anyhow::Error, and format it where it is shown. Strings are the payload only across the Discord module's Wasm boundary.
+note: Return a typed error, or anyhow::Error, and format it where it is shown. For `type Error` or `type Err`, name a struct or enum that implements Display and std::error::Error. Strings are the payload only across the Discord module's Wasm boundary.
+utils:
+  string-like:
+    regex: "^((std|alloc)::string::)?String$|^&('[A-Za-z_][A-Za-z0-9_]*\\s+)?str$|^((std|alloc)::borrow::)?Cow\\s*<\\s*('[^,]+,\\s*)?str\\s*>$"
 rule:
-  kind: generic_type
-  all:
-    - has: { field: type, regex: "(^|::)Result$" }
-    - has:
-        field: type_arguments
-        has:
-          nthChild: 2
-          regex: "^((std|alloc)::string::)?String$|^&('[A-Za-z_][A-Za-z0-9_]*\\s+)?str$|^((std|alloc)::borrow::)?Cow\\s*<\\s*('[^,]+,\\s*)?str\\s*>$"
+  any:
+    - kind: generic_type
+      all:
+        - has: { field: type, regex: "(^|::)Result$" }
+        - has:
+            field: type_arguments
+            has: { nthChild: 2, matches: string-like }
+    # The error of `TryFrom`, `FromStr` and the like, which no `Result` spells out.
+    - kind: type_item
+      all:
+        - has: { field: name, regex: "^Err(or)?$" }
+        - has: { field: type, matches: string-like }
 ignores:
   - crates/carillon-discord-module/**
   - crates/carillon-discord/src/module.rs

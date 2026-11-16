@@ -102,8 +102,20 @@ impl Revision {
     }
 }
 
+/// Text that is not a revision.
+#[derive(Debug)]
+pub struct MalformedRevision;
+
+impl fmt::Display for MalformedRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a revision is 64 lowercase hexadecimal digits")
+    }
+}
+
+impl std::error::Error for MalformedRevision {}
+
 impl TryFrom<String> for Revision {
-    type Error = String;
+    type Error = MalformedRevision;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.len() == 64
@@ -113,7 +125,7 @@ impl TryFrom<String> for Revision {
         {
             Ok(Self(value))
         } else {
-            Err("a revision is 64 lowercase hexadecimal digits".to_owned())
+            Err(MalformedRevision)
         }
     }
 }
