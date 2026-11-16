@@ -3,7 +3,7 @@
   "ignoreBinaries": ["strace", "unshare"],
   "workspaces": {
     ".": {
-      "entry": ["scripts/*.mjs", "crates/carillon-web/site/app.js"]
+      "entry": ["scripts/*.mjs"]
     },
     "packages/runtime-pi": {
       "entry": ["src/crash-worker.ts"]

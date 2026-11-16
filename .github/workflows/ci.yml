@@ -178,13 +178,14 @@ jobs:
       - id: package-key
         name: Key the package by everything it is built from
         # Every tracked file counts except those no packaging step reads: the
-        # release tests, the CI planner, and TypeScript tests, which Bun never
-        # bundles. The OS release and architecture decide what the binaries
-        # link against.
+        # release tests, the CI planner, TypeScript tests, which neither Bun nor
+        # Vite bundles, and the page's browser checks with their fake provider.
+        # The OS release and architecture decide what the binaries link against.
         run: |
           . /etc/os-release
           inputs=$(git ls-files -s -- . ':(exclude)scripts/test-*' ':(exclude)scripts/ci-plan*' \
-            ':(glob,exclude)packages/**/*.test.ts' | sha256sum | cut -d' ' -f1)
+            ':(glob,exclude)packages/**/*.test.ts' ':(exclude)packages/web/browser' \
+            ':(exclude)packages/web/fake' | sha256sum | cut -d' ' -f1)
           echo "key=package-$ID-$VERSION_ID-$(uname -m)-$inputs" >> "$GITHUB_OUTPUT"
           version=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
           echo "archive=dist/carillon-$version-linux-$(uname -m).tar.gz" >> "$GITHUB_OUTPUT"

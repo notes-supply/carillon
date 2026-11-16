@@ -75,9 +75,8 @@ description = "Check formatting, typed lint, types and TypeScript tests"
 depends = ["install"]
 run = [
   "oxfmt --check '**/*.{ts,mjs,js,json,css,html}'",
-  "oxlint packages crates/carillon-web --deny-warnings --report-unused-disable-directives-severity error",
+  "oxlint packages --deny-warnings --report-unused-disable-directives-severity error",
   "tsc --noEmit",
-  "tsc --noEmit -p crates/carillon-web",
   "tsc --noEmit -p packages/web",
   "pnpm --dir packages/web run check",
   "knip --no-progress",
@@ -112,7 +111,7 @@ run = [
 
 [tasks."test:integration"]
 description = "Test local core, Discord, web, Pi and T3 runtime services together"
-depends = ["install", "build:module"]
+depends = ["install", "build:module", "build:web"]
 run = [
   "cargo build --locked --bin carillon --bin carillon-discord --bin carillon-web",
   "node scripts/test-integration.mjs",

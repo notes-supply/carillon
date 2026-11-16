@@ -1,13 +1,14 @@
-// Notices for the npm packages built into a release's JavaScript programs:
-// each production dependency of the shipped workspace packages, as pnpm
-// lists it, with the licence files it publishes. Printed to stdout.
+// Notices for the npm packages built into a release's JavaScript programs
+// and its web page: each production dependency of the shipped workspace
+// packages, as pnpm lists it, with the licence files it publishes. Printed
+// to stdout.
 // `node scripts/npm-notices.mjs RELEASE` checks that the staged RELEASE
 // carries the standard text a package without a licence file refers to.
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const SHIPPED = ["@carillon/runtime-pi", "@carillon/runtime-t3"];
+const SHIPPED = ["@carillon/runtime-pi", "@carillon/runtime-t3", "@carillon/web"];
 // Standard texts in the release for packages that publish no licence file.
 const STANDARD = { MIT: "licenses/MIT.txt", "Apache-2.0": "licenses/Apache-2.0.txt" };
 const release = process.argv[2];
@@ -47,5 +48,5 @@ const sections = packages.map(({ name, version, license, author, homepage, path 
   return `${"=".repeat(80)}\n${heading}\n\n${body}\n`;
 });
 process.stdout.write(
-  `npm packages built into carillon-runtime-pi and carillon-runtime-t3, with\ntheir licences. Generated from pnpm's listing of their production\ndependencies.\n\n${sections.join("\n")}`,
+  `npm packages built into carillon-runtime-pi, carillon-runtime-t3 and the\nweb chat's page, with their licences. Generated from pnpm's listing of\ntheir production dependencies.\n\n${sections.join("\n")}`,
 );

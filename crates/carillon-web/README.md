@@ -130,10 +130,10 @@ script.
 
 ## The page's files
 
-The page is plain files, read from disk on each request, so an edit shows
-on the next reload. `serve` finds the release's copy in `lib/web` beside the
-directory that holds the program, which is `app/lib/web` in an installation.
-In a checkout, name the directory: `--site crates/carillon-web/site`.
+The page is plain files, read from disk on each request. `serve` finds the
+release's copy in `lib/web` beside the directory that holds the program,
+which is `app/lib/web` in an installation. In a checkout, build the page with
+`mise run build:web` and name its folder: `--site packages/web/dist`.
 
 A complete copy in `state/components/<id>/site/` is served instead of the
 release's. A copy is complete when it has an `index.html`. No file comes
@@ -151,24 +151,17 @@ machine.
 
 ### What the page is made of
 
-The files in [`site/`](site) are the source. Nothing builds them, so an
-edit there, or in your own copy, is the whole change.
+The page's source is the package [`packages/web`](../../packages/web),
+written in Svelte 5 and TypeScript. Vite builds it to one flat folder of
+static files, and that folder is what a release ships and the provider
+serves. [Its README](../../packages/web/README.md) says where each fact the
+page shows lives, how its tests and browser checks are laid out, and which
+rules its code is held to.
 
-- [`index.html`](site/index.html) has every element the script looks up by
-  ID. [`style.css`](site/style.css) has both colour schemes as one named
-  palette at its top, and the phone layout at its end.
-- [`model.js`](site/model.js) decides, and touches no document: what a poll
-  compares, how turns merge, how a message waits for its receipt, what a
-  turn shows for each state and which controls to offer. Its tests are in
-  [`test/`](test), outside the folder that ships.
-- [`view.js`](site/view.js) builds elements from what the model decides.
-  Every string goes in as text. The one exception is `prose`, which
-  inserts the HTML the provider rendered for an answer.
-- [`api.js`](site/api.js) makes the requests. [`app.js`](site/app.js) holds
-  what is on screen and wires the page together.
-
-The modules are JavaScript with JSDoc types. `mise run check:ts` formats,
-lints and type-checks them against the DOM, and runs the model's tests.
+[`style.css`](../../packages/web/public/style.css) is the page's one
+stylesheet. It has both colour schemes as one named palette at its top, and
+the phone layout at its end. Every string the page shows goes in as text.
+The one exception is the HTML the provider rendered for an answer.
 
 In the browser the page keeps the token and, for each conversation, the
 text not yet received by Carillon: what is in the composer and, until its
@@ -179,9 +172,12 @@ one conversation store the text typed last, and a tab stores its own again
 when another tab's receipt clears the draft.
 
 Answers are set in Literata, by the Literata Project Authors, under the SIL
-Open Font License 1.1. [`literata.woff2`](site/literata.woff2) and
-[`literata-italic.woff2`](site/literata-italic.woff2) are subsets of it for
-Latin text, and [`literata-OFL.txt`](site/literata-OFL.txt) is its license.
+Open Font License 1.1.
+[`literata.woff2`](../../packages/web/public/literata.woff2) and
+[`literata-italic.woff2`](../../packages/web/public/literata-italic.woff2)
+are subsets of it for Latin text, and
+[`literata-OFL.txt`](../../packages/web/public/literata-OFL.txt) is its
+license.
 A copy of the page without the font files reads in the faces `style.css`
 names after it.
 
@@ -616,4 +612,4 @@ its agent's model. Change that with `carillon settings --agent`.
 - [`files.rs`](src/files.rs): signed file links. [`markdown.rs`](src/markdown.rs):
   answers as HTML.
 - [`site.rs`](src/site.rs): how the page's files are served.
-  [`site/`](site): the page.
+  [`packages/web`](../../packages/web): the page.

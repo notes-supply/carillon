@@ -45,9 +45,6 @@ it("follows inputs across languages", () => {
     "release",
     "ts",
   ]);
-  for (const file of ["app.js", "style.css", "index.html"])
-    expect(lanes([`crates/carillon-web/site/${file}`])).toEqual(["lint", "release", "rust", "ts"]);
-  expect(lanes(["crates/carillon-web/site/literata.woff2"])).toEqual(["lint", "release", "rust"]);
   // TypeScript formatting covers JSON anywhere.
   expect(lanes(["crates/carillon-discord-module/fixtures/cards.json"])).toEqual([
     "lint",
@@ -62,6 +59,7 @@ it("checks the page in a browser when the page or what builds it changes", () =>
     "packages/web/src/rail/Rail.svelte",
     "packages/web/src/api/stream.ts",
     "packages/web/public/style.css",
+    "packages/web/public/literata.woff2",
     "packages/web/index.html",
     "packages/web/vite.config.ts",
     "packages/web/package.json",

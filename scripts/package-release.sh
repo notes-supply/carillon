@@ -70,6 +70,11 @@ printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 cp -R packages/runtime-pi/skills "$STAGE/lib/pi-skills"
 
+# The web chat's page is built to one flat folder, which the provider serves
+# as it is. It is built first, because it is the quickest step to fail.
+pnpm --dir packages/web run build
+cp -R packages/web/dist "$STAGE/lib/web"
+
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" \
   --bin carillon --bin carillon-discord --bin carillon-web
 # The Discord modules run in the provider's Wasm sandbox; they are data, not
@@ -90,7 +95,6 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
 install -m 0755 "target/$TARGET/release/carillon-web" "$STAGE/bin/carillon-web"
-cp -R crates/carillon-web/site "$STAGE/lib/web"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm "$STAGE/lib/carillon_discord_module.wasm"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm "$STAGE/lib/examples/card-colours.wasm"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
@@ -117,7 +121,7 @@ cargo about generate --locked --fail -c licenses/about.toml licenses/rust.hbs -o
 node scripts/npm-notices.mjs "$STAGE" >"$STAGE/licenses/npm.txt"
 # A typeface the page ships has its SIL Open Font License beside it, as
 # NAME-OFL.txt. It joins the notices, and replaces none of them.
-for notice in crates/carillon-web/site/*-OFL.txt; do
+for notice in packages/web/dist/*-OFL.txt; do
   [ -f "$notice" ] || continue
   if [ -e "$STAGE/licenses/${notice##*/}" ]; then
     echo "the page's ${notice##*/} has the name of another notice in licenses/" >&2

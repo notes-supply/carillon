@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,8 @@ const installation = join(root, "installation");
 const workspace = join(root, "workspace");
 const manager = join(root, "manager");
 const binary = resolve("target/debug/carillon");
+// The page as `mise run build:web` leaves it, which is what a release ships.
+const site = resolve("packages/web/dist");
 const PASSWORD = "correct horse battery";
 const TAILNET = "chat.example-tailnet.ts.net";
 isolateEnvironment();
@@ -146,7 +148,7 @@ start() {
         --config '${config}' --provider runtime-pi --token-file '${tokenFile("runtime-pi")}' \\
         --deterministic --state-dir '${join(installation, "pi")}' >>'${logs}/runtime-pi.log' 2>&1 & ;;
       web) '${resolve("target/debug/carillon-web")}' serve --config '${config}' --provider web \\
-        --token-file '${tokenFile("web")}' --site '${resolve("crates/carillon-web/site")}' \\
+        --token-file '${tokenFile("web")}' --site '${site}' \\
         >>'${logs}/web.log' 2>&1 & ;;
     esac
     echo "$!" >"$pids/$name"
@@ -206,13 +208,15 @@ async function signIn(password = PASSWORD) {
 async function testGate(token) {
   const page = await fetch(origin);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /<script type="module" src="app\.js">/u);
+  assert.match(await page.text(), /<script type="module" crossorigin src="\.\/index-[\w-]+\.js">/u);
   const policy = page.headers.get("content-security-policy");
   assert.match(policy, /default-src 'none'/u);
   assert.match(policy, /font-src 'self'/u);
-  const modules = ["app.js", "api.js", "model.js", "view.js"];
-  const rest = ["style.css", "icon.svg", "literata.woff2", "literata-italic.woff2"];
-  for (const file of [...modules, ...rest]) {
+  // Every file of the built page but its typeface's licence, which ships
+  // beside it and is no part of the page.
+  const files = (await readdir(site)).filter((file) => !file.endsWith(".txt"));
+  assert.ok(files.includes("style.css") && files.includes("literata.woff2"));
+  for (const file of files) {
     assert.equal((await fetch(`${origin}/${file}`)).status, 200, `the page's ${file}`);
   }
   assert.equal(await raw("/", { host: "rebound.example" }), 421);
