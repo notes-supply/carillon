@@ -1,12 +1,14 @@
-function stored(address: string): string {
-  return `draft:${address}`;
+const PREFIX = "draft:";
+
+export function addressOfDraft(stored: string | null): string | undefined {
+  return stored?.startsWith(PREFIX) === true ? stored.slice(PREFIX.length) : undefined;
 }
 
 export function storedDraft(address: string): string {
-  return localStorage.getItem(stored(address)) ?? "";
+  return localStorage.getItem(PREFIX + address) ?? "";
 }
 
 export function storeDraft(address: string, text: string): void {
-  if (text === "") localStorage.removeItem(stored(address));
-  else localStorage.setItem(stored(address), text);
+  if (text === "") localStorage.removeItem(PREFIX + address);
+  else localStorage.setItem(PREFIX + address, text);
 }

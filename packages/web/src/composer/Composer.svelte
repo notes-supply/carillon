@@ -7,10 +7,12 @@
   import {
     attach,
     attachedTo,
+    awaitingReceipt,
     detach,
     draftOf,
     send,
     sentTo,
+    storedElsewhere,
     write,
   } from "./outbox.svelte.ts";
 
@@ -58,6 +60,7 @@
   }
 </script>
 
+<svelte:window onstorage={storedElsewhere} />
 <svelte:document ondragover={(event) => event.preventDefault()} ondrop={dropped} />
 
 <div class="composer-edge">
@@ -81,7 +84,8 @@
         <button class="button" type="button" onclick={() => chooser?.click()}>Attach files</button>
         <input type="file" multiple hidden bind:this={chooser} onchange={chosen} />
         <span class="hint">Enter sends. Shift+Enter starts a new line.</span>
-        <button class="button primary" disabled={sent?.kind === "on_its_way"}>Send</button>
+        <button class="button primary" disabled={awaitingReceipt(address) !== undefined}>Send</button
+        >
       </div>
     </form>
   </div>

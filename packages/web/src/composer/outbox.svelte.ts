@@ -4,7 +4,7 @@ import { deliver, type Sending } from "../api/send.ts";
 import type { ConversationKey, Limits, Opened } from "../api/stream.ts";
 import { addressOf } from "../session/address.ts";
 import { storedToken } from "../session/token.ts";
-import { storeDraft, storedDraft } from "./draft.ts";
+import { addressOfDraft, storeDraft, storedDraft } from "./draft.ts";
 import { overLimit } from "./limits.ts";
 
 export type OnItsWay = {
@@ -12,7 +12,7 @@ export type OnItsWay = {
   eventId: string;
   text: string;
   files: readonly File[];
-  stage: Exclude<Sending, { kind: "refused" }>;
+  stage: Exclude<Sending, { kind: "refused" }> | { kind: "received" };
 };
 export type Refused = { kind: "refused"; words: string };
 
@@ -26,9 +26,28 @@ function joined(first: string, second: string): string {
   return first !== "" && second !== "" ? `${first}\n\n${second}` : first + second;
 }
 
-function isOnItsWay(address: string, eventId: string): boolean {
+function since(stored: string, text: string): string {
+  if (stored === text) return "";
+  return text !== "" && stored.startsWith(`${text}\n\n`) ? stored.slice(text.length + 2) : stored;
+}
+
+function onItsWay(address: string, eventId: string): OnItsWay | undefined {
   const message = sent.get(address);
-  return message?.kind === "on_its_way" && message.eventId === eventId;
+  return message?.kind === "on_its_way" && message.eventId === eventId ? message : undefined;
+}
+
+function clearSent(address: string, message: OnItsWay): void {
+  if (message.stage.kind !== "received")
+    storeDraft(address, since(storedDraft(address), message.text));
+}
+
+export function awaitingReceipt(address: string): OnItsWay | undefined {
+  const message = sent.get(address);
+  return message?.kind === "on_its_way" && message.stage.kind !== "received" ? message : undefined;
+}
+
+function store(address: string): void {
+  storeDraft(address, joined(awaitingReceipt(address)?.text ?? "", written.get(address) ?? ""));
 }
 
 function forgetRefusal(address: string): void {
@@ -41,7 +60,12 @@ export function draftOf(address: string): string {
 
 export function write(address: string, text: string): void {
   written.set(address, text);
-  storeDraft(address, text);
+  store(address);
+}
+
+export function storedElsewhere(event: StorageEvent): void {
+  const address = addressOfDraft(event.key);
+  if (address !== undefined && event.newValue === null && written.has(address)) store(address);
 }
 
 export function attachedTo(address: string): readonly File[] {
@@ -71,7 +95,7 @@ export async function send(key: ConversationKey, limits: Limits): Promise<void> 
   const text = draftOf(address);
   const files = attachedTo(address);
   const token = storedToken();
-  if (token === null || sent.get(address)?.kind === "on_its_way") return;
+  if (token === null || awaitingReceipt(address) !== undefined) return;
   if (text.trim() === "" && files.length === 0) return;
   if (overLimit(files, limits) !== undefined) return;
   const message: OnItsWay = {
@@ -85,7 +109,7 @@ export async function send(key: ConversationKey, limits: Limits): Promise<void> 
   attached.delete(address);
   write(address, "");
   for await (const stage of deliver({ key, eventId: message.eventId, text, files }, token)) {
-    if (!isOnItsWay(address, message.eventId)) return;
+    if (onItsWay(address, message.eventId) === undefined) return;
     if (stage.kind === "refused") {
       sent.set(address, stage);
       attached.set(address, [...files, ...attachedTo(address)]);
@@ -94,6 +118,10 @@ export async function send(key: ConversationKey, limits: Limits): Promise<void> 
     }
     sent.set(address, { ...message, stage });
   }
+  const received = onItsWay(address, message.eventId);
+  if (received === undefined) return;
+  clearSent(address, received);
+  sent.set(address, { ...received, stage: { kind: "received" } });
 }
 
 export function settle(open: Opened | null): void {
@@ -104,5 +132,7 @@ export function settle(open: Opened | null): void {
   const arrived = open.turns.some(
     (turn) => turn.source.kind === "message" && turn.source.event_id === message.eventId,
   );
-  if (arrived) sent.delete(address);
+  if (!arrived) return;
+  clearSent(address, message);
+  sent.delete(address);
 }

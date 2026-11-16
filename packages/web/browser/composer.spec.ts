@@ -1,3 +1,4 @@
+import { sends } from "./composing.ts";
 import {
   arrive,
   atWork,
@@ -74,6 +75,65 @@ test("what is being written survives a reload, and a sent message leaves nothing
   await page.reload();
   await expect(turns(page)).toHaveCount(2);
   await expect(message(page)).toHaveValue("");
+});
+
+test("a message on its way is in the composer again after a reload, with what was written since, and is not sent again", async ({
+  page,
+  fake,
+}) => {
+  const sent = sends(page);
+  await arrive(page, fake, "send-held");
+  await open(page, "Plan the release.");
+  await send(page, "Write the release notes.");
+  await expect(turns(page).last()).toContainText("Carillon is receiving it.");
+  await message(page).fill("And keep them short.");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Plan the release.", level: 2 })).toBeVisible();
+  await expect(message(page)).toHaveValue("Write the release notes.\n\nAnd keep them short.");
+  await expect(turns(page)).toHaveCount(1);
+  await expect(
+    page.getByRole("status").filter({ hasText: "Carillon is receiving it." }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  expect(sent).toHaveLength(1);
+});
+
+test("once a message has arrived, a reload shows only what was written since", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-held");
+  await open(page, "Plan the release.");
+  await send(page, "Write the release notes.");
+  await expect(turns(page).last()).toContainText("Carillon is receiving it.");
+  await message(page).fill("And keep them short.");
+  await fake.step("the provider reads the upload");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(message(page)).toHaveValue("And keep them short.");
+  await page.reload();
+  await expect(turns(page)).toHaveCount(2);
+  await expect(message(page)).toHaveValue("And keep them short.");
+});
+
+test("when a message sent in another tab clears what is stored, this tab stores what it holds again", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "turn");
+  await open(page, "Plan the release.");
+  await message(page).fill("Mine, unsent.");
+  const other = await page.context().newPage();
+  await other.goto(page.url());
+  await expect(message(other)).toHaveValue("Mine, unsent.");
+  await send(other, "Theirs, sent.");
+  await expect(atWork(turns(other).last())).toContainText("Waiting its turn");
+  await expect(message(other)).toHaveValue("");
+  await expect(async () => {
+    await other.reload();
+    await expect(message(other)).toHaveValue("Mine, unsent.", { timeout: 2000 });
+  }).toPass();
+  await page.reload();
+  await expect(message(page)).toHaveValue("Mine, unsent.");
 });
 
 test("what is being written belongs to its conversation", async ({ page, fake }) => {

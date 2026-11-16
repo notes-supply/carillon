@@ -23,7 +23,9 @@
       </ul>
     {/if}
     <div class="said-foot" role="status">
-      {#if stage.kind === "receiving"}
+      {#if stage.kind === "received"}
+        Received.
+      {:else if stage.kind === "receiving"}
         Carillon is receiving it.
       {:else if stage.kind === "retrying"}
         Carillon is not answering. This message will be sent when it does.
