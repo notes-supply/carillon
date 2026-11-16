@@ -1,6 +1,8 @@
 <script lang="ts">
-  import type { Conversation } from "../api/stream.ts";
+  import { WINDOW_LIMIT, type Conversation } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
+  import { focusedWhen, inViewWhen } from "../session/focus.svelte.ts";
+  import { route, showEarlierConversations } from "../session/route.svelte.ts";
   import Moment from "../time/Moment.svelte";
   import { titleOf } from "./title.ts";
   import { unread, type Seen } from "./unread.ts";
@@ -9,11 +11,13 @@
     conversations,
     seen,
     open,
+    more,
     custom,
   }: {
     conversations: readonly Conversation[];
     seen: Seen;
     open: string;
+    more: boolean;
     custom: boolean;
   } = $props();
 </script>
@@ -27,7 +31,13 @@
     {#each conversations as conversation (addressOf(conversation.key))}
       {@const address = addressOf(conversation.key)}
       <li>
-        <a class="chat" href="#{address}" aria-current={address === open ? "page" : undefined}>
+        <a
+          class="chat"
+          href="#{address}"
+          aria-current={address === open ? "page" : undefined}
+          {@attach inViewWhen(address === open)}
+          {@attach focusedWhen(address === route.firstEarlierRow)}
+        >
           <span class="chat-title">{titleOf(conversation)}</span>
           <span class="chat-when"><Moment at={conversation.active_at} /></span>
           {#if conversation.at_work > 0}
@@ -45,6 +55,11 @@
   </ol>
   {#if conversations.length === 0}
     <p class="rail-note">No conversations yet. The ones you start are listed here, latest first.</p>
+  {/if}
+  {#if more && route.rows < WINDOW_LIMIT}
+    <button class="button" id="more-chats" type="button" onclick={showEarlierConversations}>
+      Show earlier conversations
+    </button>
   {/if}
   {#if custom}
     <footer class="rail-note">

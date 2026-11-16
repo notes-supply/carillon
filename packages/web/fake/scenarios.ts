@@ -434,6 +434,21 @@ function many(now: number, turns: number, html: (n: number) => string): World {
   return held;
 }
 
+/** Sixty conversations of one exchange each, the sixtieth the latest. */
+function crowded(now: number): World {
+  const held = world(now);
+  for (let n = 1; n <= 60; n += 1)
+    exchange(
+      held,
+      n,
+      (61 - n) * 600,
+      30,
+      `Conversation ${String(n)}`,
+      `<p>Answer ${String(n)}.</p>\n`,
+    );
+  return held;
+}
+
 const TALL = Array.from(
   { length: 12 },
   (_, line) =>
@@ -735,6 +750,11 @@ export const scenarios: Record<string, Scenario> = {
         run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
       },
     ],
+  },
+  crowded: {
+    about: "Sixty conversations, more than one window of the rail.",
+    world: crowded,
+    steps: [],
   },
   earlier: {
     about: "One conversation of 120 turns, more than two windows.",

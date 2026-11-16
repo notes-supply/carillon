@@ -1,4 +1,15 @@
-import { arrive, conversation, conversations, expect, open, test } from "./fixtures.ts";
+import { audience } from "../fake/world.ts";
+import {
+  PASSWORD,
+  arrive,
+  clockAt,
+  conversation,
+  conversations,
+  expect,
+  open,
+  rail,
+  test,
+} from "./fixtures.ts";
 
 test("an installation with no conversation says so", async ({ page, fake }) => {
   await arrive(page, fake, "empty");
@@ -91,4 +102,57 @@ test("the mark of a conversation at work goes when its turn ends", async ({ page
   await expect(
     conversation(page, "Chart last week's numbers.").getByRole("img", { name: "New" }),
   ).toBeVisible();
+});
+
+test("earlier conversations are listed on request, and the keyboard goes to the first of them", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "crowded");
+  const earlier = page.getByRole("button", { name: "Show earlier conversations" });
+  await expect(conversations(page)).toHaveCount(50);
+  await expect(conversations(page).first()).toContainText("Conversation 60");
+  await expect(conversations(page).last()).toContainText("Conversation 11");
+  await earlier.click();
+  await expect(conversations(page)).toHaveCount(60);
+  await expect(conversations(page).last()).toContainText("Conversation 1");
+  await expect(conversations(page).nth(50).getByRole("link")).toBeFocused();
+  await expect(conversations(page).nth(50)).toContainText("Conversation 10");
+  await expect(earlier).toBeHidden();
+});
+
+test("an installation with one window of conversations offers no earlier ones", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  await expect(conversations(page)).toHaveCount(4);
+  await expect(page.getByRole("button", { name: "Show earlier conversations" })).toBeHidden();
+});
+
+test("a conversation opened by its address is scrolled into view in the list", async ({
+  page,
+  fake,
+}) => {
+  await fake.play("crowded");
+  await clockAt(page, 0);
+  await page.goto(`${fake.origin}/#assistant/${audience(11)}`);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(rail(page)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Conversation 11", level: 2 })).toBeVisible();
+  const row = conversation(page, "Conversation 11").getByRole("link");
+  await expect(row).toHaveAttribute("aria-current", "page");
+  await expect(row).toBeInViewport();
+});
+
+test("a conversation's time becomes its date when the day changes, with no snapshot", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "rail");
+  await expect(conversation(page, "Plan the release.")).toContainText("11:40");
+  await clockAt(page, 13 * 3600);
+  await expect(conversation(page, "Plan the release.")).toContainText("15 Nov");
+  await expect(conversation(page, "Chart last week's numbers.")).toContainText("15 Nov");
 });

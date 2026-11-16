@@ -37,6 +37,7 @@
       conversations={snapshot.conversations}
       seen={session.seen}
       open={route.address}
+      more={snapshot.more}
       custom={snapshot.custom_site}
     />
     <main class="room">

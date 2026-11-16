@@ -6,6 +6,12 @@ export function focusedWhen(wanted: boolean): Attachment<HTMLElement> {
   };
 }
 
+export function inViewWhen(wanted: boolean): Attachment<HTMLElement> {
+  return (element) => {
+    if (wanted) element.scrollIntoView({ block: "nearest" });
+  };
+}
+
 const DESKTOP = "(min-width: 46rem)";
 
 let message: HTMLElement | undefined;
