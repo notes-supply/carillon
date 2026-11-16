@@ -86,6 +86,14 @@ export function detach(address: string, file: File): void {
   forgetRefusal(address);
 }
 
+export function carry(from: string, into: string): void {
+  attached.set(into, attachedTo(from));
+  attached.delete(from);
+  write(into, draftOf(from));
+  write(from, "");
+  forgetRefusal(from);
+}
+
 export function sentTo(address: string): OnItsWay | Refused | undefined {
   return sent.get(address);
 }

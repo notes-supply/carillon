@@ -40,7 +40,12 @@
         {#key route.address}
           <Transcript {open} address={route.address} />
         {/key}
-        <Composer key={route.key} limits={snapshot.limits} />
+        <Composer
+          key={route.key}
+          limits={snapshot.limits}
+          agents={snapshot.agents}
+          recorded={conversation !== undefined}
+        />
       {/if}
     </main>
   </div>

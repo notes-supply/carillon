@@ -485,6 +485,18 @@ export const scenarios: Record<string, Scenario> = {
     world,
     steps: settling,
   },
+  agents: {
+    about:
+      "An installation with two agents and no conversation yet, for choosing who a new one is with.",
+    world: (now) => ({
+      ...world(now),
+      agents: [
+        { id: "assistant", name: "Carillon" },
+        { id: "researcher", name: "Research" },
+      ],
+    }),
+    steps: [],
+  },
   endings: {
     about:
       "One conversation with every ending: interrupted, steered, stopped, a runtime-opened turn, a running turn with no activity and a queued one.",

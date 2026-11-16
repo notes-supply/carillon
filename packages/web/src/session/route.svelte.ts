@@ -37,6 +37,10 @@ export const route = {
   },
 };
 
+export function openConversation(next: ConversationKey): void {
+  location.replace(`#${addressOf(next)}`);
+}
+
 export function showEarlierTurns(): void {
   earlier = { address, turns: widened(turns) };
 }
