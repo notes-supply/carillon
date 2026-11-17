@@ -715,12 +715,17 @@ replaces them with the release's.
 A page of your own is a complete built folder in the provider's own
 folder. Build it from the page's source,
 [`packages/web`](../../packages/web), in a checkout of the release you run,
-and copy the whole folder:
+and copy the whole folder in place of the one there:
 
 ```sh
 mise run build:web
+rm -rf ~/.carillon/state/components/web/site
 cp -R packages/web/dist ~/.carillon/state/components/web/site
 ```
+
+The `rm` takes out the copy you built before, because `cp` over a `site`
+that is there writes the new build into `site/dist` and the old page
+stays served.
 
 A `site` folder with an `index.html` is served instead of the release's
 copy, at the next reload, and no file comes from the release while it is
