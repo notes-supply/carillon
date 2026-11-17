@@ -41,6 +41,8 @@ function lanesOf(path) {
       ? ["rust", "ts", "release"]
       : ["rust", "release"];
   }
+  // Only the provider's stream test and the page's own read the sample.
+  if (path === "packages/web/src/api/stream.sample.json") return ["rust", "ts"];
   if (/^packages\/web\/(browser|fake)\//u.test(path)) return ["ts", "browser"];
   if (path.startsWith("packages/web/")) return ["ts", "release", "browser"];
   if (path.startsWith("packages/")) return ["ts", "release"];

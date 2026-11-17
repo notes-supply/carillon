@@ -8,6 +8,7 @@ import {
   type Received,
   type Turn,
 } from "./stream.ts";
+import sample from "./stream.sample.json" with { type: "json" };
 
 const KEY = { agent_id: "assistant", audience_id: "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b" };
 const EVENT = "m-0190f3a8-7b1c-7def-8a2b-aaaaaaaaaaaa";
@@ -139,6 +140,10 @@ test("every message the provider sends is read as it was written", () => {
     { kind: "signed_out" },
   ];
   for (const written of messages) expect(sent(written)).toStrictEqual(written);
+});
+
+test("the message the provider's contract test writes is read as the snapshot it is", () => {
+  expect(sent(sample)).toStrictEqual(sample);
 });
 
 const broken: Record<string, unknown> = {

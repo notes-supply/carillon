@@ -13,7 +13,7 @@ The page: the door, the rail, the transcript and the composer, against [the stre
 | `browser/` | What a person can see and do, as Playwright checks against the built page served by the fake. | `mise run test:browser` |
 | `public/` | The page's one stylesheet, its typeface and its icon. | The formatter |
 
-A test of one module is beside that module, so the lint that says where the page may use `JSON`, `Date` or a timer says the same of its tests. A browser check is about the built page as a whole and not about one module, and the fake is a Node program the page never loads, so both stay outside `src`, which holds only what Vite builds.
+A test of one module is beside that module, so the lint that says where the page may use `JSON`, `Date` or a timer says the same of its tests. A browser check is about the built page as a whole and not about one module, and the fake is a Node program the page never loads, so both stay outside `src`, which holds only the page's modules, their tests and the stream's sample message.
 
 ## The browser checks
 

@@ -45,6 +45,8 @@ it("follows inputs across languages", () => {
     "release",
     "ts",
   ]);
+  // The provider's stream test reads the page's sample message.
+  expect(lanes(["packages/web/src/api/stream.sample.json"])).toEqual(["lint", "rust", "ts"]);
   // TypeScript formatting covers JSON anywhere.
   expect(lanes(["crates/carillon-discord-module/fixtures/cards.json"])).toEqual([
     "lint",

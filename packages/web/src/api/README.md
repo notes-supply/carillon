@@ -1,9 +1,10 @@
 # The browser's contract with the web provider
 
-This folder is what the page and the provider agree on. The provider's Rust types serialize to exactly these shapes, and the page refuses a message with a field they lack.
+This folder is what the page and the provider agree on. The provider's Rust types serialize to exactly these shapes, and the page refuses a message with a field they lack. The check is `stream.sample.json`. The provider's test `a_snapshot_of_each_kind_of_turn_is_the_page_s_sample_message`, in `crates/carillon-web/src/stream/tests.rs`, asserts that its snapshot of each kind of turn serializes to that file, and `stream.test.ts` asserts that `readStreamMessage` reads the file as that snapshot. Only a file link's expiry and signature, which change with the day and the installation, are left out of the comparison.
 
 - `stream.ts`: the stream's messages as TypeBox schemas, the types derived from them, `readStreamMessage` and `streamMessages`.
 - `requests.ts`: the view, each request's path and body, each answer's schema, and what a status means.
+- `stream.sample.json`: one snapshot message with a turn of each kind, as the provider writes it.
 - `stream.test.ts`, `requests.test.ts`: what both promise, run by `vitest`.
 
 The files have no comments, because the page's code has none. This file holds what a comment would have said.

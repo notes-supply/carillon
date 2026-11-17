@@ -22,14 +22,22 @@ use crate::{
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
 const OTHER: &str = "0190f3a8-7b1c-7def-8a2b-000000000001";
 const DAY: u64 = 24 * 60 * 60;
+/// The page's sample message, a snapshot with one turn of each kind.
+const SAMPLE: &str = include_str!("../../../../packages/web/src/api/stream.sample.json");
 
 fn open(agent: &str) -> String {
     format!("conversations=50&agent_id={agent}&audience_id={CHAT}&turns=50")
 }
 
-fn message(event: &str, text: &str) -> TurnSource {
+/// The event ID of a page's message, `m-` and a UUID, as identity.rs admits
+/// it.
+fn event(ordinal: u8) -> String {
+    format!("m-0190f3a8-7b1c-7def-8a2b-{ordinal:012}")
+}
+
+fn message(ordinal: u8, text: &str) -> TurnSource {
     TurnSource::Message {
-        event_id: event.to_owned(),
+        event_id: event(ordinal),
         text: text.to_owned(),
         command: false,
         files: Vec::new(),
@@ -138,7 +146,7 @@ async fn a_snapshot_follows_each_change_to_what_the_view_shows() -> Result<()> {
             .push(conversation("assistant", OTHER, 3)?);
         core.turns.insert(
             key("second", CHAT)?,
-            vec![turn("t1", message("m-1", "hello"), Progress::Queued)],
+            vec![turn("t1", message(1, "hello"), Progress::Queued)],
         );
     }
     let listed = json!({
@@ -148,7 +156,7 @@ async fn a_snapshot_follows_each_change_to_what_the_view_shows() -> Result<()> {
     let queued = json!({
         "turn_id": "t1",
         "source": {
-            "kind": "message", "event_id": "m-1", "text": "hello", "command": false, "files": [],
+            "kind": "message", "event_id": event(1), "text": "hello", "command": false, "files": [],
         },
         "accepted_at": 10,
         "progress": {"state": "queued"},
@@ -174,7 +182,7 @@ async fn a_snapshot_follows_each_change_to_what_the_view_shows() -> Result<()> {
         .turns
         .entry(key("second", CHAT)?)
         .or_default()
-        .push(turn("t2", message("m-2", "again"), Progress::Queued));
+        .push(turn("t2", message(2, "again"), Progress::Queued));
     let turns = page.snapshot().await?["open"]["turns"].clone();
     assert_eq!(turns.as_array().map(Vec::len), Some(2));
     Ok(())
@@ -216,7 +224,7 @@ async fn a_change_the_page_is_not_shown_sends_nothing_in_five_seconds_of_a_pause
 /// One turn of each kind a person can see.
 fn turns(report: &TurnActivity) -> Vec<ObservedTurn> {
     let sent = TurnSource::Message {
-        event_id: "m-1".to_owned(),
+        event_id: event(1),
         text: "<b>look</b> at *this*".to_owned(),
         command: true,
         files: vec![TurnAttachment {
@@ -252,13 +260,13 @@ fn turns(report: &TurnActivity) -> Vec<ObservedTurn> {
         turn("t1", sent, answered),
         turn(
             "t2",
-            message("m-2", "and then?"),
+            message(2, "and then?"),
             ended(Ending::Interrupted {
                 notice: "The runtime ran out of *credit*.".to_owned(),
             }),
         ),
-        turn("t3", message("m-3", "also this"), ended(Ending::Steered)),
-        turn("t4", message("m-4", "never mind"), ended(Ending::Stopped)),
+        turn("t3", message(3, "also this"), ended(Ending::Steered)),
+        turn("t4", message(4, "never mind"), ended(Ending::Stopped)),
         turn(
             "t5",
             scheduled,
@@ -276,17 +284,17 @@ fn turns(report: &TurnActivity) -> Vec<ObservedTurn> {
         ),
         turn(
             "t7",
-            message("m-7", "waiting"),
+            message(7, "waiting"),
             Progress::Running {
                 activity: Some(held),
             },
         ),
         turn(
             "t8",
-            message("m-8", "unanswered"),
+            message(8, "unanswered"),
             Progress::Running { activity: None },
         ),
-        turn("t9", message("m-9", "last"), Progress::Queued),
+        turn("t9", message(9, "last"), Progress::Queued),
     ]
 }
 
@@ -306,84 +314,35 @@ fn keeps_back(wire: &str, installation: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// The turns of [`turns`] as the page's contract writes them, with the
-/// links the snapshot gave to the message's file and the answer's.
-fn written(sent: &str, chart: &str) -> Value {
-    let said = |phase: &str| {
-        json!({
-            "phase": phase, "headline": "reading", "running": [], "recent": [], "tool_calls": 2,
-        })
-    };
-    let from = |event: &str, text: &str| json!({"kind": "message", "event_id": event, "text": text, "command": false, "files": []});
-    let ended = |ending: Value| json!({"state": "ended", "finished_at": 20, "ending": ending});
-    json!([
-        {
-            "turn_id": "t1",
-            "source": {
-                "kind": "message", "event_id": "m-1", "text": "<b>look</b> at *this*",
-                "command": true,
-                "files": [{
-                    "name": "report.pdf", "size": 8, "type": "application/octet-stream",
-                    "url": sent,
-                }],
-            },
-            "accepted_at": 10,
-            "progress": {
-                "state": "ended", "finished_at": 20,
-                "ending": {
-                    "kind": "answered",
-                    "html": "<p>Here is the <strong>chart</strong>. &lt;script&gt;x&lt;/script&gt;</p>\n",
-                    "files": [{"name": "chart.png", "size": 25, "type": "image/png", "url": chart}],
-                },
-                "report": said("model"),
-            },
-        },
-        {
-            "turn_id": "t2", "source": from("m-2", "and then?"), "accepted_at": 10,
-            "progress": ended(json!({
-                "kind": "interrupted",
-                "html": "<p>The runtime ran out of <em>credit</em>.</p>\n",
-            })),
-        },
-        {
-            "turn_id": "t3", "source": from("m-3", "also this"), "accepted_at": 10,
-            "progress": ended(json!({"kind": "steered"})),
-        },
-        {
-            "turn_id": "t4", "source": from("m-4", "never mind"), "accepted_at": 10,
-            "progress": ended(json!({"kind": "stopped"})),
-        },
-        {
-            "turn_id": "t5",
-            "source": {"kind": "opened", "label": "Scheduled run: morning summary"},
-            "accepted_at": 10,
-            "progress": ended(json!({
-                "kind": "answered", "html": "<p>Good morning.</p>\n", "files": [],
-            })),
-        },
-        {
-            "turn_id": "t6", "source": {"kind": "opened"}, "accepted_at": 10,
-            "progress": {"state": "running", "activity": said("model"), "controls": []},
-        },
-        {
-            "turn_id": "t7", "source": from("m-7", "waiting"), "accepted_at": 10,
-            "progress": {
-                "state": "running", "activity": said("queued"), "controls": ["steer", "stop"],
-            },
-        },
-        {
-            "turn_id": "t8", "source": from("m-8", "unanswered"), "accepted_at": 10,
-            "progress": {"state": "running", "activity": null, "controls": []},
-        },
-        {
-            "turn_id": "t9", "source": from("m-9", "last"), "accepted_at": 10,
-            "progress": {"state": "queued"},
-        },
-    ])
+/// `message` with each file link's expiry and signature, which change with
+/// the day and the installation, taken out.
+fn unsigned(message: &mut Value) -> Result<()> {
+    match message {
+        Value::Object(fields) => {
+            for (name, field) in fields {
+                match (name.as_str(), field) {
+                    ("url", Value::String(link)) => {
+                        let (unsigned, signed) =
+                            link.split_once("&exp=").context("a link with no expiry")?;
+                        anyhow::ensure!(signed.contains("&sig="), "{link} is not signed");
+                        *link = unsigned.to_owned();
+                    }
+                    (_, field) => unsigned(field)?,
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                unsigned(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[tokio::test]
-async fn each_kind_of_turn_is_written_as_the_page_s_contract_has_it() -> Result<()> {
+async fn a_snapshot_of_each_kind_of_turn_is_the_page_s_sample_message() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let store = fixture.directory.path().join("state/attachments");
@@ -400,21 +359,12 @@ async fn each_kind_of_turn_is_written_as_the_page_s_contract_has_it() -> Result<
         core.turns.insert(key("second", CHAT)?, turns(&report));
     }
     let mut page = fixture.stream(&open("second"), &token).await?;
-    let snapshot = page.snapshot().await?;
-    keeps_back(&snapshot.to_string(), fixture.directory.path())?;
-    let opened = &snapshot["open"];
-    assert_eq!(opened["earlier"], false);
-    let shown = opened["turns"].as_array().context("no turns")?;
-    let link = |file: &Value| file["url"].as_str().map(str::to_owned).unwrap_or_default();
-    let sent = link(&shown[0]["source"]["files"][0]);
-    let chart = link(&shown[0]["progress"]["ending"]["files"][0]);
-    assert!(sent.starts_with("/files/capture-a/1?name=report.pdf&exp="));
-    assert!(chart.starts_with("/files/capture-a/0?name=chart.png&exp="));
-    let expected = written(&sent, &chart);
-    for (shown, expected) in shown.iter().zip(expected.as_array().context("no turns")?) {
-        assert_eq!(shown, expected);
-    }
-    assert_eq!(shown.len(), 9);
+    let mut message = page.next().await?.context("the stream ended")?;
+    keeps_back(&message.to_string(), fixture.directory.path())?;
+    let mut sample: Value = serde_json::from_str(SAMPLE)?;
+    unsigned(&mut message)?;
+    unsigned(&mut sample)?;
+    assert_eq!(message, sample);
     Ok(())
 }
 
@@ -555,7 +505,7 @@ async fn a_stream_ends_without_a_last_message_when_its_utc_day_ends_on_a_paused_
         };
         core.turns.insert(
             key("second", CHAT)?,
-            vec![turn("t1", message("m-1", "notes?"), ended(answer))],
+            vec![turn("t1", message(1, "notes?"), ended(answer))],
         );
     }
     let before = now();

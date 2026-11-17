@@ -182,7 +182,11 @@ with the page, and it is no interface for another program. Its contract is
 [`packages/web/src/api`](../../packages/web/src/api): the shapes are in
 `stream.ts` and `requests.ts`, and
 [its README](../../packages/web/src/api/README.md) says what they mean. The
-provider's types serialize to exactly those shapes.
+provider's types serialize to exactly those shapes. The stream's test
+`a_snapshot_of_each_kind_of_turn_is_the_page_s_sample_message` asserts that a
+snapshot of each kind of turn serializes to
+[`stream.sample.json`](../../packages/web/src/api/stream.sample.json), and
+the page's own test reads that file as a snapshot.
 
 ## Operator API
 
