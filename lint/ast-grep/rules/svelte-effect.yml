@@ -6,9 +6,6 @@ note: Effects live in the wrapper modules this rule ignores. A component uses wh
 files:
   - packages/web/src/**
 ignores:
-  - packages/web/src/time/clock.svelte.ts
-  - packages/web/src/transcript/follow-end.svelte.ts
-  - packages/web/src/session/focus.svelte.ts
   - packages/web/src/session/route.svelte.ts
 rule:
   kind: call_expression

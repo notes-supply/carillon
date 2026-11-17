@@ -51,13 +51,13 @@ Everything a component draws is a `$derived` of these, or a call to one of the d
 
 ## The rules
 
-The page's rules are lints, in `lint/ast-grep/rules/web-*.yml` and `svelte-*.yml` and in the `overrides` of `.oxlintrc.json`. `mise run check:lint` proves them twice: `lint/ast-grep/tests/` gives each rule code it must accept and code it must refuse, and `scripts/test-web-rules.sh` scans a small page to show that each rule reaches the files it names, which a test of one snippet cannot.
+The page's rules are lints, in `lint/ast-grep/rules/web-*.yml` and `svelte-*.yml` and in the `overrides` of `.oxlintrc.json`. `mise run check:lint` proves the ast-grep rules two ways. `lint/ast-grep/tests/` gives each rule that reads code, rather than a path, code it must accept and code it must refuse. `scripts/test-web-rules.sh` scans a small page and shows that each rule in its list of findings reaches the files it names, which a test of one snippet cannot. It then scans the real page without the `ignores` of `web-outside.yml`, `svelte-effect` and `web-dom-write`, and shows that each module those rules let through needs it.
 
 Which module may use which browser global, such as `localStorage`, `fetch` or `JSON`, is in the `overrides` of `.oxlintrc.json`.
 
 ## What reaches outside the page's state
 
-A listener, Svelte's `on`, a subscription, an observer, a timer, a media query and an attachment are each refused by a rule in `lint/ast-grep/rules/web-outside.yml`, except in the modules that rule's `ignores` name. Each rule lets through only the modules that use its form today. `web-markup-outside` refuses the same calls in a component's markup, and `svelte-effect` refuses an `$effect` outside the modules its `ignores` name. `scripts/test-web-rules.sh` fails when a module there no longer uses the form it is let through for, and when the table below and those `ignores` name different modules. A component reaches the window, the document or the body only through these modules, because `svelte-page-element` refuses `<svelte:window>`, `<svelte:document>` and `<svelte:body>`.
+A listener, Svelte's `on`, a subscription, an observer, a timer, a media query and an attachment are each refused by a rule in `lint/ast-grep/rules/web-outside.yml`, except in the modules that rule's `ignores` name. Each rule lets through only the modules that use its form today. `web-markup-outside` refuses the same calls in a component's markup. `svelte-effect` refuses an `$effect` outside `session/route.svelte.ts`, and `web-dom-write` refuses a write to an element outside `transcript/follow-end.svelte.ts`. `scripts/test-web-rules.sh` fails when a module one of these rules lets through no longer uses what it is let through for, and when the table below and the rules' `ignores` name different modules. A component reaches the window, the document or the body only through these modules, because `svelte-page-element` refuses `<svelte:window>`, `<svelte:document>` and `<svelte:body>`.
 
 | Module | What it reaches, and why |
 |---|---|

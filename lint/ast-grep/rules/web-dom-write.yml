@@ -6,10 +6,7 @@ note: Describe the element in a component. A module that must touch an element a
 files:
   - packages/web/src/**
 ignores:
-  - packages/web/src/main*.ts
-  - packages/web/src/main*.tsx
-  - packages/web/src/transcript/follow-end*.ts
-  - packages/web/src/session/focus*.ts
+  - packages/web/src/transcript/follow-end.svelte.ts
 utils:
   assigned:
     any:

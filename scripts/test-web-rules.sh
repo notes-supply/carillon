@@ -5,9 +5,9 @@
 # script. This scans a small page, and two files of the web provider's crate,
 # under the repository's own sgconfig.yml and rules, and compares every finding
 # with the list below. It then scans the real page with the `ignores` of the
-# rules in web-outside.yml left out, so that each module those rules let
-# through is one that needs it, and the README's table of them names the same
-# modules.
+# rules in web-outside.yml, svelte-effect.yml and web-dom-write.yml left out,
+# so that each module those rules let through is one that needs it, and the
+# README's table of them names the same modules.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -23,7 +23,7 @@ cp -R "$ROOT/lint/ast-grep" "$PAGE/lint/"
 cp -R "$ROOT/packages/web/src" "$REAL/packages/web/"
 SRC=$PAGE/packages/web/src
 CRATE=$PAGE/crates/carillon-web/src
-WRAPPERS=web-outside.yml
+WRAPPERS='web-outside.yml svelte-effect.yml web-dom-write.yml'
 
 # `file rule` for each finding in the tree $1, with a file of the page named
 # from packages/web/src, from ast-grep's
@@ -66,6 +66,11 @@ FILE
 page session/focus.svelte.ts <<'FILE'
 export function focused(field: HTMLInputElement): void {
   field.setAttribute("autofocus", "");
+}
+FILE
+page time/clock.svelte.ts <<'FILE'
+export function ticking(tick: () => void): void {
+  $effect(tick);
 }
 FILE
 page transcript/Prose.svelte <<'FILE'
@@ -175,6 +180,7 @@ FILE
 
 cat >"$TEST_ROOT/expected" <<'FINDINGS'
 crates/carillon-web/src/markdown/links.rs rust-web-markdown-rewrite
+main.ts web-dom-write
 rail/Reach.svelte web-deferred
 rail/Reach.svelte web-interval
 rail/Reach.svelte web-markup-outside
@@ -198,6 +204,8 @@ rail/reach.ts web-svelte-events
 rail/shared/Badge.svelte web-junk-drawer
 rail/shared/Badge.svelte web-junk-drawer-svelte
 rail/unread.svelte.ts svelte-effect
+session/focus.svelte.ts web-dom-write
+time/clock.svelte.ts svelte-effect
 widgets/Thing.svelte web-domain-directory
 widgets/Thing.svelte web-domain-directory-svelte
 widgets/thing.ts web-domain-directory
