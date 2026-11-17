@@ -708,22 +708,27 @@ discord-private disable` to start without it.
 
 ### The page's files
 
-The page is plain HTML, CSS and JavaScript files with its typeface, in
-`app/lib/web`, read from disk on every request. An update replaces them with the release's.
+The page is a folder of built files, its HTML, CSS, JavaScript and
+typeface, in `app/lib/web`, read from disk on every request. An update
+replaces them with the release's.
 
-To change the page and keep your changes across updates, make a complete
-copy in the provider's own folder and edit it there:
+A page of your own is a complete built folder in the provider's own
+folder. Build it from the page's source,
+[`packages/web`](../../packages/web), in a checkout of the release you run,
+and copy the whole folder:
 
 ```sh
-cp -R ~/.carillon/app/lib/web ~/.carillon/state/components/web/site
+mise run build:web
+cp -R packages/web/dist ~/.carillon/state/components/web/site
 ```
 
 A `site` folder with an `index.html` is served instead of the release's
 copy, at the next reload, and no file comes from the release while it is
-there. An update leaves it alone, so it does not gain the release's
-changes: remove the folder to return to the release's page. The
-[web guide](../../crates/carillon-web/README.md) describes the API the page
-uses.
+there. The page then says under its conversations that it is your own copy.
+An update leaves the folder alone, so it does not gain the release's
+changes: remove the folder to return to the release's page. The page and
+the provider ship together, so build your copy again from the release you
+update to.
 
 ## Discord
 

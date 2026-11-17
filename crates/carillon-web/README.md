@@ -130,10 +130,11 @@ script.
 
 ## The page's files
 
-The page is plain files, read from disk on each request. `serve` finds the
-release's copy in `lib/web` beside the directory that holds the program,
-which is `app/lib/web` in an installation. In a checkout, build the page with
-`mise run build:web` and name its folder: `--site packages/web/dist`.
+The page is a folder of built files, read from disk on each request.
+`serve` finds the release's copy in `lib/web` beside the directory that
+holds the program, which is `app/lib/web` in an installation. In a
+checkout, build the page with `mise run build:web` and name its folder:
+`--site packages/web/dist`.
 
 A complete copy in `state/components/<id>/site/` is served instead of the
 release's. A copy is complete when it has an `index.html`. No file comes
@@ -163,14 +164,6 @@ stylesheet. It has both colour schemes as one named palette at its top, and
 the phone layout at its end. Every string the page shows goes in as text.
 The one exception is the HTML the provider rendered for an answer.
 
-In the browser the page keeps the token and, for each conversation, the
-text not yet received by Carillon: what is in the composer and, until its
-receipt, the message on its way. It keeps no event ID and no file, so a
-reload sends nothing by itself. A receipt clears only the text that was
-sent. Tabs share this storage. Two tabs that hold different unsent text for
-one conversation store the text typed last, and a tab stores its own again
-when another tab's receipt clears the draft.
-
 Answers are set in Literata, by the Literata Project Authors, under the SIL
 Open Font License 1.1.
 [`literata.woff2`](../../packages/web/public/literata.woff2) and
@@ -181,134 +174,15 @@ license.
 A copy of the page without the font files reads in the faces `style.css`
 names after it.
 
-## Browser API
+## The page's API
 
-The routes under `/api` are the page's own. The provider and the page ship
-together, so the API changes with the page, and it is no interface for
-another program. Every route but `POST /api/sign-in` needs the token as
-`Authorization: Bearer <token>`.
-
-A conversation is named by its agent and a UUID the page mints, lowercase
-with hyphens, in every request. A message's event ID is `m-<uuid>`, minted
-once per message and sent again with every retry. Times are Unix seconds.
-
-| Request | What it does |
-| --- | --- |
-| `POST /api/sign-in` | Trades the password for the token. |
-| `GET /api/stream?conversations=<n>[&agent_id=<agent>&audience_id=<uuid>[&turns=<n>]]` | Streams what the view shows. |
-| `PUT /api/conversations/<agent>/<uuid>/messages/<event id>` | Sends a message with its files. |
-| `GET /api/conversations/<agent>/<uuid>/commands` | Lists the commands the agent's runtime offers, for the page to suggest. |
-| `POST /api/messages/<event id>/control` | Steers, interrupts or stops the turn of a message. |
-| `GET /files/<path>?name=&exp=&sig=` | Reads a file by a link a snapshot gave. It needs no token. |
-
-### The stream
-
-The stream is the page's one source of what the server knows. It is a
-stream of server-sent events, each one `data` line of JSON with a `kind`:
-
-- `snapshot` holds everything the view shows, and the page replaces what
-  it had with it. A snapshot has the configured agents, core's limits on a
-  message's files, whether the page served is your copy, the conversations,
-  the latest active first, and the open conversation's newest turns. The
-  first event is a snapshot, and another follows whenever what the view
-  shows has changed.
-- `unavailable` says the provider is here and core is not: away, as it is
-  for a moment at every restart, or failing. It ends the stream.
-- `signed_out` says the password changed, so the token is void. It ends the
-  stream. The provider reads the password again before every message and
-  every keep-alive, so an open page learns of a new one within ten seconds.
-
-The provider also ends every stream at UTC midnight, with no last message.
-It asks core for a view once for each stream and never again: the page
-opens the next stream, at once after a midnight and after a wait otherwise.
-A comment every ten seconds keeps the connection open.
-
-`conversations` and `turns` are windows of 1 to 500. A view that is not one
-is a 400 with a plain-text body. A conversation core has no message of is
-open all the same and reads as unrecorded.
-
-Only what a person may see crosses. An answer and an interruption's notice
-arrive as HTML the provider rendered from Markdown: raw HTML is shown as
-text, a link stays one only to `http`, `https` or `mailto`, and an image
-becomes a link. A message's text arrives as written and is text, never
-markup. A running turn has what its runtime last said it was doing and the
-controls a person may use now. An ended turn has its ending and the
-runtime's final report. Where a file is on this machine, its hash, and a
-conversation's channel stay behind.
-
-### Files
-
-A file has a `name`, a `size` in bytes, a `type` and a `url`.
-
-- The `url` is opaque and needs no token, so it works in `<img>` and as a
-  download link.
-- A stream mints its links for the UTC day it opened on, so the browser
-  keeps the images it fetched. A link works until the end of the next UTC
-  day. After that it is 403, and the stream that followed the midnight has
-  given the page another.
-- A new password voids every link at once: the next request for one is 403.
-  The bytes a browser already cached or saved remain with that browser.
-- A file core no longer has is 404.
-- A `Range` request is answered with the whole file.
-
-`type` is the type the link answers with. A PNG, JPEG, GIF or WebP file,
-by its bytes, has its image type and is shown in place. Every other file,
-SVG and HTML included, is `application/octet-stream` and downloads.
-
-### Sending
-
-A message is multipart form data: one `text` part and a `file` part for
-each file. A message needs text or a file. A browser writes `"`, a carriage
-return and a line feed in a file's name as `%22`, `%0D` and `%0A`, and the
-provider reads those three back, so a file keeps the name it has on disk.
-
-The 200 is core's receipt, `{"turn_id": "…", "duplicate": false}`: core has
-the message, files included. Core answers a repeat of an event ID with the
-first receipt and `"duplicate": true`, whatever the repeat contains, and
-submits nothing twice. So after a 503, or a request that got no answer, the
-page sends the same request again.
-
-The provider decides whether a message invokes one of the runtime's
-commands, and the turn's snapshot says what it decided. A text that begins
-with `/` asks the runtime for its commands, once, and is a command when its
-first word is `/` and one of their names. A runtime that does not answer
-within six seconds leaves the text a message, so no message waits for a
-list. A text that begins with anything else asks nothing.
-
-| Status | Meaning |
-| --- | --- |
-| 400 | The body is not a readable multipart form, has a part that is not `text` or `file`, has a second `text` part, or has neither text nor a file. |
-| 413 | Too many files, a file or the message's files over core's limits, or text and file names that together make more than core reads in one event, which is about 2 MiB. |
-| 422 | Carillon has no agent of that name. |
-| 503 | Carillon cannot take it now. |
-| 507 | Core's file store is full. Sending again does not help. |
-
-A request can stay open for minutes: while the upload is going, while core
-copies the message's files, which takes up to five minutes for large ones,
-and while core is away, which the provider waits out as it does at every
-restart. If the browser leaves after its upload finished, the provider
-still submits the message. A refusal is given once the whole body is read:
-a browser that is answered while it uploads reports a broken connection.
-
-### Refusals
-
-An answer that is not 2xx from the provider or core is
-`{"error": "<words a person can read>"}`. A request that cannot be parsed
-has a plain-text body, and a path that is no route has none.
-
-| Status | Meaning |
-| --- | --- |
-| 401 | The token is not the current password's: never signed in, or the password changed. |
-| 403, 421 | The request did not come from the page's own origin, or named another host. A page loaded from the provider never sees these. |
-| 503 | Carillon cannot answer now: core is away or failed, or the provider is stopping. The body is always the same sentence. |
-
-The provider logs what core said when it answers 503 for core, or ends a
-stream as `unavailable`. The page is never sent it.
-
-Told to stop, the provider ends every stream as soon as its page reads
-again and gives the requests in flight two seconds to be answered. A
-message cut off there is not lost: the page sends it again under the same
-event ID.
+The routes under `/api`, and the file links a snapshot gives, are the
+page's own. The provider and the page ship together, so the API changes
+with the page, and it is no interface for another program. Its contract is
+[`packages/web/src/api`](../../packages/web/src/api): the shapes are in
+`stream.ts` and `requests.ts`, and
+[its README](../../packages/web/src/api/README.md) says what they mean. The
+provider's types serialize to exactly those shapes.
 
 ## Operator API
 
