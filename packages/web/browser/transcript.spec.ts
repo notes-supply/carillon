@@ -297,7 +297,7 @@ test("a person who read to the end of a tall newest turn is shown the turn that 
   const newest = turns(page).filter({ has: page.getByText("Message 30", { exact: true }) });
   await newest.getByText("Paragraph 6 of a long answer").hover();
   await page.mouse.wheel(0, 2000);
-  await expect(newest.getByText("Paragraph 12 of a long answer")).toBeInViewport();
+  await expect(newest.getByText(/^Answered/u)).toBeInViewport({ ratio: 1 });
   await fake.step("a first turn arrives");
   await expect(page.getByText("First arrival.")).toBeInViewport();
 });
