@@ -1,5 +1,4 @@
 import type { Credential } from "./credential.ts";
-import { ORIGIN } from "./origin.ts";
 import { bearer, messageForm, messagePath, reading, refusalWords } from "./requests.ts";
 import { retryPause } from "./retry.ts";
 import type { ConversationKey } from "./stream.ts";
@@ -30,7 +29,7 @@ function put(
 ): { leaving: ReadableStream<Leaving>; answered: Promise<Answer> } {
   const request = new XMLHttpRequest();
   const cancel = (): void => request.abort();
-  request.open("PUT", ORIGIN + path);
+  request.open("PUT", path);
   request.setRequestHeader("authorization", bearer(token));
   const leaving = new ReadableStream<Leaving>({
     start(steps) {

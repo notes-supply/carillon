@@ -1,4 +1,3 @@
-import { ORIGIN } from "./origin.ts";
 import {
   SIGN_IN_PATH,
   SignedInSchema,
@@ -12,7 +11,7 @@ import {
 export type SignIn = { kind: "signed_in"; token: string } | { kind: "refused"; words: string };
 
 export async function requestSignIn(password: string): Promise<SignIn> {
-  const answer = await fetch(ORIGIN + SIGN_IN_PATH, {
+  const answer = await fetch(SIGN_IN_PATH, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: signInBody(password),

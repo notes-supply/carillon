@@ -1,5 +1,4 @@
 import type { Credential } from "./credential.ts";
-import { ORIGIN } from "./origin.ts";
 import {
   CommandCatalogSchema,
   bearer,
@@ -14,7 +13,7 @@ export async function requestCommands(
   key: ConversationKey,
   credential: Credential,
 ): Promise<readonly Command[] | undefined> {
-  const answer = await fetch(ORIGIN + commandsPath(key), {
+  const answer = await fetch(commandsPath(key), {
     headers: { authorization: bearer(credential.token) },
   })
     .then(async (response) => ({ status: response.status, body: await response.text() }))

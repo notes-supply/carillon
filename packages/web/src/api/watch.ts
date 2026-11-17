@@ -1,4 +1,3 @@
-import { ORIGIN } from "./origin.ts";
 import { bearer, reading, streamPath, type View } from "./requests.ts";
 import { retryPause } from "./retry.ts";
 import { streamMessages, type Received } from "./stream.ts";
@@ -35,7 +34,7 @@ async function* attempt(
   signal: AbortSignal,
   heard: () => void,
 ): AsyncGenerator<Received, void, void> {
-  const response = await fetch(ORIGIN + streamPath(view), {
+  const response = await fetch(streamPath(view), {
     headers: { authorization: bearer(token) },
     signal,
   });

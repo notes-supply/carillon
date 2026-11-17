@@ -1,5 +1,4 @@
 import type { Credential } from "./credential.ts";
-import { ORIGIN } from "./origin.ts";
 import { bearer, controlBody, controlPath, reading, refusalWords } from "./requests.ts";
 import type { Control, MessageSource } from "./stream.ts";
 
@@ -10,7 +9,7 @@ export async function requestControl(
   action: Control,
   credential: Credential,
 ): Promise<string> {
-  const answer = await fetch(ORIGIN + controlPath(message), {
+  const answer = await fetch(controlPath(message), {
     method: "POST",
     headers: { authorization: bearer(credential.token), "content-type": "application/json" },
     body: controlBody(action),
