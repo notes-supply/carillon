@@ -75,9 +75,11 @@ impl TryFrom<View> for Viewed {
 
 /// How far one page's stream has come.
 enum Stage {
-    /// Core has not been asked yet.
-    Opening,
-    Open(Box<Observation>),
+    /// Core has not been asked yet, and only core decides the first message.
+    Unshown,
+    /// A snapshot is shown, so the day's end or the provider stopping may
+    /// end the stream.
+    Showing(Box<Observation>),
     /// Its last message is sent.
     Over,
 }
@@ -121,7 +123,7 @@ pub(crate) async fn stream(
             viewed,
             day,
             day_ends: opened + left,
-            stage: Stage::Opening,
+            stage: Stage::Unshown,
             sent: String::new(),
             quiet_until: opened + KEEP_ALIVE,
         },
@@ -145,17 +147,17 @@ impl Shown {
         loop {
             let heard = match &mut self.stage {
                 Stage::Over => return None,
-                Stage::Opening => {
+                Stage::Unshown => {
                     Heard::Core(match self.web.core.observe(&self.viewed.view).await {
                         Ok(mut observation) => {
                             let first = observation.next().await;
-                            self.stage = Stage::Open(Box::new(observation));
+                            self.stage = Stage::Showing(Box::new(observation));
                             first
                         }
                         Err(failure) => Err(failure),
                     })
                 }
-                Stage::Open(observation) => tokio::select! {
+                Stage::Showing(observation) => tokio::select! {
                     biased;
                     () = self.web.stopping.cancelled() => return None,
                     () = sleep_until(self.day_ends) => return None,
