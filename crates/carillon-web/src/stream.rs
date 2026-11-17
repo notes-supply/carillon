@@ -183,7 +183,7 @@ impl Shown {
                 day: self.day,
             };
             let snapshot = ChatSnapshot::of(&links, self.viewed.open.as_ref(), snapshot).await;
-            match written(&Message::Snapshot {
+            match serde_json::to_string(&Message::Snapshot {
                 snapshot: &snapshot,
             }) {
                 Ok(data) if data == self.sent => {}
@@ -221,12 +221,8 @@ impl Shown {
 
     fn last(&mut self, message: &Message<'_>) -> serde_json::Result<Event> {
         self.stage = Stage::Over;
-        Ok(Event::default().data(written(message)?))
+        Ok(Event::default().data(serde_json::to_string(message)?))
     }
-}
-
-fn written(message: &Message<'_>) -> serde_json::Result<String> {
-    serde_json::to_string(message)
 }
 
 #[cfg(test)]
