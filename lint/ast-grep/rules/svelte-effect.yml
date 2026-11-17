@@ -1,0 +1,14 @@
+id: svelte-effect
+language: typescript
+severity: error
+message: An effect is for reaching outside the page's state, such as a timer or an element. What can be computed from state is `$derived`.
+note: Effects live in the wrapper modules this rule ignores. A component uses what they export.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/session/route.svelte.ts
+rule:
+  kind: call_expression
+  has:
+    field: function
+    regex: "^\\$(effect|inspect)(\\.|$)"

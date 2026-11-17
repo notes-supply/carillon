@@ -16,10 +16,7 @@ cp "$ROOT/scripts/carillon-pi.sh" "$ROOT/scripts/register-services.sh" \
   "$ROOT/scripts/install-release.sh" "$ROOT/scripts/uninstall-release.sh" \
   "$ROOT/scripts/npm-notices.mjs" "$FIXTURE/scripts/"
 mkdir -p "$FIXTURE/deploy/systemd" "$FIXTURE/licenses" "$FIXTURE/packages/discord-pi/skill" \
-  "$FIXTURE/packages/runtime-pi" "$FIXTURE/crates/carillon-web/site"
-printf page >"$FIXTURE/crates/carillon-web/site/index.html"
-printf 'typeface licence' >"$FIXTURE/crates/carillon-web/site/typeface-OFL.txt"
-printf 'not a licence' >"$FIXTURE/crates/carillon-web/site/robots.txt"
+  "$FIXTURE/packages/runtime-pi" "$FIXTURE/packages/web"
 cp "$ROOT/LICENSE" "$FIXTURE/"
 cp "$ROOT/licenses/MIT.txt" "$ROOT/licenses/bun.md" "$FIXTURE/licenses/"
 # One npm dependency with a licence file, one without, as pnpm lists them.
@@ -56,7 +53,20 @@ cat >"$COMMANDS/toolchain" <<'COMMAND'
 set -eu
 case "${0##*/}" in
   rustc) [ "$*" = '--print host-tuple' ]; printf '%s\n' "$TEST_TARGET" ;;
-  pnpm) [ "$1 $2" = 'licenses list' ]; cat npm/listing.json ;;
+  pnpm)
+    case "$1 $2" in
+      'licenses list') cat npm/listing.json ;;
+      '--dir packages/web')
+        [ "$3 $4" = 'run build' ]
+        printf '%s\n' "$*" >>"$TRACE.pnpm"
+        mkdir -p packages/web/dist
+        printf page >packages/web/dist/index.html
+        printf 'typeface licence' >packages/web/dist/typeface-OFL.txt
+        printf 'not a licence' >packages/web/dist/robots.txt
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
   cargo)
     if [ "$1" = about ]; then
       while [ "$1" != -o ]; do shift; done
@@ -158,6 +168,8 @@ for arch in x86_64 aarch64; do
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
   [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 2 ]
+  [ "$(wc -l <"$TEST_ROOT/$arch.pnpm")" -eq 1 ]
+  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/web/index.html)" = page ]
   # The runtime's entry embeds what installed packages would have given it.
   for embedded in "$DURABLE/node_modules/@silvia-odwyer/photon/photon_rs_bg.wasm" \
     "$QUICKJS/quickjs.wasm" "$FIXTURE/packages/discord-pi/skill/SKILL.md"; do
@@ -171,7 +183,7 @@ for arch in x86_64 aarch64; do
   fi
   printf 'package target selection passed: %s\n' "$arch"
 done
-rm -rf "$FIXTURE/target" "$FIXTURE/dist"
+rm -rf "$FIXTURE/target" "$FIXTURE/dist" "$FIXTURE/packages/web/dist"
 if env PATH="$COMMANDS:$PATH" TEST_TARGET=x86_64-apple-darwin \
   TRACE="$TEST_ROOT/unsupported" "$FIXTURE/scripts/package-release.sh" >"$TEST_ROOT/refused.log" 2>&1; then
   echo 'packager accepted an unsupported release host' >&2
@@ -180,4 +192,5 @@ fi
 grep -F 'unsupported release build host' "$TEST_ROOT/refused.log" >/dev/null
 [ ! -e "$FIXTURE/target" ] && [ ! -e "$FIXTURE/dist" ]
 [ ! -e "$TEST_ROOT/unsupported.cargo" ] && [ ! -e "$TEST_ROOT/unsupported.bun" ]
+[ ! -e "$TEST_ROOT/unsupported.pnpm" ] && [ ! -e "$FIXTURE/packages/web/dist" ]
 printf '%s\n' 'package target refusal passed before staging/build'

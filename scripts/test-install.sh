@@ -62,8 +62,9 @@ done
 }
 grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service carillon-web.service' \
   "$RELEASE/systemd/carillon.target" >/dev/null
-diff -r "$ROOT/crates/carillon-web/site" "$RELEASE/lib/web"
-find "$ROOT/crates/carillon-web/site" -maxdepth 1 -name '*-OFL.txt' | while read -r notice; do
+(cd "$ROOT" && pnpm --dir packages/web run build >/dev/null)
+diff -r "$ROOT/packages/web/dist" "$RELEASE/lib/web"
+find "$ROOT/packages/web/dist" -maxdepth 1 -name '*-OFL.txt' | while read -r notice; do
   cmp "$notice" "$RELEASE/licenses/${notice##*/}"
 done
 # The T3 executable is standalone: it starts without a source checkout and

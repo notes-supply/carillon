@@ -1,0 +1,235 @@
+{
+  "kind": "snapshot",
+  "snapshot": {
+    "agents": [
+      {
+        "id": "assistant",
+        "name": "Assistant"
+      },
+      {
+        "id": "second",
+        "name": "Second"
+      }
+    ],
+    "limits": {
+      "files": 3,
+      "file_bytes": 1048576,
+      "message_bytes": 2097152
+    },
+    "custom_site": false,
+    "conversations": [
+      {
+        "key": {
+          "agent_id": "second",
+          "audience_id": "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b"
+        },
+        "title": "title 9",
+        "started_at": 100,
+        "active_at": 109,
+        "activity": 9,
+        "at_work": 0
+      }
+    ],
+    "more": false,
+    "open": {
+      "kind": "recorded",
+      "conversation": {
+        "key": {
+          "agent_id": "second",
+          "audience_id": "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b"
+        },
+        "title": "title 9",
+        "started_at": 100,
+        "active_at": 109,
+        "activity": 9,
+        "at_work": 0
+      },
+      "turns": [
+        {
+          "turn_id": "t1",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000001",
+            "text": "<b>look</b> at *this*",
+            "command": true,
+            "files": [
+              {
+                "name": "report.pdf",
+                "size": 8,
+                "type": "application/octet-stream",
+                "url": "/files/capture-a/1?name=report.pdf&exp=1795046400&sig=6466e450a16b77b865c5829d6b6c56d9f892956475642dbeb9ccc4340fe01b15"
+              }
+            ]
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "ended",
+            "finished_at": 20,
+            "ending": {
+              "kind": "answered",
+              "html": "<p>Here is the <strong>chart</strong>. &lt;script&gt;x&lt;/script&gt;</p>\n",
+              "files": [
+                {
+                  "name": "chart.png",
+                  "size": 25,
+                  "type": "image/png",
+                  "url": "/files/capture-a/0?name=chart.png&exp=1795046400&sig=2c5673b4bc84b793adf899afb4d88ddf3ea0f35253881c5811d4678ef87704ae"
+                }
+              ]
+            },
+            "report": {
+              "phase": "model",
+              "headline": "reading",
+              "running": [],
+              "recent": [],
+              "tool_calls": 2
+            }
+          }
+        },
+        {
+          "turn_id": "t2",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000002",
+            "text": "and then?",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "ended",
+            "finished_at": 20,
+            "ending": {
+              "kind": "interrupted",
+              "html": "<p>The runtime ran out of <em>credit</em>.</p>\n"
+            }
+          }
+        },
+        {
+          "turn_id": "t3",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000003",
+            "text": "also this",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "ended",
+            "finished_at": 20,
+            "ending": {
+              "kind": "steered"
+            }
+          }
+        },
+        {
+          "turn_id": "t4",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000004",
+            "text": "never mind",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "ended",
+            "finished_at": 20,
+            "ending": {
+              "kind": "stopped"
+            }
+          }
+        },
+        {
+          "turn_id": "t5",
+          "source": {
+            "kind": "opened",
+            "label": "Scheduled run: morning summary"
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "ended",
+            "finished_at": 20,
+            "ending": {
+              "kind": "answered",
+              "html": "<p>Good morning.</p>\n",
+              "files": []
+            }
+          }
+        },
+        {
+          "turn_id": "t6",
+          "source": {
+            "kind": "opened"
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "running",
+            "activity": {
+              "phase": "model",
+              "headline": "reading",
+              "running": [],
+              "recent": [],
+              "tool_calls": 2
+            },
+            "controls": []
+          }
+        },
+        {
+          "turn_id": "t7",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000007",
+            "text": "waiting",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "running",
+            "activity": {
+              "phase": "queued",
+              "headline": "reading",
+              "running": [],
+              "recent": [],
+              "tool_calls": 2
+            },
+            "controls": ["steer", "stop"]
+          }
+        },
+        {
+          "turn_id": "t8",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000008",
+            "text": "unanswered",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "running",
+            "activity": null,
+            "controls": []
+          }
+        },
+        {
+          "turn_id": "t9",
+          "source": {
+            "kind": "message",
+            "event_id": "m-0190f3a8-7b1c-7def-8a2b-000000000009",
+            "text": "last",
+            "command": false,
+            "files": []
+          },
+          "accepted_at": 10,
+          "progress": {
+            "state": "queued"
+          }
+        }
+      ],
+      "earlier": false
+    }
+  }
+}

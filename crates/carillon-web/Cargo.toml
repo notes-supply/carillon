@@ -18,10 +18,12 @@ carillon-installation = { path = "../carillon-installation" }
 carillon-interface = { path = "../carillon-interface" }
 carillon-protocol = { path = "../carillon-protocol" }
 clap.workspace = true
+futures-util = { version = "0.3.34", default-features = false }
 hex.workspace = true
 hmac = "0.12.1"
 libc = "0.2.191"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+pulldown-cmark-escape = "0.11.0"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -34,6 +36,7 @@ url = "2.5.8"
 uuid.workspace = true
 
 [dev-dependencies]
+sse-core = { version = "0.2.3", default-features = false, features = ["std"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5.2", features = ["util"] }

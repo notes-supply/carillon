@@ -7,9 +7,9 @@ use axum::{
     http::{Method, StatusCode},
 };
 
-use super::{encoded, signed, view};
+use super::{DAY, Day, Links, encoded, signed};
 use crate::{
-    browser::{Key, set_password},
+    browser::{Key, now, set_password},
     fixture::{Answer, Fixture, request},
 };
 
@@ -36,10 +36,21 @@ fn key(fixture: &Fixture) -> Result<Key> {
     Key::read(&fixture.password_file()).context("no password")
 }
 
-/// The link the page is given to the stored file `path`.
-async fn link(fixture: &Fixture, path: &str, name: &str) -> Result<String> {
-    let file = serde_json::to_value(view(&fixture.web, &key(fixture)?, path, name, 1).await)?;
+/// The link a stream that opened at `opened`, in Unix seconds, gives the
+/// page to the stored file `path`.
+async fn minted(fixture: &Fixture, opened: u64, path: &str, name: &str) -> Result<String> {
+    let links = Links {
+        web: &fixture.web,
+        key: &key(fixture)?,
+        day: Day::at(opened).0,
+    };
+    let file = serde_json::to_value(links.to(path, name, 1).await)?;
     Ok(file["url"].as_str().context("no link")?.to_owned())
+}
+
+/// The link a stream that opened now gives the page.
+async fn link(fixture: &Fixture, path: &str, name: &str) -> Result<String> {
+    minted(fixture, now(), path, name).await
 }
 
 /// A link carries its own authority: it is followed with no token.
@@ -181,9 +192,32 @@ async fn a_signed_path_that_leaves_the_store_names_nothing() -> Result<()> {
             "{path} left the store"
         );
     }
-    let outside = view(&fixture.web, &key(&fixture)?, "../secret", "x", 1).await;
-    let outside = serde_json::to_value(outside)?;
-    assert_eq!(outside["type"], "application/octet-stream");
+    let outside = follow(&fixture, &link(&fixture, "../secret", "x").await?).await?;
+    assert_eq!(outside.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_link_is_the_same_all_day_and_the_next_day_s_works_a_day_longer() -> Result<()> {
+    let fixture = fixture().await?;
+    let expiry = |link: String| {
+        let expiry = link.split('&').find_map(|pair| pair.strip_prefix("exp="));
+        expiry.map(str::to_owned).context("no expiry")
+    };
+    let early = minted(&fixture, 1_700_000_000, "capture/0", "chart.png").await?;
+    let late = minted(&fixture, 1_700_006_399, "capture/0", "chart.png").await?;
+    assert_eq!(early, late);
+    assert_eq!(expiry(early)?, "1700092800");
+    let next = minted(&fixture, 1_700_006_400, "capture/0", "chart.png").await?;
+    assert_eq!(expiry(next)?, "1700179200");
+
+    let today = link(&fixture, "capture/0", "chart.png").await?;
+    let tomorrow = minted(&fixture, now() + DAY, "capture/0", "chart.png").await?;
+    assert_eq!(
+        expiry(tomorrow.clone())?.parse::<u64>()?,
+        expiry(today)?.parse::<u64>()? + DAY
+    );
+    assert_eq!(follow(&fixture, &tomorrow).await?.status, StatusCode::OK);
     Ok(())
 }
 

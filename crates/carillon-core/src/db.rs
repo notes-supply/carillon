@@ -42,7 +42,6 @@ mod admission;
 mod conversations;
 mod dispatch;
 mod files;
-mod history;
 mod inspection;
 mod jobs;
 mod observation;
@@ -670,8 +669,8 @@ mod tests {
     mod changes;
     mod deliveries;
     mod format;
-    mod history;
     mod jobs;
+    mod observation;
     mod ownership;
     mod store;
 

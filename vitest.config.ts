@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import { isolateEnvironment } from "./scripts/environment.ts";
 
 isolateEnvironment();
@@ -15,6 +15,7 @@ process.on("exit", () => {
 
 export default defineConfig({
   test: {
+    exclude: [...configDefaults.exclude, "packages/web/browser/**"],
     restoreMocks: true,
     env: {
       HOME: home,

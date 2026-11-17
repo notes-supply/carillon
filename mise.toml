@@ -48,6 +48,7 @@ depends = ["check:lint", "check:rust", "check:ts"]
 description = "Check the ast-grep rules, shell scripts and source file sizes"
 run = [
   "ast-grep test --skip-snapshot-tests",
+  "scripts/test-web-rules.sh",
   "ast-grep scan",
   "shellcheck $(git ls-files '*.sh')",
   "scripts/check-size.sh",
@@ -74,9 +75,10 @@ description = "Check formatting, typed lint, types and TypeScript tests"
 depends = ["install"]
 run = [
   "oxfmt --check '**/*.{ts,mjs,js,json,css,html}'",
-  "oxlint packages crates/carillon-web --deny-warnings --report-unused-disable-directives-severity error",
+  "oxlint packages --deny-warnings --report-unused-disable-directives-severity error",
   "tsc --noEmit",
-  "tsc --noEmit -p crates/carillon-web",
+  "tsc --noEmit -p packages/web",
+  "pnpm --dir packages/web run check",
   "knip --no-progress",
   "vitest run",
 ]
@@ -93,9 +95,22 @@ run = "cargo build --locked --profile wasm --target wasm32-unknown-unknown -p ca
 description = "Run a durable conversation with temporary SQLite and an in-process test runtime"
 run = "cargo run -p carillon-core --example conversation"
 
+[tasks."build:web"]
+description = "Build the web chat's page into packages/web/dist"
+depends = ["install"]
+run = "pnpm --dir packages/web run build"
+
+[tasks."test:browser"]
+description = "Check the built page in a browser against the fake provider"
+depends = ["build:web"]
+run = [
+  "pnpm --dir packages/web run install:browser",
+  "pnpm --dir packages/web run test:browser",
+]
+
 [tasks."test:integration"]
 description = "Test local core, Discord, web, Pi and T3 runtime services together"
-depends = ["install", "build:module"]
+depends = ["install", "build:module", "build:web"]
 run = [
   "cargo build --locked --bin carillon --bin carillon-discord --bin carillon-web",
   "node scripts/test-integration.mjs",

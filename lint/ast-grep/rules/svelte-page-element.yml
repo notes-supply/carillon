@@ -1,0 +1,9 @@
+id: svelte-page-element
+language: html
+severity: error
+message: A listener on the window, the document or the body reaches outside the page's state. It lives in a wrapper module, and a component uses what that exports.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  kind: tag_name
+  regex: "^svelte:(window|document|body)$"

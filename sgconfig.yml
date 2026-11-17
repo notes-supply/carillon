@@ -4,3 +4,9 @@ testConfigs:
   - testDir: lint/ast-grep/tests
 languageGlobs:
   typescript: ["*.mjs", "*.js"]
+  html: ["*.svelte"]
+languageInjections:
+  - hostLanguage: html
+    rule:
+      pattern: <script lang="ts">$CONTENT</script>
+    injected: typescript

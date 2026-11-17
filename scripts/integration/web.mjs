@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,7 @@ const installation = join(root, "installation");
 const workspace = join(root, "workspace");
 const manager = join(root, "manager");
 const binary = resolve("target/debug/carillon");
+const site = resolve("packages/web/dist");
 const PASSWORD = "correct horse battery";
 const TAILNET = "chat.example-tailnet.ts.net";
 isolateEnvironment();
@@ -74,37 +75,89 @@ async function api(token, path, options = {}) {
   return { status: response.status, body: text === "" ? null : JSON.parse(text) };
 }
 
-async function send(token, conversation, event, text, { agent, files = [] } = {}) {
+async function send(token, chat, event, text, { agent = "assistant", files = [] } = {}) {
   const form = new FormData();
   form.set("text", text);
   for (const [name, bytes, type] of files) form.append("file", new Blob([bytes], { type }), name);
-  const query = agent === undefined ? "" : `?agent=${agent}`;
-  const path = `/api/conversations/${conversation}/messages/${event}${query}`;
+  const path = `/api/conversations/${agent}/${chat}/messages/${event}`;
   return await api(token, path, { method: "PUT", body: form });
 }
 
-async function turns(token, conversation) {
-  const read = await api(token, `/api/conversations/${conversation}/turns`);
-  assert.equal(read.status, 200, JSON.stringify(read.body));
-  return read.body.turns;
+function viewOf(chat) {
+  return { conversations: "50", agent_id: "assistant", audience_id: chat, turns: "50" };
 }
 
-/** The conversation's turns once none of them is at work, as a page's poll finds out. */
-async function settled(token, conversation) {
-  await until(`${conversation} to settle`, async () => {
-    const { body } = await api(token, "/api/conversations");
-    const listed = body.conversations.find((candidate) => candidate.id === conversation);
-    return listed !== undefined && listed.at_work === 0;
+async function open(token, view = { conversations: "50" }) {
+  const closing = new AbortController();
+  const response = await fetch(`${origin}/api/stream?${new URLSearchParams(view).toString()}`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.any([closing.signal, AbortSignal.timeout(30_000)]),
   });
-  return await turns(token, conversation);
+  assert.equal(response.status, 200, `the stream of ${JSON.stringify(view)}`);
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let unread = "";
+  return {
+    async next() {
+      for (;;) {
+        const end = unread.indexOf("\n\n");
+        if (end === -1) {
+          const { done, value } = await reader.read();
+          if (done) return undefined;
+          unread += value;
+          continue;
+        }
+        const event = unread.slice(0, end);
+        unread = unread.slice(end + 2);
+        // A keep-alive is a comment and has no data.
+        if (event.startsWith("data: ")) return JSON.parse(event.slice("data: ".length));
+      }
+    },
+    close() {
+      closing.abort();
+    },
+  };
+}
+
+async function shown(token, view, seen) {
+  const stream = await open(token, view);
+  try {
+    for (;;) {
+      const message = await stream.next();
+      assert.equal(message?.kind, "snapshot", JSON.stringify(message));
+      const found = seen(message.snapshot);
+      if (found) return found;
+    }
+  } finally {
+    stream.close();
+  }
+}
+
+async function snapshot(token, view) {
+  return await shown(token, view, (first) => first);
+}
+
+async function turns(token, chat) {
+  const { open: opened } = await snapshot(token, viewOf(chat));
+  assert.equal(opened.kind, "recorded", JSON.stringify(opened));
+  return opened.turns;
+}
+
+async function settled(token, chat) {
+  return await shown(
+    token,
+    viewOf(chat),
+    ({ open: opened }) =>
+      opened.kind === "recorded" && opened.conversation.at_work === 0 && opened.turns,
+  );
 }
 
 /** A request whose `Host` and `Origin` a browser, not this script, would choose. */
 function raw(path, headers) {
   return new Promise((resolveStatus, reject) => {
     const sent = request(`${origin}${path}`, { headers, agent: false }, (response) => {
-      response.resume();
       resolveStatus(response.statusCode);
+      response.destroy();
     });
     sent.on("error", reject).end();
   });
@@ -146,7 +199,7 @@ start() {
         --config '${config}' --provider runtime-pi --token-file '${tokenFile("runtime-pi")}' \\
         --deterministic --state-dir '${join(installation, "pi")}' >>'${logs}/runtime-pi.log' 2>&1 & ;;
       web) '${resolve("target/debug/carillon-web")}' serve --config '${config}' --provider web \\
-        --token-file '${tokenFile("web")}' --site '${resolve("crates/carillon-web/site")}' \\
+        --token-file '${tokenFile("web")}' --site '${site}' \\
         >>'${logs}/web.log' 2>&1 & ;;
     esac
     echo "$!" >"$pids/$name"
@@ -206,23 +259,37 @@ async function signIn(password = PASSWORD) {
 async function testGate(token) {
   const page = await fetch(origin);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /<script type="module" src="app\.js">/u);
+  assert.match(await page.text(), /<script type="module" crossorigin src="\.\/index-[\w-]+\.js">/u);
   const policy = page.headers.get("content-security-policy");
   assert.match(policy, /default-src 'none'/u);
   assert.match(policy, /font-src 'self'/u);
-  const modules = ["app.js", "api.js", "model.js", "view.js"];
-  const rest = ["style.css", "icon.svg", "literata.woff2", "literata-italic.woff2"];
-  for (const file of [...modules, ...rest]) {
+  const files = (await readdir(site)).filter((file) => !file.endsWith(".txt"));
+  assert.ok(files.includes("style.css") && files.includes("literata.woff2"));
+  for (const file of files) {
     assert.equal((await fetch(`${origin}/${file}`)).status, 200, `the page's ${file}`);
   }
   assert.equal(await raw("/", { host: "rebound.example" }), 421);
+  const stream = "/api/stream?conversations=50";
   const named = { host: TAILNET, origin: `https://${TAILNET}`, authorization: `Bearer ${token}` };
-  assert.equal(await raw("/api/session", named), 200);
-  assert.equal(await raw("/api/session", { origin: "http://evil.example" }), 403);
-  assert.equal((await api("wrong", "/api/session")).status, 401);
-  const session = await api(token, "/api/session");
-  assert.deepEqual(session.body.agents, [{ id: "assistant", name: "Carillon" }]);
-  assert.equal(session.body.custom_site, false);
+  assert.equal(await raw(stream, named), 200);
+  assert.equal(await raw(stream, { origin: "http://evil.example" }), 403);
+  assert.equal((await api("wrong", stream)).status, 401);
+  const refused = await fetch(`${origin}/api/stream?conversations=0`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(refused.status, 400);
+  assert.match(await refused.text(), /a window holds 1 to 500 items/u);
+  assert.deepEqual(await snapshot(token, { conversations: "50" }), {
+    agents: [{ id: "assistant", name: "Carillon" }],
+    limits: { files: 10, file_bytes: 1024 * 1024 * 1024, message_bytes: 2048 * 1024 * 1024 },
+    custom_site: false,
+    conversations: [],
+    more: false,
+    open: null,
+  });
+  const chat = randomUUID();
+  const unrecorded = { kind: "unrecorded", key: { agent_id: "assistant", audience_id: chat } };
+  assert.deepEqual((await snapshot(token, viewOf(chat))).open, unrecorded);
 }
 
 /** A message with a file, answered with a file: both read back by their links. */
@@ -233,21 +300,28 @@ async function testFiles(token) {
   await writeFile(join(workspace, "chart.png"), chart);
   const message = `attach ${join(workspace, "chart.png")}`;
   const files = [["notes.txt", "notes", "text/plain"]];
-  const unnamed = await send(token, chat, event, message, { files });
-  assert.equal(unnamed.status, 404, "a conversation started without an agent");
-  const sent = await send(token, chat, event, message, { agent: "assistant", files });
+  const unknown = await send(token, chat, event, message, { agent: "another", files });
+  assert.deepEqual(
+    [unknown.status, unknown.body],
+    [422, { error: "Carillon has no agent another." }],
+  );
+  const sent = await send(token, chat, event, message, { files });
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
   assert.equal(sent.body.duplicate, false);
   const [turn, ...others] = await settled(token, chat);
   assert.deepEqual(others, []);
-  assert.equal(turn.id, sent.body.turn_id);
-  assert.equal(turn.from.text, message);
-  assert.equal(turn.state, "answered");
-  assert.match(turn.html, /^<p>Local provider response 1: attach /u);
-  assert.match(turn.html, /attachment notes\.txt 5 bytes/u);
-  const [note] = turn.from.files;
+  assert.equal(turn.turn_id, sent.body.turn_id);
+  const { source, progress } = turn;
+  assert.deepEqual(
+    [source.kind, source.event_id, source.text, source.command],
+    ["message", event, message, false],
+  );
+  assert.deepEqual([progress.state, progress.ending.kind], ["ended", "answered"]);
+  assert.match(progress.ending.html, /^<p>Local provider response 1: attach /u);
+  assert.match(progress.ending.html, /attachment notes\.txt 5 bytes/u);
+  const [note] = source.files;
   assert.deepEqual([note.name, note.size, note.type], ["notes.txt", 5, "application/octet-stream"]);
-  const [answered] = turn.files;
+  const [answered] = progress.ending.files;
   assert.deepEqual([answered.name, answered.size, answered.type], ["chart.png", 15, "image/png"]);
   // A link carries its own authority, as an `<img>` needs.
   const picture = await fetch(`${origin}${answered.url}`);
@@ -258,13 +332,14 @@ async function testFiles(token) {
   assert.match(download.headers.get("content-disposition"), /^attachment;/u);
   assert.equal(await download.text(), "notes");
 
-  const again = await send(token, chat, event, message, { agent: "assistant", files });
-  assert.deepEqual(again.body, { turn_id: turn.id, duplicate: true });
+  const again = await send(token, chat, event, message, { files });
+  assert.deepEqual(again.body, { turn_id: turn.turn_id, duplicate: true });
   assert.equal((await turns(token, chat)).length, 1);
-  const other = await send(token, chat, `m-${randomUUID()}`, "hello", { agent: "another" });
-  assert.equal(other.status, 409, "a conversation changed its agent");
-  const [listed] = (await api(token, "/api/conversations")).body.conversations;
-  assert.deepEqual([listed.id, listed.agent_id, listed.title], [chat, "assistant", message]);
+  const { conversations } = await snapshot(token, { conversations: "50" });
+  assert.deepEqual(
+    conversations.map((listed) => [listed.key, listed.title, listed.at_work]),
+    [[{ agent_id: "assistant", audience_id: chat }, message, 0]],
+  );
   return { chat, link: answered.url };
 }
 
@@ -273,40 +348,44 @@ async function testControls(token) {
   const chat = randomUUID();
   const marker = join(workspace, "release");
   const [held, waiting] = [`m-${randomUUID()}`, `m-${randomUUID()}`];
-  const first = await send(token, chat, held, `hold ${marker}`, { agent: "assistant" });
-  const live = async (...ids) => (await api(token, `/api/turns?ids=${ids.join(",")}`)).body.turns;
-  await until("the first turn to run", async () => {
-    const [turn] = await live(first.body.turn_id);
-    return turn?.state === "running";
-  });
+  const first = await send(token, chat, held, `hold ${marker}`);
+  const progressOf = ({ open: opened }, turnId) =>
+    opened.kind === "recorded" && opened.turns.find((turn) => turn.turn_id === turnId)?.progress;
+  await shown(
+    token,
+    viewOf(chat),
+    (seen) => progressOf(seen, first.body.turn_id)?.state === "running",
+  );
   const second = await send(token, chat, waiting, "also this");
   assert.equal(second.status, 200, JSON.stringify(second.body));
-  const offered = await until("the waiting turn to offer controls", async () => {
-    const turn = (await live(first.body.turn_id, second.body.turn_id)).find(
-      (candidate) => candidate.id === second.body.turn_id,
-    );
-    return turn?.state === "queued" && turn.activity?.controls;
+  const offered = await shown(token, viewOf(chat), (seen) => {
+    const progress = progressOf(seen, second.body.turn_id);
+    return progress?.state === "running" && progress.controls.length > 0 && progress;
   });
-  assert.deepEqual(offered, ["interrupt", "stop"]);
+  assert.deepEqual(offered.controls, ["interrupt", "stop"]);
+  assert.equal(offered.activity.phase, "queued");
+  assert.equal("controls" in offered.activity, false, "an activity listed controls");
   const stop = { method: "POST", headers: { "content-type": "application/json" } };
   const control = (event) =>
     api(token, `/api/messages/${event}/control`, { ...stop, body: '{"action":"stop"}' });
   assert.equal((await control(waiting)).status, 204);
-  await until(
-    "the stopped turn to end",
-    async () => (await turns(token, chat))[1]?.state === "stopped",
+  const stopping = await shown(
+    token,
+    viewOf(chat),
+    (seen) => progressOf(seen, second.body.turn_id)?.ending?.kind === "stopped" && seen,
   );
-  assert.equal((await turns(token, chat))[0].state, "running");
+  assert.equal(progressOf(stopping, first.body.turn_id).state, "running");
   await writeFile(marker, "");
   const [answered, stopped] = await settled(token, chat);
-  assert.equal(answered.state, "answered");
-  assert.equal(stopped.state, "stopped");
-  assert.equal((await live(first.body.turn_id))[0].state, "ended");
+  assert.equal(answered.progress.ending.kind, "answered");
+  assert.equal(stopped.progress.ending.kind, "stopped");
   const late = await control(waiting);
   assert.ok(late.status >= 400 && typeof late.body.error === "string", "a spent control was taken");
-  const commands = await api(token, `/api/conversations/${chat}/commands`);
+  const commands = await api(token, `/api/conversations/assistant/${chat}/commands`);
   assert.equal(commands.status, 200, JSON.stringify(commands.body));
   assert.ok(Array.isArray(commands.body.commands));
+  const elsewhere = await api(token, `/api/conversations/another/${chat}/commands`);
+  assert.equal(elsewhere.status, 422, JSON.stringify(elsewhere.body));
 }
 
 /**
@@ -327,9 +406,11 @@ async function testOpenedTurn(token, chat) {
         body: JSON.stringify(body),
       }),
     );
-  const before = (await api(token, "/api/conversations")).body.conversations.find(
-    (listed) => listed.id === chat,
-  );
+  const listed = async () =>
+    (await snapshot(token, { conversations: "50" })).conversations.find(
+      (candidate) => candidate.key.audience_id === chat,
+    );
+  const before = await listed();
   const opened = await runtime("/v1/runtime/turns", {
     interface_id: "web",
     agent_id: "assistant",
@@ -339,18 +420,21 @@ async function testOpenedTurn(token, chat) {
   });
   assert.equal(opened.status, 200, await opened.clone().text());
   const { turn_id: turnId } = await opened.json();
-  const working = (await api(token, "/api/conversations")).body.conversations[0];
-  assert.deepEqual([working.id, working.at_work], [chat, 1]);
-  assert.ok(working.activity > before.activity, "an opened turn changed nothing a poll compares");
+  const working = await listed();
+  assert.equal(working.at_work, 1);
+  assert.ok(working.activity > before.activity, "an opened turn left its conversation's activity");
   const outcome = await runtime(`/v1/runtime/turns/${turnId}/outcome`, {
     outcome: "answered",
     output: "Good *morning*.",
   });
   assert.ok(outcome.ok, await outcome.text());
   const turn = (await settled(token, chat)).at(-1);
-  assert.deepEqual(turn.from, { kind: "runtime", label: "Scheduled run: morning summary" });
-  assert.equal(turn.state, "answered");
-  assert.equal(turn.html, "<p>Good <em>morning</em>.</p>\n");
+  assert.equal(turn.turn_id, turnId);
+  assert.deepEqual(turn.source, { kind: "opened", label: "Scheduled run: morning summary" });
+  assert.deepEqual(
+    [turn.progress.ending.kind, turn.progress.ending.html],
+    ["answered", "<p>Good <em>morning</em>.</p>\n"],
+  );
 }
 
 try {
@@ -392,22 +476,32 @@ try {
   assert.deepEqual(await turns(token, chat), before);
   const after = await send(token, chat, `m-${randomUUID()}`, "after the restart");
   assert.equal(after.status, 200, JSON.stringify(after.body));
-  assert.equal((await settled(token, chat)).at(-1).state, "answered");
+  assert.equal((await settled(token, chat)).at(-1).progress.ending.kind, "answered");
 
+  const across = await open(token, viewOf(chat));
+  assert.equal((await across.next()).kind, "snapshot");
   services("stop", "core");
-  const away = await api(token, "/api/conversations");
   assert.deepEqual(
-    [away.status, away.body],
-    [503, { error: "Carillon is not answering right now. Try again in a moment." }],
+    [await across.next(), await across.next()],
+    [{ kind: "unavailable" }, undefined],
   );
-  const across = send(token, chat, `m-${randomUUID()}`, "while core was away");
+  const away = await open(token);
+  assert.deepEqual([await away.next(), await away.next()], [{ kind: "unavailable" }, undefined]);
+  const waited = send(token, chat, `m-${randomUUID()}`, "while core was away");
   await new Promise((resolveWait) => setTimeout(resolveWait, 500));
   services("start", "core");
-  assert.equal((await across).status, 200, "a message sent while core was away was lost");
-  assert.equal((await settled(token, chat)).at(-1).from.text, "while core was away");
+  assert.equal((await waited).status, 200, "a message sent while core was away was lost");
+  assert.equal((await settled(token, chat)).at(-1).source.text, "while core was away");
 
+  const signedIn = await open(token);
+  assert.equal((await signedIn.next()).kind, "snapshot");
   choosePassword("a second good password");
-  assert.equal((await api(token, "/api/session")).status, 401);
+  assert.deepEqual(
+    [await signedIn.next(), await signedIn.next()],
+    [{ kind: "signed_out" }, undefined],
+  );
+  const stream = "/api/stream?conversations=50";
+  assert.equal((await api(token, stream)).status, 401);
   assert.equal((await fetch(`${origin}${link}`)).status, 403);
   assert.equal((await guess(PASSWORD)).status, 401, "the old password still signed in");
   const later = await signIn("a second good password");
@@ -415,10 +509,10 @@ try {
   choosePassword(PASSWORD);
   services("start", "web");
   await healthy("web");
-  assert.equal((await api(later, "/api/session")).status, 401);
-  assert.equal((await api(await signIn(), "/api/session")).status, 200);
+  assert.equal((await api(later, stream)).status, 401);
+  assert.equal((await snapshot(await signIn(), { conversations: "50" })).conversations.length, 2);
   process.stdout.write(
-    "web passed: password sign-in, an address the owner named, files both ways, duplicate and agent refusals, controls, an opened turn, provider restart, drained restart, a send across a core stop, a new password with the provider running and stopped\n",
+    "web passed: password sign-in, an address the owner named, a snapshot stream of each view, files both ways, a duplicate and an unknown agent, controls, an opened turn, provider restart, drained restart, streams and a send across a core stop, a new password with a stream open and with the provider stopped\n",
   );
 } catch (error) {
   for (const log of ["core", "runtime-pi", "web"])

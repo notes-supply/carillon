@@ -1,0 +1,5 @@
+id: svelte-markup-comment
+valid:
+  - "<p>{count}</p>"
+invalid:
+  - "<!-- The count. -->\n<p>{count}</p>"

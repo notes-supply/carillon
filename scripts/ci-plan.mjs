@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const LANES = ["rust", "ts", "release", "lint", "workflows"];
+export const LANES = ["rust", "ts", "release", "lint", "workflows", "browser"];
 
 /**
  * The lanes one changed path needs, or undefined when no rule knows it.
@@ -18,6 +18,8 @@ function lanesOf(path) {
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
   if (path === "sgconfig.yml" || path.startsWith("lint/")) return ["lint"];
+  // The rules script checks the page's table of the modules its rules let through.
+  if (path === "scripts/test-web-rules.sh" || path === "packages/web/README.md") return ["lint"];
   if (path === ".oxlintrc.json" || path === "knip.json") return ["ts"];
   // Read only by CodeRabbit's own review.
   if (path === ".coderabbit.yaml") return [];
@@ -40,11 +42,13 @@ function lanesOf(path) {
       ? ["rust", "ts", "release"]
       : ["rust", "release"];
   }
-  if (
-    path.startsWith("packages/") ||
-    /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.json)$/u.test(path)
-  )
-    return ["ts", "release"];
+  // Only the provider's stream test and the page's own read the sample.
+  if (path === "packages/web/src/api/stream.sample.json") return ["rust", "ts"];
+  if (/^packages\/web\/(browser|fake)\//u.test(path)) return ["ts", "browser"];
+  if (path.startsWith("packages/web/")) return ["ts", "release", "browser"];
+  if (path.startsWith("packages/")) return ["ts", "release"];
+  if (/^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.json)$/u.test(path))
+    return ["ts", "release", "browser"];
   // The public installer, which the release lane tests.
   if (path === "install.sh") return ["release"];
   if (path.startsWith("scripts/") || path.startsWith("deploy/")) {

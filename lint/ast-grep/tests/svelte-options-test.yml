@@ -1,0 +1,5 @@
+id: svelte-options
+valid:
+  - "<p>{count}</p>"
+invalid:
+  - "<svelte:options runes={false} />\n\n<p>{count}</p>"

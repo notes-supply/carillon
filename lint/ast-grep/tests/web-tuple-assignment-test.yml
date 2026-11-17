@@ -1,0 +1,8 @@
+id: web-tuple-assignment
+valid:
+  - "let first = 1;\nlet second = 2;"
+  - "const [first, second] = pair;"
+  - "const pair = [first, second];"
+invalid:
+  - "let [first, second] = [1, 2];"
+  - "[first, second] = [second, first];"

@@ -52,9 +52,9 @@ providers() {
   sed -n -e '/^\[\[agents\]\]/q' -e 's/^id = "\(.*\)"$/\1/p' "$INSTALLATION/carillon.toml" | tr '\n' ' '
 }
 chat() { "$SCRIPTS/test-web-chat.sh" "$1" "$TEST_ROOT/headers"; }
-session() {
-  curl --silent --output /dev/null --write-out '%{http_code}' -H "@$TEST_ROOT/headers" \
-    "http://127.0.0.1:$((PORT + 4))/api/session"
+signed_in() {
+  curl --silent --head --output /dev/null --write-out '%{http_code}' -H "@$TEST_ROOT/headers" \
+    "http://127.0.0.1:$((PORT + 4))/api/stream?conversations=1"
 }
 uninstall() {
   "$INSTALLATION/app/bin/carillon-uninstall" >/dev/null
@@ -119,11 +119,11 @@ chat 'hello from the page'
 carillon restart >"$TEST_ROOT/alone-restart.log"
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/alone-restart.log" >/dev/null
 grep -Fx "  web: ready ($VERSION)" "$TEST_ROOT/alone-restart.log" >/dev/null
-[ "$(session)" = 200 ] || fail 'a restart signed the browser out'
+[ "$(signed_in)" = 200 ] || fail 'a restart signed the browser out'
 chat 'after the restart'
 printf 'another good password\n' | carillon web password |
   grep -F "Any browser signed in before is signed out." >/dev/null
-[ "$(session)" = 401 ] || fail 'a browser signed in with the old password was still let in'
+[ "$(signed_in)" = 401 ] || fail 'a browser signed in with the old password was still let in'
 carillon logs web | grep -F 'web interface provider ready' >/dev/null
 carillon stop >/dev/null
 uninstall
@@ -175,7 +175,7 @@ carillon setup --interface web </dev/null >"$TEST_ROOT/again.log" 2>&1
 grep -Fx 'Carillon already serves web, so it was not restarted.' "$TEST_ROOT/again.log" >/dev/null
 cmp "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
 [ ! -e "$TRACE" ] || fail 'setting up a served interface again reached the service manager'
-[ "$(session)" = 200 ]
+[ "$(signed_in)" = 200 ]
 # Disabled by its owner, it is listed by core and not served.
 carillon provider web disable >/dev/null
 carillon restart >/dev/null

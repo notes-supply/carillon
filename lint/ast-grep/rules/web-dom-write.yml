@@ -1,0 +1,88 @@
+id: web-dom-write
+language: typescript
+severity: error
+message: The framework draws the page. Building or changing elements by hand is a second renderer.
+note: Describe the element in a component. A module that must touch an element after it is drawn is one of the wrapper modules this rule ignores. An `append` of a name and a value builds a `FormData` or a `URLSearchParams`, not an element, so it passes.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/transcript/follow-end.svelte.ts
+utils:
+  assigned:
+    any:
+      - kind: assignment_expression
+      - kind: augmented_assignment_expression
+  called-method:
+    kind: call_expression
+    has:
+      field: function
+      kind: member_expression
+      has:
+        field: property
+        regex: ^(insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|appendChild|removeChild|replaceChild|replaceChildren|insertBefore|replaceWith|before|after|prepend|setAttribute|setAttributeNS|removeAttribute|removeAttributeNS|toggleAttribute|setProperty|removeProperty|querySelector|querySelectorAll)$
+  style-or-dataset:
+    kind: member_expression
+    has:
+      field: property
+      regex: ^(style|dataset)$
+rule:
+  any:
+    - matches: assigned
+      has:
+        field: left
+        kind: member_expression
+        has:
+          field: property
+          regex: ^(innerHTML|outerHTML|textContent|innerText|className|hidden)$
+    - matches: assigned
+      has:
+        field: left
+        any:
+          - kind: member_expression
+          - kind: subscript_expression
+        has:
+          field: object
+          matches: style-or-dataset
+    - pattern: delete $ELEMENT.dataset.$KEY
+    - matches: called-method
+    - kind: call_expression
+      has:
+        field: function
+        kind: member_expression
+        has:
+          field: object
+          kind: member_expression
+          has:
+            field: property
+            regex: ^classList$
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            kind: member_expression
+            has:
+              field: property
+              regex: ^remove$
+        - has:
+            field: arguments
+            regex: ^\(\s*\)$
+    - kind: call_expression
+      has:
+        field: function
+        kind: member_expression
+        has:
+          field: property
+          regex: ^append$
+      not:
+        has:
+          field: arguments
+          all:
+            - has: { kind: string, nthChild: 1 }
+            - has: { nthChild: 2 }
+    - pattern: Object.assign($$$ARGS)
+      has:
+        field: arguments
+        has:
+          nthChild: 1
+          matches: style-or-dataset
+    - pattern: document.$METHOD($$$ARGS)

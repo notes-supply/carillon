@@ -2,7 +2,10 @@
 //! core's interface routes, for the tests of every module.
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
+    convert::Infallible,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -10,7 +13,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
+    body::{Body, BodyDataStream, Bytes, to_bytes},
     extract::{Path, Query, State},
     http::{
         Method, Request, StatusCode,
@@ -18,28 +21,36 @@ use axum::{
         request::Builder,
         response::Parts,
     },
-    response::{IntoResponse as _, Response},
+    response::{
+        IntoResponse as _, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use carillon_installation::config::{LoadedConfig, attachment_staging, hash_token};
 use carillon_interface::{CoreClient, Staging};
 use carillon_protocol::{
-    conversations::{ConversationPage, ConversationSummary, Transcript},
+    conversations::TurnSource,
     model::{
-        CommandCatalog, EventReceipt, ExternalEvent, Health, JOB_READ_LIMIT, Job, JobPage,
+        CommandCatalog, EventReceipt, ExternalEvent, Health, INTENT_COMMAND, NATIVE_INTENT,
         RuntimeCommand, TurnState,
+    },
+    observation::{
+        Conversation, ConversationKey, KEEP_ALIVE, ObservedTurn, Opened, Progress, SNAPSHOT_EVENT,
+        Snapshot, View,
     },
     turns::TurnControl,
 };
+use futures_util::{StreamExt as _, stream};
 use serde_json::{Value, json};
+use sse_core::{SseDecoder, SseEvent};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+use tokio::{net::TcpListener, sync::Notify, sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 use crate::{
     browser::{self, Address, Browser},
-    send::Sends,
     serve::{Web, router},
     site::Site,
 };
@@ -53,12 +64,13 @@ pub(crate) const TAILNET: &str = "https://chat.example-tailnet.ts.net";
 /// What the fake of core holds and what it was asked.
 #[derive(Default)]
 pub(crate) struct Core {
-    pub(crate) conversations: Vec<ConversationSummary>,
-    /// By `agent/audience`.
-    pub(crate) transcripts: HashMap<String, Transcript>,
+    /// The interface's conversations, in no order.
+    pub(crate) conversations: Vec<Conversation>,
+    /// Each conversation's turns, oldest first.
+    pub(crate) turns: HashMap<ConversationKey, Vec<ObservedTurn>>,
     /// Every event admitted, once for each event ID, with the bytes of each
     /// file it staged as core would read them then. A turn is named for its
-    /// place here.
+    /// place here. Its files are kept here and not listed with its turn.
     pub(crate) events: Vec<(ExternalEvent, Vec<Vec<u8>>)>,
     /// What the next submissions, controls and command reads are refused
     /// with.
@@ -66,7 +78,8 @@ pub(crate) struct Core {
     /// How many requests yet, of any kind, core answers as it does while
     /// it shuts down.
     pub(crate) away_for_requests: usize,
-    pub(crate) jobs: Vec<Job>,
+    /// Core is stopping: it ends every observation.
+    pub(crate) stopping: bool,
     pub(crate) controls: Vec<(String, TurnControl)>,
     /// Each request's path and query.
     pub(crate) asked: Vec<String>,
@@ -76,10 +89,45 @@ pub(crate) struct Core {
     staging: PathBuf,
 }
 
-type Fake = Arc<Mutex<Core>>;
+/// The fake of core, and the signal it gives whenever what it holds may
+/// have changed, as core's storage gives one with every commit.
+struct Fake {
+    core: Mutex<Core>,
+    changes: watch::Sender<()>,
+}
 
-fn locked(core: &Fake) -> MutexGuard<'_, Core> {
-    core.lock().unwrap_or_else(PoisonError::into_inner)
+/// The fake of core, held to read or change it. Letting go of it gives the
+/// change signal.
+pub(crate) struct Held<'a> {
+    core: MutexGuard<'a, Core>,
+    changes: &'a watch::Sender<()>,
+}
+
+impl Deref for Held<'_> {
+    type Target = Core;
+
+    fn deref(&self) -> &Core {
+        &self.core
+    }
+}
+
+impl DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.changes.send_replace(());
+    }
+}
+
+fn locked(fake: &Fake) -> Held<'_> {
+    Held {
+        core: fake.core.lock().unwrap_or_else(PoisonError::into_inner),
+        changes: &fake.changes,
+    }
 }
 
 fn refused(core: &Core) -> Option<Response> {
@@ -87,52 +135,79 @@ fn refused(core: &Core) -> Option<Response> {
         .map(|(status, error)| (status, Json(json!({ "error": error }))).into_response())
 }
 
-async fn list(
-    State(core): State<Fake>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Json<ConversationPage> {
-    let core = locked(&core);
-    let before = query.get("before").and_then(|before| before.parse().ok());
-    Json(ConversationPage {
-        conversations: core
-            .conversations
-            .iter()
-            .filter(|listed| {
-                query
-                    .get("audience_id")
-                    .is_none_or(|audience| *audience == listed.audience_id)
-                    && before.is_none_or(|before: i64| listed.activity < before)
-            })
-            .cloned()
-            .collect(),
-        next: None,
-    })
-}
-
-async fn transcript(
-    State(core): State<Fake>,
-    Path((agent, audience)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Json<Transcript> {
-    let found = locked(&core)
-        .transcripts
-        .get(&format!("{agent}/{audience}"))
-        .cloned();
-    let mut found = found.unwrap_or_default();
-    if let Some(before) = query.get("before") {
-        let earlier = found.turns.iter().position(|turn| turn.turn_id == *before);
-        found.turns.truncate(earlier.unwrap_or_default());
-        found.earlier = false;
+/// What `view` shows of what `core` holds, as core composes it.
+fn snapshot(core: &Core, view: &View) -> Snapshot {
+    let mut conversations = core.conversations.clone();
+    conversations.sort_by_key(|listed| Reverse(listed.activity));
+    let limit = usize::from(view.conversations.get());
+    let more = conversations.len() > limit;
+    conversations.truncate(limit);
+    let open = view.open.as_ref().map(|open| {
+        let key = &open.conversation;
+        let Some(conversation) = core.conversations.iter().find(|listed| listed.key == *key) else {
+            return Opened::Unrecorded { key: key.clone() };
+        };
+        let turns = core.turns.get(key).map(Vec::as_slice).unwrap_or_default();
+        let shown = turns.len().min(open.turns.get().into());
+        Opened::Recorded {
+            conversation: conversation.clone(),
+            turns: turns[turns.len() - shown..].to_vec(),
+            earlier: turns.len() > shown,
+        }
+    });
+    Snapshot {
+        conversations,
+        more,
+        open,
     }
-    Json(found)
 }
 
-async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> Response {
-    let hold = locked(&core).hold.clone();
+/// `GET /v1/observe` as core answers it: the view's snapshot at once, then
+/// another after a change that made it differ from the one sent last, and
+/// a keep-alive while there is none. The stream ends when core stops.
+async fn observe(State(fake): State<Arc<Fake>>, Query(view): Query<View>) -> Response {
+    let mut changes = fake.changes.subscribe();
+    changes.mark_unchanged();
+    let composed = |fake: &Fake| serde_json::to_string(&snapshot(&locked(fake).core, &view));
+    let Ok(first) = composed(&fake) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let event =
+        |snapshot: &str| Ok::<_, Infallible>(Event::default().event(SNAPSHOT_EVENT).data(snapshot));
+    let later = stream::unfold(
+        (fake, view, changes, first.clone()),
+        move |(fake, view, mut changes, sent)| async move {
+            loop {
+                changes.changed().await.ok()?;
+                let core = fake.core.lock().unwrap_or_else(PoisonError::into_inner);
+                if core.stopping {
+                    return None;
+                }
+                let next = serde_json::to_string(&snapshot(&core, &view)).ok()?;
+                drop(core);
+                if next != sent {
+                    let sending = Ok(Event::default().event(SNAPSHOT_EVENT).data(&next));
+                    return Some((sending, (fake, view, changes, next)));
+                }
+            }
+        },
+    );
+    Sse::new(stream::once(async move { event(&first) }).chain(later))
+        .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+        .into_response()
+}
+
+async fn submit(State(fake): State<Arc<Fake>>, Json(event): Json<ExternalEvent>) -> Response {
+    let hold = fake
+        .core
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .hold
+        .clone();
     if let Some(hold) = hold {
         hold.notified().await;
     }
-    let mut core = locked(&core);
+    let mut core = locked(&fake);
     if let Some(refused) = refused(&core) {
         return refused;
     }
@@ -164,53 +239,61 @@ async fn submit(State(core): State<Fake>, Json(event): Json<ExternalEvent>) -> R
             return (StatusCode::BAD_REQUEST, Json(refused)).into_response();
         }
     };
-    if !core
+    let Ok(key) = ConversationKey::new(event.agent_id.clone(), event.audience_id.clone()) else {
+        let refused = json!({ "error": "a conversation is named by its agent and its audience" });
+        return (StatusCode::BAD_REQUEST, Json(refused)).into_response();
+    };
+    let latest = core.conversations.iter().map(|listed| listed.activity);
+    let activity = latest.max().unwrap_or_default() + 1;
+    if let Some(recorded) = core
         .conversations
-        .iter()
-        .any(|listed| listed.agent_id == event.agent_id && listed.audience_id == event.audience_id)
+        .iter_mut()
+        .find(|listed| listed.key == key)
     {
-        let started = conversation(&event.agent_id, &event.audience_id, 1);
-        core.conversations.push(started);
+        recorded.activity = activity;
+        recorded.at_work += 1;
+    } else {
+        core.conversations.push(Conversation {
+            key: key.clone(),
+            channel_id: event.channel_id.clone(),
+            title: event.content.clone(),
+            started_at: 100 + activity,
+            active_at: 100 + activity,
+            activity,
+            at_work: 1,
+        });
     }
+    core.turns.entry(key).or_default().push(ObservedTurn {
+        turn_id: receipt.turn_id.clone(),
+        source: TurnSource::Message {
+            event_id: event.event_id.clone(),
+            text: event.content.clone(),
+            command: event.native[NATIVE_INTENT] == INTENT_COMMAND,
+            files: Vec::new(),
+        },
+        accepted_at: 100 + activity,
+        progress: Progress::Queued,
+    });
     core.events.push((event, staged));
     Json(receipt).into_response()
 }
 
-async fn jobs(State(core): State<Fake>, Query(query): Query<HashMap<String, String>>) -> Response {
-    let tracked: Vec<&str> = query
-        .get("tracked")
-        .map(|tracked| tracked.split(',').collect())
-        .unwrap_or_default();
-    if tracked.len() > JOB_READ_LIMIT {
-        let refused = json!({ "error": "a job read names at most 32 jobs" });
-        return (StatusCode::BAD_REQUEST, Json(refused)).into_response();
-    }
-    let jobs = locked(&core).jobs.clone();
-    Json(JobPage {
-        jobs: jobs
-            .into_iter()
-            .filter(|job| tracked.contains(&job.origin.turn_id.as_str()))
-            .collect(),
-        next: None,
-    })
-    .into_response()
-}
-
 async fn control(
-    State(core): State<Fake>,
+    State(fake): State<Arc<Fake>>,
     Path(event_id): Path<String>,
     Json(control): Json<TurnControl>,
 ) -> Response {
-    let mut core = locked(&core);
+    let mut core = locked(&fake);
     core.controls.push((event_id, control));
     refused(&core).unwrap_or_else(|| StatusCode::NO_CONTENT.into_response())
 }
 
+/// The runtime's one command, named for the agent it was asked about.
 async fn commands(
-    State(core): State<Fake>,
+    State(fake): State<Arc<Fake>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    refused(&locked(&core)).unwrap_or_else(|| {
+    refused(&locked(&fake)).unwrap_or_else(|| {
         Json(CommandCatalog {
             commands: vec![RuntimeCommand {
                 name: format!("skill:{}", query["agent_id"]),
@@ -223,14 +306,14 @@ async fn commands(
 }
 
 /// Core's interface routes, noting each request's path and query.
-fn fake(core: &Fake) -> Router {
+fn fake(fake: &Arc<Fake>) -> Router {
     async fn noted(
-        State(core): State<Fake>,
+        State(fake): State<Arc<Fake>>,
         request: Request<Body>,
         next: axum::middleware::Next,
     ) -> Response {
         {
-            let mut core = locked(&core);
+            let mut core = fake.core.lock().unwrap_or_else(PoisonError::into_inner);
             core.asked.push(request.uri().to_string());
             if core.away_for_requests > 0 {
                 core.away_for_requests -= 1;
@@ -241,24 +324,59 @@ fn fake(core: &Fake) -> Router {
         next.run(request).await
     }
     Router::new()
-        .route("/v1/conversations", get(list))
-        .route("/v1/conversations/{agent}/{audience}", get(transcript))
+        .route("/v1/observe", get(observe))
         .route("/v1/events", post(submit))
         .route("/v1/events/{event_id}/control", post(control))
-        .route("/v1/jobs", get(jobs))
         .route("/v1/commands", get(commands))
         .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(core),
+            Arc::clone(fake),
             noted,
         ))
-        .with_state(Arc::clone(core))
+        .with_state(Arc::clone(fake))
 }
 
 pub(crate) struct Fixture {
     pub(crate) directory: TempDir,
     pub(crate) web: Arc<Web>,
-    core: Fake,
+    core: Arc<Fake>,
     pub(crate) serving: JoinHandle<()>,
+}
+
+/// One page's stream, read message by message. The provider asks core
+/// only while the page waits for one.
+pub(crate) struct Page {
+    body: BodyDataStream,
+    events: SseDecoder,
+    unread: Bytes,
+}
+
+impl Page {
+    /// The next message, or `None` once the stream has ended. Keep-alives
+    /// are passed over.
+    pub(crate) async fn next(&mut self) -> Result<Option<Value>> {
+        loop {
+            match self.events.next(&mut self.unread) {
+                Some(Ok(SseEvent::Message(event))) => {
+                    assert_eq!(event.event, "message", "a message has no name");
+                    return Ok(Some(serde_json::from_str(&event.data)?));
+                }
+                Some(Ok(SseEvent::Retry(_))) => anyhow::bail!("the stream set a retry time"),
+                Some(Err(error)) => return Err(error.into()),
+                None => {}
+            }
+            let Some(chunk) = self.body.next().await else {
+                return Ok(None);
+            };
+            self.unread = chunk?;
+        }
+    }
+
+    /// The snapshot the next message carries.
+    pub(crate) async fn snapshot(&mut self) -> Result<Value> {
+        let mut message = self.next().await?.context("the stream ended")?;
+        assert_eq!(message["kind"], "snapshot", "{message}");
+        Ok(message["snapshot"].take())
+    }
 }
 
 /// An answer, read whole.
@@ -287,14 +405,10 @@ impl Answer {
     }
 }
 
-impl Fixture {
-    pub(crate) async fn new() -> Result<Self> {
-        let directory = tempfile::tempdir()?;
-        let root = directory.path();
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let registry = format!(
-            r#"data_dir = "state"
+/// The registry of the fixture's installation, with core at `address`.
+fn registry(address: std::net::SocketAddr) -> String {
+    format!(
+        r#"data_dir = "state"
 [core]
 listen = "{address}"
 operator_token_hash = "{operator}"
@@ -332,21 +446,34 @@ name = "Second"
 runtime = "runtime-other"
 workspace = "work"
 "#,
-            operator = hash_token(OPERATOR_TOKEN),
-            token = hash_token(INTERFACE_TOKEN),
-        );
+        operator = hash_token(OPERATOR_TOKEN),
+        token = hash_token(INTERFACE_TOKEN),
+    )
+}
+
+impl Fixture {
+    pub(crate) async fn new() -> Result<Self> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let registry = registry(address);
         std::fs::write(root.join("carillon.toml"), registry)?;
         let release = root.join("release");
         std::fs::create_dir_all(&release)?;
         std::fs::write(release.join("index.html"), "<main>release page</main>")?;
-        std::fs::write(release.join("app.js"), "// release script")?;
+        // Named as Vite names the built page's script.
+        std::fs::write(release.join("index-Bq3nR7xK.js"), "// release script")?;
         let registry = LoadedConfig::load(&root.join("carillon.toml"))?;
         let data_dir = registry.value.data_dir.clone();
         let staging = attachment_staging(&data_dir, "web");
-        let core = Arc::new(Mutex::new(Core {
-            staging: staging.clone(),
-            ..Core::default()
-        }));
+        let core = Arc::new(Fake {
+            core: Mutex::new(Core {
+                staging: staging.clone(),
+                ..Core::default()
+            }),
+            changes: watch::Sender::new(()),
+        });
         let fake = fake(&core);
         let serving = tokio::spawn(async move {
             let _ = axum::serve(listener, fake).await;
@@ -372,7 +499,6 @@ workspace = "work"
                 AUTHORITY.to_owned(),
                 vec![Address::parse(TAILNET)?],
             ),
-            sends: Sends::default(),
             site: Site {
                 custom: data_dir.join("components/web/site"),
                 release,
@@ -393,14 +519,16 @@ workspace = "work"
         browser::password_file(&self.web.registry.value.data_dir, "web")
     }
 
-    pub(crate) fn core(&self) -> MutexGuard<'_, Core> {
+    /// The fake of core, to read or change. Letting go of it tells every
+    /// observation that what core holds may have changed.
+    pub(crate) fn core(&self) -> Held<'_> {
         locked(&self.core)
     }
 
-    /// The answer to `request`. No answer of this provider may carry a CORS
-    /// header or a cookie, and each has the headers that keep it on its
-    /// origin.
-    pub(crate) async fn send(&self, request: Request<Body>) -> Result<Answer> {
+    /// The answer to `request`, with its body still to read. No answer of
+    /// this provider may carry a CORS header or a cookie, and each has the
+    /// headers that keep it on its origin.
+    async fn answered(&self, request: Request<Body>) -> Result<(Parts, Body)> {
         let response = router(Arc::clone(&self.web)).oneshot(request).await?;
         let (parts, body) = response.into_parts();
         for name in parts.headers.keys() {
@@ -414,10 +542,36 @@ workspace = "work"
         assert_eq!(parts.headers["cross-origin-resource-policy"], "same-origin");
         assert!(parts.headers.contains_key(CONTENT_SECURITY_POLICY));
         assert!(!parts.headers.contains_key("set-cookie"));
+        Ok((parts, body))
+    }
+
+    /// The answer to `request`, read whole.
+    pub(crate) async fn send(&self, request: Request<Body>) -> Result<Answer> {
+        let (parts, body) = self.answered(request).await?;
         Ok(Answer {
             status: parts.status,
             parts,
             body: to_bytes(body, usize::MAX).await?.to_vec(),
+        })
+    }
+
+    /// The status `request` is answered with, of an answer whose body is
+    /// not read: a stream's.
+    pub(crate) async fn status(&self, request: Request<Body>) -> Result<StatusCode> {
+        Ok(self.answered(request).await?.0.status)
+    }
+
+    /// The page's stream of the view `query` asks for, opened with `token`.
+    pub(crate) async fn stream(&self, query: &str, token: &str) -> Result<Page> {
+        let path = format!("/api/stream?{query}");
+        let request = bearer(Method::GET, &path, token).body(Body::empty())?;
+        let (parts, body) = self.answered(request).await?;
+        assert_eq!(parts.status, StatusCode::OK);
+        assert_eq!(parts.headers[CONTENT_TYPE], "text/event-stream");
+        Ok(Page {
+            body: body.into_data_stream(),
+            events: SseDecoder::new(),
+            unread: Bytes::new(),
         })
     }
 
@@ -439,18 +593,21 @@ workspace = "work"
     }
 }
 
-/// A conversation of `agent` as core lists it.
-pub(crate) fn conversation(agent: &str, audience: &str, activity: i64) -> ConversationSummary {
-    ConversationSummary {
-        agent_id: agent.to_owned(),
-        audience_id: audience.to_owned(),
+/// A conversation of `agent` as core records it.
+pub(crate) fn conversation(agent: &str, audience: &str, activity: i64) -> Result<Conversation> {
+    Ok(Conversation {
+        key: key(agent, audience)?,
         channel_id: audience.to_owned(),
         title: format!("title {activity}"),
         started_at: 100,
         active_at: 100 + activity,
         activity,
         at_work: 0,
-    }
+    })
+}
+
+pub(crate) fn key(agent: &str, audience: &str) -> Result<ConversationKey> {
+    Ok(ConversationKey::new(agent.to_owned(), audience.to_owned())?)
 }
 
 /// A request that names this provider, as a program sends one.

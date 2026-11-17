@@ -11,14 +11,14 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
-use carillon_protocol::model::{StagedAttachments, StagedFile};
+use carillon_protocol::model::{ExternalEvent, StagedAttachments, StagedFile};
 use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
 
 use crate::{
     api::AWAY,
-    fixture::{Answer, Fixture, bearer, conversation},
+    fixture::{Answer, Fixture, bearer},
 };
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
@@ -69,13 +69,13 @@ fn message(token: &str, path: &str, body: Vec<u8>) -> Result<Request<Body>> {
         .body(Body::from(body))?)
 }
 
-fn path(event: &str, query: &str) -> String {
-    format!("/api/conversations/{CHAT}/messages/{event}{query}")
+fn path(agent: &str, event: &str) -> String {
+    format!("/api/conversations/{agent}/{CHAT}/messages/{event}")
 }
 
-async fn send(fixture: &Fixture, token: &str, query: &str, parts: &[Part<'_>]) -> Result<Answer> {
+async fn send(fixture: &Fixture, token: &str, agent: &str, parts: &[Part<'_>]) -> Result<Answer> {
     fixture
-        .send(message(token, &path(EVENT, query), form(parts))?)
+        .send(message(token, &path(agent, EVENT), form(parts))?)
         .await
 }
 
@@ -96,7 +96,7 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
     let sent = send(
         &fixture,
         &token,
-        "?agent=second&command=true",
+        "second",
         &[
             Part::Text("look at these"),
             Part::File("chart \u{56f3}.png", Some("image/png"), picture),
@@ -135,7 +135,7 @@ async fn a_first_message_starts_the_conversation_with_every_identity_made_here()
             "look at these"
         )
     );
-    assert_eq!(event.native, json!({"intent": "command"}));
+    assert_eq!(event.native, json!({}));
     let StagedAttachments {
         batch,
         files: named,
@@ -179,7 +179,7 @@ async fn a_file_keeps_the_name_the_person_s_file_has() -> Result<()> {
     let parts: Vec<_> = std::iter::once(Part::Text("three files"))
         .chain(written.map(|name| Part::File(name, None, b"x")))
         .collect();
-    let sent = send(&fixture, &token, "?agent=second", &parts).await?;
+    let sent = send(&fixture, &token, "second", &parts).await?;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     let core = fixture.core();
     let [(event, _)] = core.events.as_slice() else {
@@ -202,10 +202,10 @@ async fn a_file_keeps_the_name_the_person_s_file_has() -> Result<()> {
 async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let first = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
+    let first = send(&fixture, &token, "assistant", &[Part::Text("hello")]).await?;
     let first = first.json()?;
     assert_eq!(first["duplicate"], false);
-    let again = send(&fixture, &token, "?agent=assistant", &[Part::Text("hello")]).await?;
+    let again = send(&fixture, &token, "assistant", &[Part::Text("hello")]).await?;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(
         again.json()?,
@@ -219,50 +219,114 @@ async fn a_retry_with_the_same_event_id_is_the_first_message_again() -> Result<(
     Ok(())
 }
 
+/// What the provider told core of each message it submitted: whether its
+/// text invokes a command.
+fn intents(fixture: &Fixture) -> Vec<(String, bool)> {
+    let core = fixture.core();
+    let intent = |event: &ExternalEvent| event.native == json!({"intent": "command"});
+    core.events
+        .iter()
+        .map(|(event, _)| (event.content.clone(), intent(event)))
+        .collect()
+}
+
 #[tokio::test]
-async fn a_conversation_keeps_the_agent_of_its_first_message() -> Result<()> {
+async fn a_text_that_begins_with_one_of_the_runtime_s_commands_is_sent_as_a_command() -> Result<()>
+{
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let hello = [Part::Text("hello")];
-    for (query, status, said) in [
-        ("", StatusCode::NOT_FOUND, "names its agent"),
-        (
-            "?agent=nobody",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "no agent nobody",
-        ),
-    ] {
-        let answer = send(&fixture, &token, query, &hello).await?;
-        assert_eq!(answer.status, status, "{query}");
-        assert!(answer.text().contains(said), "{}", answer.text());
+    let texts = [
+        ("/skill:assistant", true),
+        ("/skill:assistant with its arguments", true),
+        ("/skill:assistant\non the next line", true),
+        ("/skill:assistantly", false),
+        ("/skill:second", false),
+        ("/skill", false),
+        (" /skill:assistant", false),
+        ("run /skill:assistant", false),
+        ("/", false),
+    ];
+    for (ordinal, (text, _)) in texts.iter().enumerate() {
+        let event = format!("m-0190f3a8-7b1c-7def-8a2b-{ordinal:012}");
+        let request = message(
+            &token,
+            &path("assistant", &event),
+            form(&[Part::Text(text)]),
+        )?;
+        let sent = fixture.send(request).await?;
+        assert_eq!(sent.status, StatusCode::OK, "{text}: {}", sent.text());
     }
-    fixture
-        .core()
-        .conversations
-        .push(conversation("second", CHAT, 1));
-    let other = send(&fixture, &token, "?agent=assistant", &hello).await?;
-    assert_eq!(other.status, StatusCode::CONFLICT);
-    assert!(other.text().contains("is with second"), "{}", other.text());
-    assert!(
-        fixture.core().events.is_empty(),
-        "a refused message reached core"
-    );
+    let expected: Vec<_> = texts
+        .iter()
+        .map(|(text, command)| ((*text).to_owned(), *command))
+        .collect();
+    assert_eq!(intents(&fixture), expected);
 
-    for (event, query) in [
-        (EVENT, ""),
-        ("m-0190f3a8-7b1c-7def-8a2b-bbbbbbbbbbbb", "?agent=second"),
-    ] {
-        let request = message(&token, &path(event, query), form(&hello))?;
-        let answer = fixture.send(request).await?;
-        assert_eq!(answer.status, StatusCode::OK, "{query}");
-    }
-    let core = fixture.core();
-    assert!(
-        core.events
-            .iter()
-            .all(|(event, _)| event.agent_id == "second")
+    let view = format!("conversations=1&agent_id=assistant&audience_id={CHAT}&turns=50");
+    let snapshot = fixture.stream(&view, &token).await?.snapshot().await?;
+    let shown: Vec<_> = snapshot["open"]["turns"]
+        .as_array()
+        .context("no turns")?
+        .iter()
+        .map(|turn| turn["source"]["command"].as_bool())
+        .collect();
+    let decided: Vec<_> = texts.iter().map(|(_, command)| Some(*command)).collect();
+    assert_eq!(shown, decided);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_text_that_begins_with_no_slash_asks_no_runtime_for_its_commands() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let sent = send(&fixture, &token, "assistant", &[Part::Text("hello")]).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(intents(&fixture), [("hello".to_owned(), false)]);
+    assert_eq!(fixture.core().asked, ["/v1/events"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_runtime_that_cannot_say_its_commands_leaves_the_text_a_message_and_is_asked_once()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    fixture.core().away_for_requests = 1;
+    let text = "/skill:assistant now";
+    let sent = send(&fixture, &token, "assistant", &[Part::Text(text)]).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(intents(&fixture), [(text.to_owned(), false)]);
+    let commands = format!("/v1/commands?agent_id=assistant&channel_id={CHAT}&audience_id={CHAT}");
+    assert_eq!(fixture.core().asked, [commands.as_str(), "/v1/events"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_message_for_an_agent_the_installation_lacks_is_read_whole_and_then_refused() -> Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let rest = vec![b'r'; 64 * 1024];
+    let body = form(&[Part::Text("hello"), Part::File("rest.bin", None, &rest)]);
+    let (mut browser, provider) = tokio::io::duplex(1024);
+    let upload = tokio::spawn(async move { browser.write_all(&body).await });
+    let request = bearer(Method::PUT, &path("nobody", EVENT), &token)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from_stream(ReaderStream::new(provider)))?;
+    let answer = fixture.send(request).await?;
+    upload
+        .await?
+        .context("answered while the browser was uploading")?;
+    assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        answer.json()?,
+        json!({"error": "Carillon has no agent nobody."})
     );
-    assert_eq!(core.events.len(), 2);
+    assert_eq!(staged(&fixture)?, 0);
+    assert!(fixture.core().asked.is_empty(), "core was asked");
     Ok(())
 }
 
@@ -280,7 +344,7 @@ async fn a_message_is_named_only_as_the_page_mints_it() -> Result<()> {
     ] {
         let body = form(&[Part::Text("hello")]);
         let answer = fixture
-            .send(message(&token, &path(event, "?agent=assistant"), body)?)
+            .send(message(&token, &path("assistant", event), body)?)
             .await?;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{event}");
     }
@@ -294,7 +358,7 @@ async fn a_message_that_cannot_be_taken_is_answered_in_words_and_leaves_nothing_
 -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let query = "?agent=assistant";
+    let agent = "assistant";
     let big = vec![b'a'; MIB + 1];
     let most = vec![b'b'; MIB - 1];
     for (parts, status, said) in [
@@ -333,7 +397,7 @@ async fn a_message_that_cannot_be_taken_is_answered_in_words_and_leaves_nothing_
         ),
         (vec![], StatusCode::BAD_REQUEST, "needs text or a file"),
     ] {
-        let answer = send(&fixture, &token, query, &parts).await?;
+        let answer = send(&fixture, &token, agent, &parts).await?;
         assert_eq!(answer.status, status, "{said}: {}", answer.text());
         let error = answer.json()?["error"]
             .as_str()
@@ -353,7 +417,7 @@ async fn a_message_that_cannot_be_taken_is_answered_in_words_and_leaves_nothing_
 async fn a_malformed_message_and_a_refusal_of_core_are_answered_in_words_too() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let query = "?agent=assistant";
+    let agent = "assistant";
     let whole = form(&[
         Part::File("a.txt", None, b"some bytes"),
         Part::Text("hello"),
@@ -365,19 +429,19 @@ async fn a_malformed_message_and_a_refusal_of_core_are_answered_in_words_too() -
     let unknown = String::from_utf8(unknown)?.replace("name=\"text\"", "name=\"native\"");
     for (request, said) in [
         (
-            message(&token, &path(EVENT, query), cut)?,
+            message(&token, &path(agent, EVENT), cut)?,
             "did not arrive whole",
         ),
         (
-            message(&token, &path(EVENT, query), b"not a form at all".to_vec())?,
+            message(&token, &path(agent, EVENT), b"not a form at all".to_vec())?,
             "did not arrive whole",
         ),
         (
-            message(&token, &path(EVENT, query), unknown.into_bytes())?,
+            message(&token, &path(agent, EVENT), unknown.into_bytes())?,
             "parts are `text` and `file`",
         ),
         (
-            bearer(Method::PUT, &path(EVENT, query), &token)
+            bearer(Method::PUT, &path(agent, EVENT), &token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from("{\"text\":\"hello\"}"))?,
             "multipart form data",
@@ -401,14 +465,14 @@ async fn a_malformed_message_and_a_refusal_of_core_are_answered_in_words_too() -
         StatusCode::INSUFFICIENT_STORAGE,
         "attachment storage is full",
     ));
-    let full = send(&fixture, &token, query, &[Part::File("a.txt", None, b"a")]).await?;
+    let full = send(&fixture, &token, agent, &[Part::File("a.txt", None, b"a")]).await?;
     assert_eq!(full.status, StatusCode::INSUFFICIENT_STORAGE);
     assert_eq!(full.json()?, json!({"error": "attachment storage is full"}));
     assert_eq!(staged(&fixture)?, 0);
 
     fixture.core().refusal = None;
     fixture.web.stopping.cancel();
-    let stopping = send(&fixture, &token, query, &[Part::File("a.txt", None, b"a")]).await?;
+    let stopping = send(&fixture, &token, agent, &[Part::File("a.txt", None, b"a")]).await?;
     assert_eq!(stopping.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(stopping.json()?, json!({ "error": AWAY }));
     assert_eq!(staged(&fixture)?, 0);
@@ -421,73 +485,16 @@ async fn a_send_waits_out_a_core_that_is_away_for_a_moment() -> Result<()> {
     let token = fixture.sign_in().await?;
     let hello = [Part::Text("hello")];
     fixture.core().away_for_requests = 2;
-    let sent = send(&fixture, &token, "?agent=assistant", &hello).await?;
+    let sent = send(&fixture, &token, "assistant", &hello).await?;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(fixture.core().events.len(), 1);
 
     fixture.core().away_for_requests = usize::MAX;
     fixture.web.stopping.cancel();
-    let stopping = send(&fixture, &token, "", &hello).await?;
+    let stopping = send(&fixture, &token, "assistant", &hello).await?;
     assert_eq!(stopping.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(stopping.json()?, json!({ "error": AWAY }));
     assert_eq!(fixture.core().events.len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn first_messages_racing_with_different_agents_start_one_conversation() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
-    let token = fixture.sign_in().await?;
-    let hold = Arc::new(Notify::new());
-    fixture.core().hold = Some(Arc::clone(&hold));
-    let begin = |chat: &str, event: &str, agent: &str| {
-        let path = format!("/api/conversations/{chat}/messages/{event}?agent={agent}");
-        let request = message(&token, &path, form(&[Part::Text("hello")]));
-        let fixture = Arc::clone(&fixture);
-        tokio::spawn(async move { fixture.send(request?).await })
-    };
-    let submitted = |fixture: &Fixture| {
-        let core = fixture.core();
-        core.asked
-            .iter()
-            .filter(|asked| *asked == "/v1/events")
-            .count()
-    };
-    let reaches_core = |count: usize| {
-        let fixture = Arc::clone(&fixture);
-        async move {
-            for _ in 0..60 {
-                if submitted(&fixture) >= count {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            false
-        }
-    };
-    let slow = begin(CHAT, EVENT, "second");
-    assert!(reaches_core(1).await);
-    let elsewhere = begin(
-        "0190f3a8-7b1c-7def-8a2b-000000000002",
-        "m-0190f3a8-7b1c-7def-8a2b-bbbbbbbbbbbb",
-        "assistant",
-    );
-    assert!(reaches_core(2).await, "one conversation held up another");
-    let fast = begin(CHAT, "m-0190f3a8-7b1c-7def-8a2b-cccccccccccc", "assistant");
-    assert!(!reaches_core(3).await, "both first messages reached core");
-    fixture.core().hold = None;
-    for _ in 0..3 {
-        hold.notify_one();
-    }
-    let (slow, elsewhere, fast) = (slow.await??, elsewhere.await??, fast.await??);
-    assert_eq!(slow.status, StatusCode::OK, "{}", slow.text());
-    assert_eq!(elsewhere.status, StatusCode::OK, "{}", elsewhere.text());
-    assert_eq!(fast.status, StatusCode::CONFLICT, "{}", fast.text());
-    assert!(fast.text().contains("is with second"), "{}", fast.text());
-    let read = fixture
-        .get(&format!("/api/conversations/{CHAT}/turns"), &token)
-        .await?;
-    assert_eq!(read.status, StatusCode::OK, "{}", read.text());
     Ok(())
 }
 
@@ -503,7 +510,7 @@ async fn a_browser_that_leaves_after_its_upload_does_not_take_the_files_from_cor
     fixture.core().hold = Some(Arc::clone(&hold));
     let request = message(
         &token,
-        &path(EVENT, "?agent=assistant"),
+        &path("assistant", EVENT),
         form(&[Part::File("kept.txt", None, b"still here")]),
     )?;
     let browser = tokio::spawn({
@@ -546,7 +553,7 @@ fn submitted(fixture: &Fixture) -> bool {
 async fn a_message_s_text_is_bounded_by_the_event_core_reads() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let query = "?agent=assistant";
+    let agent = "assistant";
     let over = "a".repeat(2 * MIB + 1);
     // Each quote is two bytes of the event's JSON.
     let over_as_an_event = "\"".repeat(MIB);
@@ -557,7 +564,7 @@ async fn a_message_s_text_is_bounded_by_the_event_core_reads() -> Result<()> {
             "longer than an event once written as one",
         ),
     ] {
-        let answer = send(&fixture, &token, query, &[Part::Text(text)]).await?;
+        let answer = send(&fixture, &token, agent, &[Part::Text(text)]).await?;
         assert!(
             !submitted(&fixture),
             "{why}: core was sent text it does not read"
@@ -576,7 +583,7 @@ async fn a_message_s_text_is_bounded_by_the_event_core_reads() -> Result<()> {
     }
 
     let long = "a".repeat(MIB);
-    let sent = send(&fixture, &token, query, &[Part::Text(&long)]).await?;
+    let sent = send(&fixture, &token, agent, &[Part::Text(&long)]).await?;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(fixture.core().events[0].0.content, long);
     Ok(())
@@ -587,7 +594,7 @@ async fn a_leading_byte_order_mark_is_not_part_of_the_text() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let text = "\u{feff}hello \u{feff}there";
-    let sent = send(&fixture, &token, "?agent=assistant", &[Part::Text(text)]).await?;
+    let sent = send(&fixture, &token, "assistant", &[Part::Text(text)]).await?;
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(fixture.core().events[0].0.content, "hello \u{feff}there");
     Ok(())
@@ -601,7 +608,7 @@ async fn a_message_has_one_text_part() -> Result<()> {
         vec![Part::Text("first"), Part::Text("second")],
         vec![Part::Text("first"), small_file(), Part::Text("")],
     ] {
-        let answer = send(&fixture, &token, "?agent=assistant", &parts).await?;
+        let answer = send(&fixture, &token, "assistant", &parts).await?;
         assert_eq!(
             answer.status,
             StatusCode::BAD_REQUEST,
@@ -639,7 +646,7 @@ async fn a_refused_message_is_read_to_its_end_before_it_is_answered() -> Result<
     ] {
         let (mut browser, provider) = tokio::io::duplex(1024);
         let upload = tokio::spawn(async move { browser.write_all(&body).await });
-        let request = bearer(Method::PUT, &path(EVENT, "?agent=assistant"), &token)
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
             .header(
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={BOUNDARY}"),

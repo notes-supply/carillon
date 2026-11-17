@@ -1,5 +1,5 @@
-//! The page's files, read from disk on each request, so an edit shows on
-//! the next reload with no build and no restart.
+//! The page's built files, read from disk on each request, so a new build
+//! shows on the next reload with no restart.
 //!
 //! A complete copy of the page in the provider's own `site` directory is
 //! served instead of the release's. Either directory is flat, and the page

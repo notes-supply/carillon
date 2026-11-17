@@ -55,5 +55,533 @@
         "maxArgs": 2
       }
     ]
-  }
+  },
+  "overrides": [
+    {
+      "files": ["packages/web/src/**"],
+      "rules": {
+        "eslint/id-length": [
+          "error",
+          {
+            "min": 3,
+            "exceptions": ["id"],
+            "properties": "never"
+          }
+        ],
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
+          },
+          {
+            "name": "window",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "localStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ],
+        "eslint/no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "svelte",
+                "importNames": [
+                  "onMount",
+                  "onDestroy",
+                  "beforeUpdate",
+                  "afterUpdate",
+                  "tick",
+                  "settled",
+                  "untrack",
+                  "flushSync",
+                  "createEventDispatcher"
+                ],
+                "message": "The page makes no lifecycle or scheduling call. What reaches outside its state is an attachment or a subscription in a module the rules in lint/ast-grep/rules/web-outside.yml let through."
+              },
+              {
+                "name": "svelte/store",
+                "message": "State is runes. Stores are the legacy way."
+              },
+              {
+                "name": "svelte/legacy",
+                "message": "The page is written in runes."
+              },
+              {
+                "name": "svelte/internal",
+                "message": "This is the compiler's own interface."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/main*.ts"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "window",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "localStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/api/**"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
+          },
+          {
+            "name": "window",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "localStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/session/token.ts"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
+          },
+          {
+            "name": "window",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/composer/draft.ts"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/session/route.svelte.ts"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "localStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/time/**"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
+          },
+          {
+            "name": "window",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "localStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    }
+  ]
 }

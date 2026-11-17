@@ -1,0 +1,7 @@
+id: svelte-inline-attachment
+valid:
+  - "<ol {@attach followEnd}></ol>"
+  - "<input {@attach focusedWhen(waiting)} />"
+invalid:
+  - "<div {@attach (node) => { node.hidden = true; }}></div>"
+  - "<div use:grow></div>"
