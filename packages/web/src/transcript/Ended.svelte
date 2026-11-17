@@ -12,10 +12,8 @@
 </script>
 
 {#snippet line()}
-  {#if ending.kind === "steered"}
-    {result.label}
-  {:else}
-    {result.label}
+  {result.label}
+  {#if ending.kind !== "steered"}
     <Moment at={progress.finished_at} />{#if result.took !== ""}, {result.took}{/if}
   {/if}
 {/snippet}
