@@ -12,7 +12,9 @@ export function inViewWhen(wanted: boolean): Attachment<HTMLElement> {
   };
 }
 
-const DESKTOP = "(min-width: 46rem)";
+export function onDesktop(): boolean {
+  return matchMedia("(min-width: 46rem)").matches;
+}
 
 let message: HTMLElement | undefined;
 
@@ -24,5 +26,5 @@ export const messageField: Attachment<HTMLElement> = (element) => {
 };
 
 export function focusMessage(): void {
-  if (matchMedia(DESKTOP).matches) message?.focus();
+  if (onDesktop()) message?.focus();
 }

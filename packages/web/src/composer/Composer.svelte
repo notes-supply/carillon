@@ -2,14 +2,13 @@
   import type { Command } from "../api/requests.ts";
   import type { Agent, ConversationKey, Limits } from "../api/stream.ts";
   import { addressOf } from "../session/address.ts";
-  import { focusedWhen, messageField } from "../session/focus.svelte.ts";
+  import { focusedWhen, messageField, onDesktop } from "../session/focus.svelte.ts";
   import { openConversation } from "../session/route.svelte.ts";
   import { session } from "../session/session.svelte.ts";
   import Words from "../session/Words.svelte";
   import Attached from "./Attached.svelte";
   import Commands from "./Commands.svelte";
   import { loadCommands, offered } from "./commands.svelte.ts";
-  import { onDesktop } from "./desktop.ts";
   import { takesDrops } from "./drop.svelte.ts";
   import { overLimit } from "./limits.ts";
   import {
