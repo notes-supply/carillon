@@ -72,7 +72,7 @@ rule:
 id: svelte-options
 language: html
 severity: error
-message: Compiler options are set once, in vite.config.ts. A component does not override them.
+message: Compiler options are set once, in packages/web/svelte.config.js. A component does not override them.
 files:
   - packages/web/src/**/*.svelte
 rule:
