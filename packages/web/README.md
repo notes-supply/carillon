@@ -72,7 +72,6 @@ The modules that may reach outside the page's state are a short list, written in
 ## What the tools do not tell you
 
 - The message field grows by the stylesheet's `field-sizing: content`, which every engine has had since June 2026. An older browser keeps a field of one line that scrolls.
-- A check that fills the browser's storage does so for real. One that makes storage refuse replaces `Storage`'s methods after the sign-in, because `session/token.ts` still reads storage unguarded when the page starts.
 - A snapshot replaces every turn's object, so everything derived from a turn runs again for all of them. That is cheap except for `when()`, which costs about 40 µs a call. `time/Moment.svelte` therefore reads its prop through a `$derived` of the number alone, and reads `clock.today` in place of `clock.now`. Draw every time on the page with `Moment`.
 - The effect in `followView` tracks only what it reads before the first `await`. `follow` and `watch` must read no state there.
 - `hear` in `session/session.svelte.ts` is the one place a snapshot is taken in. It also calls `see` and `settle`, because both remember something the next snapshot no longer says. `readAddress` calls `see` too, so that a conversation opened and left before its snapshot arrived still counts as seen.

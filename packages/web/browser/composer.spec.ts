@@ -330,9 +330,9 @@ test("when the browser refuses storage, what is written stays in the composer an
   page,
   fake,
 }) => {
+  await page.addInitScript(REFUSE_STORAGE);
   await arrive(page, fake, "rail");
   await open(page, "Plan the release.");
-  await page.evaluate(REFUSE_STORAGE);
   await message(page).fill("Written while storage is refused.");
   await open(page, "Chart last week's numbers.");
   await expect(message(page)).toHaveValue("");
