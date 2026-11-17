@@ -17,13 +17,10 @@ export function storeToken(token: string): boolean {
   }
 }
 
-export function dropToken(): boolean {
+export function dropToken(): void {
   try {
     localStorage.removeItem(STORED);
-    return true;
-  } catch {
-    return false;
-  }
+  } catch {}
 }
 
 export function namesToken(key: string | null): boolean {
