@@ -53,11 +53,6 @@ function put(
   return { leaving, answered };
 }
 
-async function* each<Value>(stream: ReadableStream<Value>): AsyncGenerator<Value, void, void> {
-  const reader = stream.getReader();
-  for (let read = await reader.read(); !read.done; read = await reader.read()) yield read.value;
-}
-
 export async function* deliver(
   message: Outgoing,
   credential: Credential,
@@ -67,7 +62,8 @@ export async function* deliver(
   for (let failures = 1; ; failures += 1) {
     yield { kind: "uploading", sent: 0, total: 0 };
     const request = put(path, messageForm(message.text, message.files), credential.token, signal);
-    yield* each(request.leaving);
+    const leaving = request.leaving.getReader();
+    for (let step = await leaving.read(); !step.done; step = await leaving.read()) yield step.value;
     const answer = await request.answered;
     const read = reading(answer.status);
     if (read === "ok") {
