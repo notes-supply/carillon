@@ -268,6 +268,41 @@ test("a newest turn taller than the window shows from its top", async ({ page, f
   await expect(newest.getByText("Paragraph 12 of a long answer")).not.toBeInViewport();
 });
 
+test("a person reading inside a tall newest turn stays there when another turn arrives", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "long");
+  await open(page, "Message 1");
+  const newest = turns(page).filter({ has: page.getByText("Message 30", { exact: true }) });
+  const reading = newest.getByText("Paragraph 6 of a long answer");
+  await reading.hover();
+  await page.mouse.wheel(0, 190);
+  await expect(newest.getByText("Message 30", { exact: true })).not.toBeInViewport();
+  await expect(newest.getByText("Paragraph 12 of a long answer")).not.toBeInViewport();
+  await fake.step("a first turn arrives");
+  await expect(page.getByText("First arrival.")).toBeAttached();
+  await page.evaluate(
+    "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+  );
+  await expect(reading).toBeInViewport();
+  await expect(page.getByText("First arrival.")).not.toBeInViewport();
+});
+
+test("a person who read to the end of a tall newest turn is shown the turn that arrives after it", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "long");
+  await open(page, "Message 1");
+  const newest = turns(page).filter({ has: page.getByText("Message 30", { exact: true }) });
+  await newest.getByText("Paragraph 6 of a long answer").hover();
+  await page.mouse.wheel(0, 2000);
+  await expect(newest.getByText("Paragraph 12 of a long answer")).toBeInViewport();
+  await fake.step("a first turn arrives");
+  await expect(page.getByText("First arrival.")).toBeInViewport();
+});
+
 test("a picture in a person's own message opens in a new tab, and is not downloaded", async ({
   page,
   fake,

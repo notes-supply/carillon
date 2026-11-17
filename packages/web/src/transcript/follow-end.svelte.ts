@@ -25,7 +25,9 @@ export const followEnd: Attachment<HTMLElement> = (transcript) => {
   let following = true;
   let held = oldest(transcript);
   const scrolled = (): void => {
-    following = end(transcript) - transcript.scrollTop < NEAR;
+    const top = transcript.scrollTop;
+    const bottom = transcript.scrollHeight - transcript.clientHeight;
+    following = Math.abs(end(transcript) - top) < NEAR || bottom - top < NEAR;
     held = oldest(transcript);
   };
   const resized = new ResizeObserver(() => {
