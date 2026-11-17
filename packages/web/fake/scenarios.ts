@@ -615,6 +615,20 @@ export const scenarios: Record<string, Scenario> = {
       },
     ],
   },
+  "send-answered-early": {
+    about:
+      "The provider answers a message's receipt before core's snapshot shows its turn, until the next step.",
+    world: (now) => ({ ...planning(now), sending: { kind: "answer_before_snapshot" } }),
+    steps: [
+      {
+        atMs: 6000,
+        label: "core's snapshot shows the message",
+        run: (stage) => {
+          stage.world.sending = { kind: "accept" };
+        },
+      },
+    ],
+  },
   "send-held": {
     about:
       "The provider holds a message, reading none of its upload, until the next step. Until then the page shows it as pending.",

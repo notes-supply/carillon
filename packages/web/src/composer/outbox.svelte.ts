@@ -42,7 +42,7 @@ function clearSent(address: string, message: OnItsWay): void {
     storeDraft(address, since(storedDraft(address), message.text));
 }
 
-export function awaitingReceipt(address: string): OnItsWay | undefined {
+function awaitingReceipt(address: string): OnItsWay | undefined {
   const message = sent.get(address);
   return message?.kind === "on_its_way" && message.stage.kind !== "received" ? message : undefined;
 }
@@ -106,7 +106,7 @@ export async function send(
   const address = addressOf(key);
   const text = draftOf(address);
   const files = attachedTo(address);
-  if (credential === null || awaitingReceipt(address) !== undefined) return;
+  if (credential === null || sent.get(address)?.kind === "on_its_way") return;
   if (text.trim() === "" && files.length === 0) return;
   if (overLimit(files, limits) !== undefined) return;
   const message: OnItsWay = {

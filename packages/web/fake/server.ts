@@ -441,7 +441,7 @@ export async function serve(options: Options): Promise<Fake> {
       return;
     }
     play.sent = true;
-    publish();
+    if (sending.kind !== "answer_before_snapshot") publish();
     schedule();
     json(response, receipt);
   }

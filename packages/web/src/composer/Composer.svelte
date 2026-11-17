@@ -14,7 +14,6 @@
   import {
     attach,
     attachedTo,
-    awaitingReceipt,
     carry,
     detach,
     draftOf,
@@ -43,7 +42,7 @@
   const address = $derived(addressOf(key));
   const sent = $derived(sentTo(address));
   const files = $derived(attachedTo(address));
-  const busy = $derived(awaitingReceipt(address) !== undefined);
+  const busy = $derived(sent?.kind === "on_its_way");
   const text = $derived(draftOf(address));
   const offers = $derived(dismissedAt === address ? [] : offered(address, text));
   const choice = $derived(

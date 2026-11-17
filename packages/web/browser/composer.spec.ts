@@ -36,6 +36,29 @@ test("a sent message shows at once as on its way, then as its turn, once", async
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
+test("a received message keeps Send waiting until its turn is shown, so a second is not sent over it", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "send-answered-early");
+  await open(page, "Plan the release.");
+  const sent = sends(page);
+  await send(page, "Write the release notes.");
+  await expect(turns(page).last()).toContainText("Received.");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await message(page).fill("And keep them short.");
+  await message(page).press("Enter");
+  await expect(message(page)).toHaveValue("And keep them short.");
+  await expect(turns(page).last()).toContainText("Write the release notes.");
+
+  await fake.step("core's snapshot shows the message");
+  await expect(atWork(turns(page).last())).toContainText("Waiting its turn");
+  await expect(turns(page).getByText("Write the release notes.")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(message(page)).toHaveValue("And keep them short.");
+  expect(sent).toHaveLength(1);
+});
+
 test("Enter sends, and Shift+Enter starts a new line", async ({ page, fake }) => {
   await arrive(page, fake, "turn");
   await open(page, "Plan the release.");

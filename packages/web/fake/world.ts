@@ -22,7 +22,8 @@ type Sending =
   | { kind: "accept" }
   | { kind: "refuse"; status: number; error: string }
   | { kind: "lose_receipt" }
-  | { kind: "hold_upload" };
+  | { kind: "hold_upload" }
+  | { kind: "answer_before_snapshot" };
 
 type StoredFile = { name: string; type: FileLink["type"]; bytes: Uint8Array };
 
