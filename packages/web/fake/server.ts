@@ -90,6 +90,13 @@ function plain(response: ServerResponse, status: number, text: string): void {
   response.end(text);
 }
 
+/** As the provider's JSON routes require: JSON under another content type is a 415. */
+function sentJson(request: IncomingMessage): boolean {
+  return (
+    request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() === "application/json"
+  );
+}
+
 function json(response: ServerResponse, value: unknown): void {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
@@ -456,6 +463,10 @@ export async function serve(options: Options): Promise<Fake> {
     eventId: string,
   ): Promise<void> {
     const body = parsedJson((await text(request, 4096)) ?? "");
+    if (!sentJson(request)) {
+      plain(response, 415, "a control is JSON");
+      return;
+    }
     if (!Check(ControlBodySchema, body)) {
       plain(response, 422, "a control is an action: steer, interrupt or stop");
       return;
@@ -478,6 +489,7 @@ export async function serve(options: Options): Promise<Fake> {
       const guess = parsedJson(body ?? "");
       if (request.method !== "POST") response.writeHead(405).end();
       else if (body === undefined) response.writeHead(413).end();
+      else if (!sentJson(request)) plain(response, 415, "a sign-in is JSON");
       else if (!Check(SignInBodySchema, guess)) plain(response, 422, "a sign-in is a password");
       else if (guess.password.trim() !== PASSWORD)
         refuse(response, 401, "That is not the web chat's password.");

@@ -93,7 +93,10 @@ async function ask(
 ): Promise<string> {
   const response = await fetch(origin + path, {
     method,
-    headers: { authorization: bearer(run.token) },
+    headers: {
+      authorization: bearer(run.token),
+      ...(typeof body === "string" ? { "content-type": "application/json" } : {}),
+    },
     ...(body === undefined ? {} : { body }),
   });
   const answer = await response.text();

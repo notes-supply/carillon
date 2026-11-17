@@ -12,7 +12,11 @@ import {
 export type SignIn = { kind: "signed_in"; token: string } | { kind: "refused"; words: string };
 
 export async function requestSignIn(password: string): Promise<SignIn> {
-  const answer = await fetch(ORIGIN + SIGN_IN_PATH, { method: "POST", body: signInBody(password) })
+  const answer = await fetch(ORIGIN + SIGN_IN_PATH, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: signInBody(password),
+  })
     .then(async (response) => ({ status: response.status, body: await response.text() }))
     .catch(() => ({ status: 0, body: "" }));
   if (reading(answer.status) !== "ok")

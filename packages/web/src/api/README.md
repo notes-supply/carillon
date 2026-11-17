@@ -74,7 +74,7 @@ A `FileLink` is `{ name, size, type, url }`. `type` is `image/png`, `image/jpeg`
 | `GET commandsPath(key)`         |                                                                               | 200 `CommandCatalogSchema`, 422, 503               |
 | `GET <FileLink.url>`            |                                                                               | The file's bytes, 403 for a link that is void, 404 |
 
-Every request but the sign-in and a file link carries `Authorization: bearer(token)`.
+Every request but the sign-in and a file link carries `Authorization: bearer(token)`. A JSON body goes with `Content-Type: application/json`, and the provider answers 415 to one without it.
 
 - `mintEventId()` names a message before its first attempt. Every retry sends the same ID, and core answers a repeat with the first receipt and `duplicate: true`.
 - `mintAudienceId()` names a new conversation.
