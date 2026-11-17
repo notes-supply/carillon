@@ -90,6 +90,12 @@ done
 put packages/web/fake/legacy.js <<'FILE'
 export const double = (count) => count * 2;
 FILE
+put packages/web/public/style.css <<'FILE'
+/* The page's ink. */
+:root {
+  --ink: #000;
+}
+FILE
 put packages/web/svelte.config.js <<'FILE'
 export default {
   compilerOptions: { runes: true, css: "external" },
@@ -191,6 +197,7 @@ cat >"$TEST_ROOT/expected" <<'FINDINGS'
 crates/carillon-web/src/markdown/links.rs rust-web-markdown-rewrite
 main.ts web-dom-write
 packages/web/fake/legacy.js web-typescript-only
+packages/web/public/style.css web-no-comments-css
 rail/Reach.svelte web-deferred
 rail/Reach.svelte web-interval
 rail/Reach.svelte web-markup-outside

@@ -11,7 +11,7 @@ The page: the door, the rail, the transcript and the composer, against [the stre
 | `src/<domain>/` | The page, by what each module is about: `api`, `session`, `rail`, `transcript`, `activity`, `composer`, `time`. A module's test sits beside it as `<module>.test.ts`. | The page's lint rules, `svelte-check`, and `vitest` |
 | `fake/` | A provider that serves the contract and plays named scenarios. [Its README](fake/README.md) lists them. | The repository's Node lint and types, and `fake.test.ts` |
 | `browser/` | What a person can see and do, as Playwright checks against the built page served by the fake. | `mise run test:browser` |
-| `public/` | The page's one stylesheet, its typeface and its icon. | The formatter |
+| `public/` | The page's one stylesheet, its typeface and its icon. | The formatter, and the rule that the page has no comments |
 
 A test of one module is beside that module, so the lint that says where the page may use `JSON`, `Date` or a timer says the same of its tests. A browser check is about the built page as a whole and not about one module, and the fake is a Node program the page never loads, so both stay outside `src`, which holds only the page's modules, their tests and the stream's sample message.
 
@@ -83,3 +83,5 @@ A listener, Svelte's `on`, a subscription, an observer, a timer, a media query a
 - A file's item in `transcript/Files.svelte` has no key. The provider signs every link again each UTC day, so a key of the link would take every picture off the page and draw it again at midnight. Without one the picture stays and only its address changes.
 - `followEnd` also holds a person's place when turns are added above it: it remembers where the oldest turn was drawn, and scrolls by as much as that turn was pushed. The browser's own scroll anchoring does not hold it: with the button left out by `overflow-anchor: none`, Chromium still let the turns be pushed down.
 - The transcript is inside `{#key route.address}`, so each conversation gets its own scrolling element and starts at its end.
+- The stylesheet's `--ui` names its faces before falling back to `sans-serif`, and never names `system-ui`, which is a monospace on some Linux desktops.
+- A code block or a table wider than the column scrolls inside itself. A shade at an edge says more lies beyond it: the cover over each shade scrolls away with the block's content, and the shade does not.
