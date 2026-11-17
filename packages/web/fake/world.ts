@@ -36,45 +36,45 @@ export type Recorded = {
 };
 
 export type World = {
-  now: number;
+  unixSeconds: number;
   marker: number;
   turns: number;
-  password: number;
+  passwordVersion: number;
   available: boolean;
-  window: "asked" | "all";
+  window: "kept" | "ignored";
   sending: Sending;
   agents: Agent[];
   limits: Limits;
   custom_site: boolean;
   conversations: Recorded[];
   commands: Command[];
-  events: Map<string, string>;
+  turnByEvent: Map<string, string>;
   files: Map<string, StoredFile>;
   pressed: { event_id: string; action: Control } | undefined;
 };
 
-export function world(now: number): World {
+export function world(unixSeconds: number): World {
   return {
-    now,
+    unixSeconds,
     marker: 0,
     turns: 0,
-    password: 1,
+    passwordVersion: 1,
     available: true,
-    window: "asked",
+    window: "kept",
     sending: { kind: "accept" },
     agents: [{ id: AGENT, name: "Carillon" }],
     limits: { files: 10, file_bytes: 1024 * 1024 * 1024, message_bytes: 2 * 1024 * 1024 * 1024 },
     custom_site: false,
     conversations: [],
     commands: [],
-    events: new Map(),
+    turnByEvent: new Map(),
     files: new Map(),
     pressed: undefined,
   };
 }
 
 export function token(held: World): string {
-  return `fake-token-${String(held.password)}`;
+  return `fake-token-${String(held.passwordVersion)}`;
 }
 
 export function audience(n: number): string {
@@ -112,7 +112,7 @@ export function snapshot(held: World, view: View): ChatSnapshot {
   const latest = held.conversations.toSorted((one, other) => other.activity - one.activity);
   const open = view.open;
   const recorded = open === null ? undefined : find(held, open.key);
-  const shown = held.window === "all" ? Infinity : (open?.turns ?? 0);
+  const shown = held.window === "ignored" ? Infinity : (open?.turns ?? 0);
   return {
     agents: held.agents,
     limits: held.limits,
@@ -136,7 +136,7 @@ export function snapshot(held: World, view: View): ChatSnapshot {
 function touch(held: World, conversation: Recorded): void {
   held.marker += 1;
   conversation.activity = held.marker;
-  conversation.active_at = held.now;
+  conversation.active_at = held.unixSeconds;
 }
 
 function nextTurn(held: World): string {
@@ -152,7 +152,7 @@ export function link(
 ): FileLink {
   const path = `f/${String(held.files.size + 1)}`;
   held.files.set(path, { name, type, bytes });
-  const expires = (Math.floor(held.now / 86_400) + 2) * 86_400;
+  const expires = (Math.floor(held.unixSeconds / 86_400) + 2) * 86_400;
   return {
     name,
     size: bytes.byteLength,
@@ -178,15 +178,15 @@ export function admit(
   text: string,
   files: FileLink[],
 ): { turn_id: string; duplicate: boolean } {
-  const known = held.events.get(eventId);
+  const known = held.turnByEvent.get(eventId);
   if (known !== undefined) return { turn_id: known, duplicate: true };
   let conversation = find(held, wanted);
   if (conversation === undefined) {
     conversation = {
       key: wanted,
       title: titleOf(text),
-      started_at: held.now,
-      active_at: held.now,
+      started_at: held.unixSeconds,
+      active_at: held.unixSeconds,
       activity: 0,
       turns: [],
     };
@@ -195,11 +195,11 @@ export function admit(
   const turn: Turn = {
     turn_id: nextTurn(held),
     source: { kind: "message", event_id: eventId, text, command: invokes(held, text), files },
-    accepted_at: held.now,
+    accepted_at: held.unixSeconds,
     progress: { state: "queued" },
   };
   conversation.turns.push(turn);
-  held.events.set(eventId, turn.turn_id);
+  held.turnByEvent.set(eventId, turn.turn_id);
   touch(held, conversation);
   return { turn_id: turn.turn_id, duplicate: false };
 }
@@ -208,7 +208,7 @@ export function open(held: World, conversation: Recorded, label: string | undefi
   const turn: Turn = {
     turn_id: nextTurn(held),
     source: label === undefined ? { kind: "opened" } : { kind: "opened", label },
-    accepted_at: held.now,
+    accepted_at: held.unixSeconds,
     progress: { state: "queued" },
   };
   conversation.turns.push(turn);
@@ -229,8 +229,8 @@ export function end(
 ): void {
   turn.progress =
     report === undefined
-      ? { state: "ended", finished_at: held.now, ending }
-      : { state: "ended", finished_at: held.now, ending, report };
+      ? { state: "ended", finished_at: held.unixSeconds, ending }
+      : { state: "ended", finished_at: held.unixSeconds, ending, report };
   touch(held, conversation);
 }
 

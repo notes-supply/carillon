@@ -52,7 +52,7 @@ type Play = {
   world: World;
   applied: number;
   clock: Clock;
-  began: number;
+  beganAtMs: number;
   sent: boolean;
   timer: NodeJS.Timeout | undefined;
 };
@@ -168,7 +168,7 @@ export async function serve(options: Options): Promise<Fake> {
       world: scenario.world(now),
       applied: 0,
       clock,
-      began: Date.now(),
+      beganAtMs: Date.now(),
       sent: false,
       timer: undefined,
     };
@@ -216,7 +216,7 @@ export async function serve(options: Options): Promise<Fake> {
       play.world.available = true;
     },
     signOut() {
-      play.world.password += 1;
+      play.world.passwordVersion += 1;
       finish({ kind: "signed_out" });
     },
     endStreams() {
@@ -238,8 +238,10 @@ export async function serve(options: Options): Promise<Fake> {
     const step = play.scenario.steps[play.applied];
     if (step === undefined) return undefined;
     play.applied += 1;
-    play.world.now =
-      play.clock === "manual" ? EPOCH + Math.floor(step.at / 1000) : Math.floor(Date.now() / 1000);
+    play.world.unixSeconds =
+      play.clock === "manual"
+        ? EPOCH + Math.floor(step.atMs / 1000)
+        : Math.floor(Date.now() / 1000);
     step.run(stage);
     publish();
     return step.label;
@@ -255,7 +257,7 @@ export async function serve(options: Options): Promise<Fake> {
         apply();
         schedule();
       },
-      Math.max(play.began + step.at - Date.now(), 0),
+      Math.max(play.beganAtMs + step.atMs - Date.now(), 0),
     );
   }
 

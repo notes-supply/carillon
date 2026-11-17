@@ -27,13 +27,13 @@ export type Stage = {
 };
 
 type Step = {
-  at: number;
+  atMs: number;
   label: string;
   after?: "send";
   run(stage: Stage): void;
 };
 
-export type Scenario = { about: string; world(now: number): World; steps: Step[] };
+export type Scenario = { about: string; world(unixSeconds: number): World; steps: Step[] };
 
 type Pair = { conversation: Recorded; turn: Turn };
 
@@ -43,14 +43,14 @@ const PNG = Buffer.from(
 );
 
 function ago(held: World, seconds: number, seed: () => void): void {
-  const now = held.now;
-  held.now = now - seconds;
+  const now = held.unixSeconds;
+  held.unixSeconds = now - seconds;
   seed();
-  held.now = now;
+  held.unixSeconds = now;
 }
 
 function message(held: World, n: number, text: string, files: FileLink[] = []): Pair {
-  const eventId = `m-${audience(100_000 + held.events.size)}`;
+  const eventId = `m-${audience(100_000 + held.turnByEvent.size)}`;
   admit(held, key(n), eventId, text, files);
   const pair = turnOf(held, eventId);
   if (pair === undefined) throw new Error("a seeded message has a turn");
@@ -120,7 +120,7 @@ function planning(now: number): World {
 
 const settling: Step[] = [
   {
-    at: 1000,
+    atMs: 1000,
     label: "core hands the turn to its runtime",
     after: "send",
     run: ({ world: held }) => {
@@ -130,7 +130,7 @@ const settling: Step[] = [
     },
   },
   {
-    at: 3000,
+    atMs: 3000,
     label: "the model is asked",
     run: ({ world: held }) => {
       const activity: Activity = { ...IDLE, headline: "Reading the release notes." };
@@ -138,13 +138,13 @@ const settling: Step[] = [
     },
   },
   {
-    at: 6000,
+    atMs: 6000,
     label: "a tool call is under way",
     run: ({ world: held }) => {
       const activity: Activity = {
         phase: "tools",
         headline: "Reading the release notes.",
-        running: [{ tool: "read", detail: "docs/RELEASE.md", started_at: held.now }],
+        running: [{ tool: "read", detail: "docs/RELEASE.md", started_at: held.unixSeconds }],
         recent: [],
         tool_calls: 1,
       };
@@ -152,14 +152,14 @@ const settling: Step[] = [
     },
   },
   {
-    at: 10_000,
+    atMs: 10_000,
     label: "one call is done, one failed and one is under way",
     run: ({ world: held }) => {
       const activity: Activity = {
         phase: "tools",
         headline: "Checking the tests before the notes.",
         running: [
-          { tool: "bash", detail: "git log -5", started_at: held.now - 1, estimated: true },
+          { tool: "bash", detail: "git log -5", started_at: held.unixSeconds - 1, estimated: true },
         ],
         recent: [
           { tool: "read", detail: "docs/RELEASE.md", ok: true, duration_ms: 3200 },
@@ -171,7 +171,7 @@ const settling: Step[] = [
     },
   },
   {
-    at: 15_000,
+    atMs: 15_000,
     label: "work is delegated, with notes",
     run: ({ world: held }) => {
       const activity: Activity = {
@@ -192,7 +192,7 @@ const settling: Step[] = [
               label: "Check the changelog",
               state: "running",
               actor: "scout",
-              started_at: held.now - 2,
+              started_at: held.unixSeconds - 2,
             },
             { id: "w-2", kind: "task", label: "Draft the summary", state: "queued" },
           ],
@@ -206,7 +206,7 @@ const settling: Step[] = [
     },
   },
   {
-    at: 22_000,
+    atMs: 22_000,
     label: "the turn ends with an answer and two files",
     run: ({ world: held }) => {
       const { conversation, turn } = working(held);
@@ -268,7 +268,7 @@ function header(now: number): World {
   held.custom_site = true;
   ago(held, 120, () => {
     const scouting = { agent_id: "scout", audience_id: audience(5) };
-    const eventId = `m-${audience(100_000 + held.events.size)}`;
+    const eventId = `m-${audience(100_000 + held.turnByEvent.size)}`;
     admit(held, scouting, eventId, "Scout the changelog.", []);
     const pair = turnOf(held, eventId);
     if (pair === undefined) throw new Error("a seeded message has a turn");
@@ -298,7 +298,7 @@ function pictured(now: number): World {
 }
 
 function renewLinks(held: World): void {
-  const expires = (Math.floor(held.now / 86_400) + 2) * 86_400;
+  const expires = (Math.floor(held.unixSeconds / 86_400) + 2) * 86_400;
   const renewed = (file: FileLink): FileLink => ({
     ...file,
     url: file.url.replace(/exp=\d+/u, `exp=${String(expires)}`),
@@ -313,7 +313,7 @@ function renewLinks(held: World): void {
 
 const railSteps: Step[] = [
   {
-    at: 5000,
+    atMs: 5000,
     label: "the runtime answers a turn of its own in the standup conversation",
     run: ({ world: held }) => {
       const conversation = find(held, key(4));
@@ -327,7 +327,7 @@ const railSteps: Step[] = [
     },
   },
   {
-    at: 9000,
+    atMs: 9000,
     label: "the chart conversation's turn is answered",
     run: ({ world: held }) => {
       const { conversation, turn } = working(held);
@@ -346,7 +346,7 @@ function endings(now: number): World {
     "<p>Carillon restarted before this turn finished. Send the message again.</p>\n";
   ago(held, 900, () => {
     const pair = message(held, 1, "Summarise the meeting.");
-    held.now += 4;
+    held.unixSeconds += 4;
     end(held, pair.conversation, pair.turn, { kind: "interrupted", html: interrupted });
   });
   let steered: Pair | undefined;
@@ -356,7 +356,7 @@ function endings(now: number): World {
   ago(held, 780, () => {
     const pair = message(held, 1, "Also include last week's figures.");
     if (steered !== undefined) end(held, steered.conversation, steered.turn, { kind: "steered" });
-    held.now += 95;
+    held.unixSeconds += 95;
     end(
       held,
       pair.conversation,
@@ -367,21 +367,21 @@ function endings(now: number): World {
   });
   ago(held, 600, () => {
     const pair = message(held, 1, "Run the full benchmark.");
-    held.now += 12;
+    held.unixSeconds += 12;
     end(held, pair.conversation, pair.turn, { kind: "stopped" });
   });
   ago(held, 500, () => {
     const conversation = find(held, key(1));
     if (conversation === undefined) throw new Error("the conversation was seeded");
     const labelled = open(held, conversation, "Scheduled run: morning summary");
-    held.now += 6;
+    held.unixSeconds += 6;
     end(held, conversation, labelled, {
       kind: "answered",
       html: "<p>Nothing new this morning.</p>\n",
       files: [],
     });
     const bare = open(held, conversation, undefined);
-    held.now += 3;
+    held.unixSeconds += 3;
     end(held, conversation, bare, {
       kind: "answered",
       html: "<p>A subagent reported back.</p>\n",
@@ -489,7 +489,7 @@ function large(now: number, window: World["window"]): World {
 }
 
 const ticks: Step[] = Array.from({ length: 240 }, (_, index) => ({
-  at: (index + 1) * 1000,
+  atMs: (index + 1) * 1000,
   label: `tick ${String(index + 1)}`,
   run: ({ world: held }: Stage) => {
     const activity: Activity = {
@@ -560,7 +560,7 @@ export const scenarios: Record<string, Scenario> = {
     world: endings,
     steps: [
       {
-        at: 4000,
+        atMs: 4000,
         label: "the running turn reports its activity",
         run: ({ world: held }) => {
           const conversation = find(held, key(1));
@@ -583,7 +583,7 @@ export const scenarios: Record<string, Scenario> = {
     }),
     steps: [
       {
-        at: 5000,
+        atMs: 5000,
         label: "the provider takes messages again",
         run: ({ world: held }) => {
           held.sending = { kind: "accept" };
@@ -606,7 +606,7 @@ export const scenarios: Record<string, Scenario> = {
     world: (now) => ({ ...planning(now), sending: { kind: "lose_receipt" } }),
     steps: [
       {
-        at: 8000,
+        atMs: 8000,
         label: "core returns",
         run: (stage) => {
           stage.world.sending = { kind: "accept" };
@@ -621,7 +621,7 @@ export const scenarios: Record<string, Scenario> = {
     world: (now) => ({ ...planning(now), sending: { kind: "hold_upload" } }),
     steps: [
       {
-        at: 6000,
+        atMs: 6000,
         label: "the provider reads the upload",
         run: (stage) => {
           stage.world.sending = { kind: "accept" };
@@ -636,7 +636,7 @@ export const scenarios: Record<string, Scenario> = {
     world: (now) => ({ ...planning(now), sending: { kind: "hold_upload" } }),
     steps: [
       {
-        at: 6000,
+        atMs: 6000,
         label: "the provider reads the upload and refuses it",
         run: (stage) => {
           stage.world.sending = {
@@ -654,9 +654,9 @@ export const scenarios: Record<string, Scenario> = {
       "The password changes while the provider holds a message. The provider then reads what it was sent.",
     world: (now) => ({ ...planning(now), sending: { kind: "hold_upload" } }),
     steps: [
-      { at: 2000, label: "the password changes", run: (stage) => stage.signOut() },
+      { atMs: 2000, label: "the password changes", run: (stage) => stage.signOut() },
       {
-        at: 6000,
+        atMs: 6000,
         label: "the provider reads the upload",
         run: (stage) => {
           stage.world.sending = { kind: "accept" };
@@ -670,9 +670,9 @@ export const scenarios: Record<string, Scenario> = {
       "A running answer that offers stop, and a waiting message that offers steer, interrupt and stop. The next step does what was pressed.",
     world: controls,
     steps: [
-      { at: 3000, label: "the runtime acts on the control", run: act },
+      { atMs: 3000, label: "the runtime acts on the control", run: act },
       {
-        at: 9000,
+        atMs: 9000,
         label: "the turn that goes on is answered",
         run: ({ world: held }) => {
           const { conversation, turn } = working(held);
@@ -697,7 +697,7 @@ export const scenarios: Record<string, Scenario> = {
     }),
     steps: [
       {
-        at: 2000,
+        atMs: 2000,
         label: "the command is answered",
         after: "send",
         run: ({ world: held }) => {
@@ -723,9 +723,9 @@ export const scenarios: Record<string, Scenario> = {
       return held;
     },
     steps: [
-      { at: 2000, label: "core goes away", run: (stage) => stage.away() },
+      { atMs: 2000, label: "core goes away", run: (stage) => stage.away() },
       {
-        at: 9000,
+        atMs: 9000,
         label: "core returns, and the turn it held did not finish",
         run: (stage) => {
           const { conversation, turn } = working(stage.world);
@@ -741,9 +741,9 @@ export const scenarios: Record<string, Scenario> = {
     about: "The provider ends the stream without a word, and an answer lands after it.",
     world: planning,
     steps: [
-      { at: 2000, label: "the provider ends the stream", run: (stage) => stage.endStreams() },
+      { atMs: 2000, label: "the provider ends the stream", run: (stage) => stage.endStreams() },
       {
-        at: 4000,
+        atMs: 4000,
         label: "the runtime answers a turn of its own",
         run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
       },
@@ -753,9 +753,9 @@ export const scenarios: Record<string, Scenario> = {
     about: "The provider's stream stays open and says nothing more, and an answer lands after it.",
     world: planning,
     steps: [
-      { at: 2000, label: "the provider's stream goes silent", run: (stage) => stage.mute() },
+      { atMs: 2000, label: "the provider's stream goes silent", run: (stage) => stage.mute() },
       {
-        at: 4000,
+        atMs: 4000,
         label: "the runtime answers a turn of its own",
         run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
       },
@@ -767,7 +767,7 @@ export const scenarios: Record<string, Scenario> = {
     world: pictured,
     steps: [
       {
-        at: 86_400_000,
+        atMs: 86_400_000,
         label: "the day ends, and the provider ends the stream",
         run: (stage) => {
           renewLinks(stage.world);
@@ -779,7 +779,7 @@ export const scenarios: Record<string, Scenario> = {
   "signed-out": {
     about: "The password changes while the page is open.",
     world: planning,
-    steps: [{ at: 2000, label: "the password changes", run: (stage) => stage.signOut() }],
+    steps: [{ atMs: 2000, label: "the password changes", run: (stage) => stage.signOut() }],
   },
   "signed-out-quietly": {
     about:
@@ -787,10 +787,10 @@ export const scenarios: Record<string, Scenario> = {
     world: controls,
     steps: [
       {
-        at: 2000,
+        atMs: 2000,
         label: "the password changes",
         run: ({ world: held }) => {
-          held.password += 1;
+          held.passwordVersion += 1;
         },
       },
     ],
@@ -800,12 +800,12 @@ export const scenarios: Record<string, Scenario> = {
     world: planning,
     steps: [
       {
-        at: 2000,
+        atMs: 2000,
         label: "the provider sends what the page cannot read",
         run: (stage) => stage.say('{"kind":"snapshot","snapshot":{"revision":2}}'),
       },
       {
-        at: 4000,
+        atMs: 4000,
         label: "the runtime answers a turn of its own",
         run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
       },
@@ -827,12 +827,12 @@ export const scenarios: Record<string, Scenario> = {
     world: (now) => many(now, 30, (n) => `<p>Answer ${String(n)}.</p>\n${TALL}\n`),
     steps: [
       {
-        at: 2000,
+        atMs: 2000,
         label: "a first turn arrives",
         run: answers("Scheduled run: first", "<p>First arrival.</p>\n"),
       },
       {
-        at: 4000,
+        atMs: 4000,
         label: "a second turn arrives",
         run: answers("Scheduled run: second", "<p>Second arrival.</p>\n"),
       },
@@ -841,13 +841,13 @@ export const scenarios: Record<string, Scenario> = {
   large: {
     about:
       "One conversation of 500 turns, the newest running. Each of 240 steps changes that one turn.",
-    world: (now) => large(now, "asked"),
+    world: (now) => large(now, "kept"),
     steps: ticks,
   },
   "large-all": {
     about:
       "The large conversation, sent whole whatever window the view asks for: a measuring device, not what a provider does.",
-    world: (now) => large(now, "all"),
+    world: (now) => large(now, "ignored"),
     steps: ticks,
   },
 };
