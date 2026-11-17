@@ -462,7 +462,8 @@ impl Fixture {
         let release = root.join("release");
         std::fs::create_dir_all(&release)?;
         std::fs::write(release.join("index.html"), "<main>release page</main>")?;
-        std::fs::write(release.join("app.js"), "// release script")?;
+        // Named as Vite names the built page's script.
+        std::fs::write(release.join("index-Bq3nR7xK.js"), "// release script")?;
         let registry = LoadedConfig::load(&root.join("carillon.toml"))?;
         let data_dir = registry.value.data_dir.clone();
         let staging = attachment_staging(&data_dir, "web");

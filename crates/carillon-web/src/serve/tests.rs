@@ -42,7 +42,7 @@ const STREAM: &str = "/api/stream?conversations=1";
 /// One route of each class the provider serves.
 const ROUTES: [(Method, &str); 12] = [
     (Method::GET, "/"),
-    (Method::GET, "/app.js"),
+    (Method::GET, "/index-Bq3nR7xK.js"),
     (Method::GET, "/health"),
     (Method::POST, "/api/sign-in"),
     (Method::GET, STREAM),
@@ -529,7 +529,7 @@ async fn health_and_the_page_need_no_credential() -> Result<()> {
     assert!(policy.contains("default-src 'none'") && policy.contains("script-src 'self'"));
     assert!(!policy.contains("unsafe"));
     assert_eq!(index.header("cache-control"), "no-store");
-    let script = page("/app.js").await?;
+    let script = page("/index-Bq3nR7xK.js").await?;
     assert_eq!(
         script.header("content-type"),
         "text/javascript; charset=utf-8"
@@ -549,8 +549,8 @@ async fn health_and_the_page_need_no_credential() -> Result<()> {
         "/../carillon.toml",
         "/%2e%2e/carillon.toml",
         "/.hidden.js",
-        "/a/app.js",
-        "//app.js",
+        "/a/index-Bq3nR7xK.js",
+        "//index-Bq3nR7xK.js",
     ] {
         assert_eq!(
             page(absent).await?.status,
@@ -572,10 +572,10 @@ async fn a_complete_copy_of_the_page_in_the_provider_s_state_is_served_instead()
     let custom = fixture.directory.path().join("state/components/web/site");
     std::fs::create_dir_all(&custom)?;
     // A directory without a page of its own is not a copy.
-    std::fs::write(custom.join("app.js"), "// custom script")?;
+    std::fs::write(custom.join("index-Bq3nR7xK.js"), "// custom script")?;
     let script = || async {
         fixture
-            .send(request(Method::GET, "/app.js").body(Body::empty())?)
+            .send(request(Method::GET, "/index-Bq3nR7xK.js").body(Body::empty())?)
             .await
     };
     let custom_site = || async {
@@ -588,7 +588,7 @@ async fn a_complete_copy_of_the_page_in_the_provider_s_state_is_served_instead()
     assert_eq!(script().await?.body, b"// custom script");
     assert_eq!(custom_site().await?, true);
     // The copy is served whole: a file it lacks does not come from the release.
-    std::fs::remove_file(custom.join("app.js"))?;
+    std::fs::remove_file(custom.join("index-Bq3nR7xK.js"))?;
     assert_eq!(script().await?.status, StatusCode::NOT_FOUND);
     Ok(())
 }
@@ -613,8 +613,11 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     symlink(root.join("release/index.html"), custom.join("index.html"))?;
     for folder in [root.join("release"), custom.clone()] {
         symlink(root.join("secret.token"), folder.join("leak.js"))?;
-        symlink(root.join("release/app.js"), folder.join("linked.js"))?;
-        symlink("app.js", folder.join("beside.js"))?;
+        symlink(
+            root.join("release/index-Bq3nR7xK.js"),
+            folder.join("linked.js"),
+        )?;
+        symlink("index-Bq3nR7xK.js", folder.join("beside.js"))?;
     }
     let refused = [
         "/leak.js",
