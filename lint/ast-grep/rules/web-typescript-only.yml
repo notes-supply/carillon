@@ -1,20 +1,22 @@
 id: web-typescript-only
 language: typescript
 severity: error
-message: The page is TypeScript. A JavaScript file here is unchecked, or types itself in comments.
-note: sgconfig.yml reads .js and .mjs files as TypeScript, so this rule is written for that language.
+message: The page's package is TypeScript. A JavaScript file here is unchecked, or types itself in comments.
+note: sgconfig.yml reads .js and .mjs files as TypeScript, so this rule is written for that language. `svelte.config.js` is let through by name, as the one JavaScript file the package keeps. No tool needs it to be JavaScript, so turning it into `svelte.config.ts` is a change of its own.
 files:
-  - packages/web/src/**/*.js
-  - packages/web/src/**/*.mjs
+  - packages/web/**/*.js
+  - packages/web/**/*.mjs
+ignores:
+  - packages/web/svelte.config.js
 rule:
   kind: program
 ---
 id: web-typescript-only-javascript
 language: javascript
 severity: error
-message: The page is TypeScript. A JavaScript file here is unchecked, or types itself in comments.
+message: The page's package is TypeScript. A JavaScript file here is unchecked, or types itself in comments.
 files:
-  - packages/web/src/**/*.cjs
-  - packages/web/src/**/*.jsx
+  - packages/web/**/*.cjs
+  - packages/web/**/*.jsx
 rule:
   kind: program

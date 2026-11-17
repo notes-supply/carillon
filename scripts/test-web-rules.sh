@@ -21,8 +21,6 @@ cp "$ROOT/sgconfig.yml" "$PAGE/"
 cp "$ROOT/sgconfig.yml" "$REAL/"
 cp -R "$ROOT/lint/ast-grep" "$PAGE/lint/"
 cp -R "$ROOT/packages/web/src" "$REAL/packages/web/"
-SRC=$PAGE/packages/web/src
-CRATE=$PAGE/crates/carillon-web/src
 WRAPPERS='web-outside.yml svelte-effect.yml web-dom-write.yml'
 
 # `file rule` for each finding in the tree $1, with a file of the page named
@@ -34,14 +32,17 @@ findings() {
     LC_ALL=C sort -u
 }
 
+put() {
+  mkdir -p "$(dirname -- "$PAGE/$1")"
+  cat >"$PAGE/$1"
+}
+
 page() {
-  mkdir -p "$(dirname -- "$SRC/$1")"
-  cat >"$SRC/$1"
+  put "packages/web/src/$1"
 }
 
 crate() {
-  mkdir -p "$(dirname -- "$CRATE/$1")"
-  cat >"$CRATE/$1"
+  put "crates/carillon-web/src/$1"
 }
 
 page main.ts <<'FILE'
@@ -86,6 +87,14 @@ for ending in js mjs cjs jsx; do
 export const double = (count) => count * 2;
 FILE
 done
+put packages/web/fake/legacy.js <<'FILE'
+export const double = (count) => count * 2;
+FILE
+put packages/web/svelte.config.js <<'FILE'
+export default {
+  compilerOptions: { runes: true, css: "external" },
+};
+FILE
 
 page widgets/Thing.svelte <<'FILE'
 <script lang="ts">
@@ -181,6 +190,7 @@ FILE
 cat >"$TEST_ROOT/expected" <<'FINDINGS'
 crates/carillon-web/src/markdown/links.rs rust-web-markdown-rewrite
 main.ts web-dom-write
+packages/web/fake/legacy.js web-typescript-only
 rail/Reach.svelte web-deferred
 rail/Reach.svelte web-interval
 rail/Reach.svelte web-markup-outside
