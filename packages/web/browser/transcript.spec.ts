@@ -1,3 +1,4 @@
+import type { Locator } from "@playwright/test";
 import { arrive, atWork, clockAt, expect, open, send, test, turns } from "./fixtures.ts";
 
 test("opening a conversation shows what was said and what was answered", async ({ page, fake }) => {
@@ -217,6 +218,88 @@ test("earlier turns are shown on request, until there are none before them", asy
   await expect(turns(page)).toHaveCount(120);
   await expect(turns(page).first().getByText("Message 1", { exact: true })).toBeVisible();
   await expect(earlier).toBeHidden();
+});
+
+test("hovering a time shows its full date", async ({ page, fake }) => {
+  await arrive(page, fake, "rail");
+  await open(page, "Plan the release.");
+  const said = turns(page).first().getByText("11:40").first();
+  await expect(said).toHaveAttribute("title", "15/11/2026, 11:40:00");
+  await expect(said).toHaveAttribute("datetime", "2026-11-15T11:40:00.000Z");
+  const answered = turns(page).first().getByText("11:40").last();
+  await expect(answered).toHaveAttribute("title", "15/11/2026, 11:40:08");
+});
+
+test("the marks of a turn at work say what each stands for", async ({ page, fake }) => {
+  await arrive(page, fake, "controls");
+  await open(page, "Write the long report.");
+  await expect(
+    atWork(turns(page).first()).getByRole("img", { name: "5 tool calls" }),
+  ).toHaveAttribute(
+    "title",
+    "One mark for each tool call: a dot for a call no longer listed, a bar for one that finished, a short bar for one that failed, a hollow bar for one under way. The ring is the turn itself.",
+  );
+});
+
+test("a turn at work shows at most 48 dots for calls no longer listed, so a hundred snapshots more add no element to the page", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "large");
+  await open(page, "Message 1");
+  const turn = atWork(turns(page).last());
+  const dots = (calls: number): Locator =>
+    turn.getByRole("img", { name: `${String(calls)} tool calls` }).locator("i.past");
+  for (let tick = 1; tick <= 48; tick += 1) await fake.step(`tick ${String(tick)}`);
+  await expect(dots(48)).toHaveCount(48);
+  const elements = await page.locator("*").count();
+
+  for (let tick = 49; tick <= 148; tick += 1) await fake.step(`tick ${String(tick)}`);
+  await expect(dots(148)).toHaveCount(48);
+  expect(await page.locator("*").count()).toBe(elements);
+});
+
+test("a newest turn taller than the window shows from its top", async ({ page, fake }) => {
+  await arrive(page, fake, "long");
+  await open(page, "Message 1");
+  const newest = turns(page).last();
+  await expect(newest.getByText("Message 30", { exact: true })).toBeInViewport();
+  await expect(newest.getByText("Answer 30.")).toBeInViewport();
+  await expect(newest.getByText("Paragraph 12 of a long answer")).not.toBeInViewport();
+});
+
+test("a picture in a person's own message opens in a new tab, and is not downloaded", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "pictures");
+  await open(page, "Chart last week's numbers.");
+  const sketch = turns(page).first().getByRole("link", { name: "sketch.png" });
+  await expect(sketch).toContainText("70 B");
+  await expect(sketch).toHaveAttribute("target", "_blank");
+  await expect(sketch).not.toHaveAttribute("download");
+  await expect(turns(page).first().getByRole("img", { name: "sketch.png" })).toHaveCount(0);
+});
+
+test("earlier turns are added above what a person is reading, which stays where it is", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "earlier");
+  await open(page, "Message 1");
+  await expect(turns(page)).toHaveCount(50);
+  const earlier = page.getByRole("button", { name: "Show earlier turns" });
+  const reading = turns(page).getByText("Message 71", { exact: true });
+  await earlier.scrollIntoViewIfNeeded();
+  await expect(reading).toBeInViewport();
+  const before = await reading.boundingBox();
+
+  await earlier.click();
+  await expect(turns(page)).toHaveCount(100);
+  await expect(turns(page).first()).toContainText("Message 21");
+  await expect(reading).toBeInViewport();
+  // To the nearest pixel: a browser rounds where it scrolls to.
+  await expect.poll(async () => (await reading.boundingBox())?.y).toBeCloseTo(before?.y ?? 0, 0);
 });
 
 test("a picture stays on the page while its link is renewed at the day's end", async ({
