@@ -71,7 +71,7 @@ it("checks the page in a browser when the page or what builds it changes", () =>
     expect(lanes([path])).toEqual(["browser", "lint", "release", "ts"]);
   expect(lanes(["packages/web/browser/door.spec.ts"])).toEqual(["browser", "lint", "ts"]);
   expect(lanes(["packages/web/fake/scenarios.ts"])).toEqual(["browser", "lint", "ts"]);
-  expect(lanes(["packages/web/README.md", "packages/web/fake/README.md"])).toEqual([]);
+  expect(lanes(["packages/web/fake/README.md"])).toEqual([]);
   expect(lanes(["packages/runtime/src/client.ts"])).toEqual(["lint", "release", "ts"]);
 });
 
@@ -82,6 +82,7 @@ it("lints every change a lane builds, and lint configuration alone", () => {
     "lint",
   ]);
   expect(lanes([".oxlintrc.json"])).toEqual(["lint", "ts"]);
+  expect(lanes(["packages/web/README.md"])).toEqual(["lint"]);
   expect(lanes([".coderabbit.yaml", "docs/product/PRODUCT.md"])).toEqual([]);
 });
 

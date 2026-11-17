@@ -18,7 +18,8 @@ function lanesOf(path) {
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
   if (path === "sgconfig.yml" || path.startsWith("lint/")) return ["lint"];
-  if (path === "scripts/test-web-rules.sh") return ["lint"];
+  // The rules script checks the page's table of the modules its rules let through.
+  if (path === "scripts/test-web-rules.sh" || path === "packages/web/README.md") return ["lint"];
   if (path === ".oxlintrc.json" || path === "knip.json") return ["ts"];
   // Read only by CodeRabbit's own review.
   if (path === ".coderabbit.yaml") return [];
