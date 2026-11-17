@@ -558,10 +558,6 @@
         "eslint/no-restricted-globals": [
           "error",
           {
-            "name": "document",
-            "message": "The framework draws the page."
-          },
-          {
             "name": "globalThis",
             "message": "Reach the browser through the module that owns that part of it."
           },

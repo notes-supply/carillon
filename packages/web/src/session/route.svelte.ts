@@ -1,3 +1,5 @@
+import { on } from "svelte/events";
+import { createSubscriber } from "svelte/reactivity";
 import { WINDOW_START, mintAudienceId, widened, type View } from "../api/requests.ts";
 import type { ChatSnapshot, ConversationKey } from "../api/stream.ts";
 import { watch } from "../api/watch.ts";
@@ -11,7 +13,6 @@ let hash = $state(location.hash);
 let earlier = $state.raw({ address: "", turns: WINDOW_START });
 let rows = $state(WINDOW_START);
 let pane = $state<"room" | "conversations">("room");
-let shown = $state(true);
 let earlierRows = $state.raw<EarlierRows | null>(null);
 
 const key = $derived(keyAt(hash.slice(1)));
@@ -31,6 +32,13 @@ function readAddress(): void {
 }
 
 window.addEventListener("hashchange", readAddress);
+
+const visibility = createSubscriber((update) => on(document, "visibilitychange", update));
+
+function tabShown(): boolean {
+  visibility();
+  return document.visibilityState === "visible";
+}
 
 window.addEventListener("storage", (event) => {
   if (session.token === null && namesToken(event.key) && event.newValue !== null) location.reload();
@@ -71,10 +79,6 @@ export function showEarlierTurns(): void {
   earlier = { address, turns: widened(turns) };
 }
 
-export function tabIs(visibility: DocumentVisibilityState): void {
-  shown = visibility === "visible";
-}
-
 export function showRoom(): void {
   pane = "room";
 }
@@ -107,7 +111,7 @@ async function follow(asked: View, token: string, signal: AbortSignal): Promise<
 export function followView(): void {
   $effect(() => {
     const token = session.token;
-    if (token === null || !shown) return undefined;
+    if (token === null || !tabShown()) return undefined;
     const stream = new AbortController();
     void follow(view, token, stream.signal);
     return () => stream.abort();

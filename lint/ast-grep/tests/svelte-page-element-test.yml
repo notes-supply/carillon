@@ -1,0 +1,7 @@
+id: svelte-page-element
+valid:
+  - "<svelte:head><title>{title}</title></svelte:head>\n\n<p>{count}</p>"
+invalid:
+  - "<svelte:window onstorage={stored} />\n\n<p>{count}</p>"
+  - "<svelte:document bind:visibilityState={null, tabIs} />\n\n<p>{count}</p>"
+  - "<svelte:body ondrop={dropped}></svelte:body>\n\n<p>{count}</p>"
