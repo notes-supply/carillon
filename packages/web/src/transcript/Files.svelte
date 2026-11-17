@@ -7,7 +7,7 @@
 </script>
 
 <ul class="files">
-  {#each files as file (file.url)}
+  {#each files as file}
     {@const url = ORIGIN + file.url}
     {#if pictures && file.type !== "application/octet-stream"}
       <li class="picture">

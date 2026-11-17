@@ -292,6 +292,41 @@ function header(now: number): World {
   return held;
 }
 
+/** A message with a picture, and its answer with a picture and a file to download. */
+function pictured(now: number): World {
+  const held = world(now);
+  ago(held, 600, () => {
+    const pair = message(held, 1, "Chart last week's numbers.", [
+      link(held, "sketch.png", "image/png", PNG),
+    ]);
+    const files = [
+      link(held, "chart.png", "image/png", PNG),
+      link(held, "numbers.csv", "application/octet-stream", Buffer.from("day,turns\n")),
+    ];
+    end(held, pair.conversation, pair.turn, {
+      kind: "answered",
+      html: "<p>Here is the chart.</p>\n",
+      files,
+    });
+  });
+  return held;
+}
+
+/** Every file link signed again for the day the world has reached, as the provider signs them. */
+function renewLinks(held: World): void {
+  const expires = (Math.floor(held.now / 86_400) + 2) * 86_400;
+  const renewed = (file: FileLink): FileLink => ({
+    ...file,
+    url: file.url.replace(/exp=\d+/u, `exp=${String(expires)}`),
+  });
+  for (const { turns } of held.conversations)
+    for (const turn of turns) {
+      if (turn.source.kind === "message") turn.source.files = turn.source.files.map(renewed);
+      if (turn.progress.state === "ended" && turn.progress.ending.kind === "answered")
+        turn.progress.ending.files = turn.progress.ending.files.map(renewed);
+    }
+}
+
 const railSteps: Step[] = [
   {
     at: 5000,
@@ -741,6 +776,21 @@ export const scenarios: Record<string, Scenario> = {
         at: 4000,
         label: "the runtime answers a turn of its own",
         run: answers("Scheduled run: release check", "<p>The release is on schedule.</p>\n"),
+      },
+    ],
+  },
+  pictures: {
+    about:
+      "A message and its answer, with pictures and a file. The day ends: the provider ends the stream, and the next has links for another day.",
+    world: pictured,
+    steps: [
+      {
+        at: 86_400_000,
+        label: "the day ends, and the provider ends the stream",
+        run: (stage) => {
+          renewLinks(stage.world);
+          stage.endStreams();
+        },
       },
     ],
   },

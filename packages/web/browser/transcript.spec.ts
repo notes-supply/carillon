@@ -218,3 +218,25 @@ test("earlier turns are shown on request, until there are none before them", asy
   await expect(turns(page).first().getByText("Message 1", { exact: true })).toBeVisible();
   await expect(earlier).toBeHidden();
 });
+
+test("a picture stays on the page while its link is renewed at the day's end", async ({
+  page,
+  fake,
+}) => {
+  await arrive(page, fake, "pictures");
+  await open(page, "Chart last week's numbers.");
+  const picture = turns(page).first().getByRole("img", { name: "chart.png" });
+  await expect(picture).toHaveJSProperty("naturalWidth", 1);
+  const link = await picture.getAttribute("src");
+  // A mark on the element itself: a picture drawn again would not have it.
+  await page.evaluate(
+    `document.querySelector('img[alt="chart.png"]').setAttribute("data-shown-before", "yes")`,
+  );
+  await expect(picture).toHaveAttribute("data-shown-before", "yes");
+
+  await fake.step("the day ends, and the provider ends the stream");
+  await expect(picture).not.toHaveAttribute("src", link ?? "");
+  await expect(picture).toHaveAttribute("src", /exp=1794960000/u);
+  await expect(picture).toHaveAttribute("data-shown-before", "yes");
+  await expect(picture).toHaveJSProperty("naturalWidth", 1);
+});
