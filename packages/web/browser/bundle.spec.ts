@@ -2,15 +2,19 @@ import { readFileSync, readdirSync } from "node:fs";
 import { extname, join } from "node:path";
 import { expect, test } from "./fixtures.ts";
 
-const SERVED = [".html", ".js", ".css", ".svg", ".png", ".woff2", ".txt"];
+const SERVED = [".html", ".js", ".css", ".svg", ".png", ".woff2"];
+const TYPEFACE_LICENCE = /^[a-z-]+-OFL\.txt$/u;
 
-test("the page is one flat folder of files the provider serves", ({ site }) => {
+test("the page is one flat folder of files the provider serves, and its typefaces' licences", ({
+  site,
+}) => {
   const entries = readdirSync(site, { withFileTypes: true });
   expect(entries.filter((entry) => !entry.isFile()).map((entry) => entry.name)).toEqual([]);
+  const names = entries.map((entry) => entry.name);
   expect(
-    entries.map((entry) => entry.name).filter((name) => !SERVED.includes(extname(name))),
+    names.filter((name) => !SERVED.includes(extname(name)) && !TYPEFACE_LICENCE.test(name)),
   ).toEqual([]);
-  expect(entries.map((entry) => entry.name)).toContain("index.html");
+  expect(names).toContain("index.html");
 });
 
 test("nothing in the page needs a looser policy than the provider sets", ({ site }) => {
