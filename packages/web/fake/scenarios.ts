@@ -15,30 +15,20 @@ import {
   type World,
 } from "./world.ts";
 
-/** What a step may do beside changing the world. */
 export type Stage = {
   world: World;
-  /** Core goes away: every stream is told and ended, and none gets a snapshot until it returns. */
   away(): void;
   returns(): void;
-  /** The password changes: every stream is told and ended, and the old token is refused. */
   signOut(): void;
-  /** The provider ends every stream and says nothing, as it does at UTC midnight. */
   endStreams(): void;
-  /** The provider keeps every stream open and writes nothing more to it, as a dead connection looks. */
   mute(): void;
-  /** Writes `data` to every stream as it is. */
   say(data: string): void;
-  /** The provider reads the upload it held. */
   release(): void;
 };
 
 type Step = {
-  /** Milliseconds after the scenario began. */
   at: number;
-  /** What happens, in words a test names the step by. */
   label: string;
-  /** On the fake's own clock, the step waits for the page's first message. */
   after?: "send";
   run(stage: Stage): void;
 };
@@ -67,7 +57,6 @@ function message(held: World, n: number, text: string, files: FileLink[] = []): 
   return pair;
 }
 
-/** A message of `seconds` ago and its answer `took` seconds later. */
 function exchange(
   held: World,
   n: number,
@@ -116,7 +105,6 @@ const REPORT: Activity = {
   agent: { model: "gpt-6.1", effort: "high", context: { used: 18_250, window: 400_000 } },
 };
 
-/** One conversation with one earlier exchange, for the page to write into. */
 function planning(now: number): World {
   const held = world(now);
   exchange(
@@ -130,7 +118,6 @@ function planning(now: number): World {
   return held;
 }
 
-/** A sent message's turn from core's hand-over to its answer. */
 const settling: Step[] = [
   {
     at: 1000,
@@ -275,7 +262,6 @@ function rail(now: number): World {
   return held;
 }
 
-/** The rail's world with a second agent, a conversation of its own, and the owner's copy of the page. */
 function header(now: number): World {
   const held = rail(now);
   held.agents.push({ id: "scout", name: "Scout" });
@@ -292,7 +278,6 @@ function header(now: number): World {
   return held;
 }
 
-/** A message with a picture, and its answer with a picture and a file to download. */
 function pictured(now: number): World {
   const held = world(now);
   ago(held, 600, () => {
@@ -312,7 +297,6 @@ function pictured(now: number): World {
   return held;
 }
 
-/** Every file link signed again for the day the world has reached, as the provider signs them. */
 function renewLinks(held: World): void {
   const expires = (Math.floor(held.now / 86_400) + 2) * 86_400;
   const renewed = (file: FileLink): FileLink => ({
@@ -435,7 +419,6 @@ function controls(now: number): World {
   return held;
 }
 
-/** What Pi does with each control, as the provider's guide tells it. */
 function act({ world: held }: Stage): void {
   const pressed = held.pressed;
   if (pressed === undefined) throw new Error("no control was pressed before this step");
@@ -471,7 +454,6 @@ function many(now: number, turns: number, html: (n: number) => string): World {
   return held;
 }
 
-/** Sixty conversations of one exchange each, the sixtieth the latest. */
 function crowded(now: number): World {
   const held = world(now);
   for (let n = 1; n <= 60; n += 1)

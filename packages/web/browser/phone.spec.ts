@@ -14,7 +14,6 @@ import {
 
 test.use({ viewport: { width: 390, height: 800 } });
 
-/** Signs in on a window too narrow for the list and the room side by side. */
 async function arrive(page: Page, fake: Fake, scenario: string): Promise<void> {
   await fake.play(scenario);
   await clockAt(page, 0);

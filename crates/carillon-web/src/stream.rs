@@ -145,8 +145,6 @@ impl Shown {
         loop {
             let heard = match &mut self.stage {
                 Stage::Over => return None,
-                // The day's end is not waited for here: a stream that ends
-                // with its day has shown a snapshot.
                 Stage::Opening => {
                     Heard::Core(match self.web.core.observe(&self.viewed.view).await {
                         Ok(mut observation) => {
@@ -199,8 +197,6 @@ impl Shown {
                 Ok(data) => data,
                 Err(error) => return Some(Err(error)),
             };
-            // Two of core's snapshots can show the page the same: they
-            // differ in what stays behind.
             if data != self.sent {
                 self.sent = data;
                 self.quiet_until = Instant::now() + KEEP_ALIVE;

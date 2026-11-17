@@ -6,7 +6,6 @@ import { readAnswer } from "../src/api/requests.ts";
 
 const ListeningSchema = Type.Object({ port: Type.Integer() });
 
-/** What `/fake/state` and `/fake/step` answer, as far as a script reads them. */
 export const StateSchema = Type.Object({
   written: Type.Integer(),
   ended: Type.Integer(),
@@ -16,7 +15,6 @@ export const SteppedSchema = Type.Object({ label: Type.String(), wrote_at: Type.
 
 export type Started = { origin: string; stop(): void };
 
-/** Runs the fake as a process of its own, on a free port and the manual clock. */
 export async function start(scenario: string, site?: string): Promise<Started> {
   const fake = spawn(
     process.execPath,

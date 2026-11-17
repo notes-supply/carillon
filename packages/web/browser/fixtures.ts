@@ -4,18 +4,13 @@ import { EPOCH, PASSWORD } from "../fake/world.ts";
 
 export { EPOCH, PASSWORD };
 
-/** The fake provider one worker runs, serving the built page. */
 export type Fake = {
   origin: string;
-  /** Starts a scenario over. The fake then moves only when `step` is called. */
   play(scenario: string): Promise<void>;
-  /** Plays the scenario's next step, which must be the one named. */
   step(label: string): Promise<void>;
 };
 
-/** What `playwright.config.ts` sets for every check. */
 export type Options = {
-  /** The folder of the built page. */
   site: string;
 };
 
@@ -44,7 +39,6 @@ export const test = base.extend<{ fake: Fake; guard: undefined }, Options & { pr
       step: (label) => post(provider.origin, "/fake/step", { expect: label }),
     });
   },
-  /** Every check also fails when the page breaks its policy, throws, or opens a dialog. */
   guard: [
     async ({ page }, use) => {
       const faults: string[] = [];
@@ -70,7 +64,6 @@ export async function clockAt(page: Page, seconds: number): Promise<void> {
   await page.clock.setFixedTime(new Date((EPOCH + seconds) * 1000));
 }
 
-/** Opens the page at a scenario's beginning and signs in as a person does. */
 export async function arrive(page: Page, fake: Fake, scenario: string): Promise<void> {
   await fake.play(scenario);
   await clockAt(page, 0);
@@ -84,7 +77,6 @@ export function rail(page: Page): Locator {
   return page.getByRole("navigation", { name: "Conversations" });
 }
 
-/** The conversations listed, in the order shown. */
 export function conversations(page: Page): Locator {
   return rail(page).getByRole("list").first().locator("> li");
 }
@@ -93,13 +85,11 @@ export function conversation(page: Page, title: string): Locator {
   return conversations(page).filter({ hasText: title });
 }
 
-/** Opens a listed conversation and waits until the room is its. */
 export async function open(page: Page, title: string): Promise<void> {
   await conversation(page, title).getByRole("link").click();
   await expect(page.getByRole("heading", { name: title, level: 2 })).toBeVisible();
 }
 
-/** The open conversation's turns, oldest first, with any message still on its way. */
 export function turns(page: Page): Locator {
   return page.getByRole("list", { name: "Turns" }).locator("> li");
 }
@@ -113,7 +103,6 @@ export async function send(page: Page, text: string): Promise<void> {
   await message(page).press("Enter");
 }
 
-/** What a turn at work shows of its runtime. */
 export function atWork(turn: Locator): Locator {
   return turn.getByRole("region", { name: "This turn is at work" });
 }

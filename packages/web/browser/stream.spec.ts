@@ -16,7 +16,6 @@ import { streams, streamsHeld, tab } from "./tab.ts";
 
 const AWAY = "Carillon is not answering. Trying again.";
 
-/** Arrives with the page's clock held: its timers fire only when the check moves the clock on. */
 async function arriveWithClockHeld(page: Page, fake: Fake, scenario: string): Promise<void> {
   await fake.play(scenario);
   await page.clock.install({ time: new Date(EPOCH * 1000) });

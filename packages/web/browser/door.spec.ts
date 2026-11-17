@@ -160,7 +160,6 @@ test("a browser that cannot store the token still signs in, until the page is lo
   await expect(page.getByLabel("Password")).toBeVisible();
 });
 
-/** Opens the running answer after the password changed, which the open stream was not told. */
 async function signedOutQuietly(page: Page, fake: Fake): Promise<void> {
   await arrive(page, fake, "signed-out-quietly");
   await open(page, "Write the long report.");

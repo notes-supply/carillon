@@ -14,8 +14,6 @@ chat=$(cat /proc/sys/kernel/random/uuid)
 event=m-$(cat /proc/sys/kernel/random/uuid)
 curl --fail --silent --max-time 120 -X PUT -H "@$headers" -F "text=$text" \
   "$origin/api/conversations/assistant/$chat/messages/$event" >/dev/null
-# The page's stream of the conversation says when the answer is there. The
-# reader stops at the first snapshot that has it, and then the stream is cut.
 stream=$(mktemp -u)
 mkfifo "$stream"
 curl --silent --no-buffer --max-time 120 -H "@$headers" \

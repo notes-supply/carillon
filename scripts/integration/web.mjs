@@ -16,7 +16,6 @@ const installation = join(root, "installation");
 const workspace = join(root, "workspace");
 const manager = join(root, "manager");
 const binary = resolve("target/debug/carillon");
-// The page as `mise run build:web` leaves it, which is what a release ships.
 const site = resolve("packages/web/dist");
 const PASSWORD = "correct horse battery";
 const TAILNET = "chat.example-tailnet.ts.net";
@@ -84,16 +83,10 @@ async function send(token, chat, event, text, { agent = "assistant", files = [] 
   return await api(token, path, { method: "PUT", body: form });
 }
 
-/** The view that lists conversations and opens `chat` of the installation's one agent. */
 function viewOf(chat) {
   return { conversations: "50", agent_id: "assistant", audience_id: chat, turns: "50" };
 }
 
-/**
- * One stream of `view`, as the page opens one. `next` gives its next message,
- * and `undefined` once the provider has ended it. A stream left open longer
- * than a case can take fails the read.
- */
 async function open(token, view = { conversations: "50" }) {
   const closing = new AbortController();
   const response = await fetch(`${origin}/api/stream?${new URLSearchParams(view).toString()}`, {
@@ -126,7 +119,6 @@ async function open(token, view = { conversations: "50" }) {
   };
 }
 
-/** What `seen` finds in the first snapshot of `view` it finds anything in. */
 async function shown(token, view, seen) {
   const stream = await open(token, view);
   try {
@@ -141,7 +133,6 @@ async function shown(token, view, seen) {
   }
 }
 
-/** What a stream of `view` shows first. */
 async function snapshot(token, view) {
   return await shown(token, view, (first) => first);
 }
@@ -152,7 +143,6 @@ async function turns(token, chat) {
   return opened.turns;
 }
 
-/** The conversation's turns once none of them is at work. */
 async function settled(token, chat) {
   return await shown(
     token,
@@ -167,7 +157,6 @@ function raw(path, headers) {
   return new Promise((resolveStatus, reject) => {
     const sent = request(`${origin}${path}`, { headers, agent: false }, (response) => {
       resolveStatus(response.statusCode);
-      // A stream has no end to read to.
       response.destroy();
     });
     sent.on("error", reject).end();
@@ -274,8 +263,6 @@ async function testGate(token) {
   const policy = page.headers.get("content-security-policy");
   assert.match(policy, /default-src 'none'/u);
   assert.match(policy, /font-src 'self'/u);
-  // Every file of the built page but its typeface's licence, which ships
-  // beside it and is no part of the page.
   const files = (await readdir(site)).filter((file) => !file.endsWith(".txt"));
   assert.ok(files.includes("style.css") && files.includes("literata.woff2"));
   for (const file of files) {
@@ -371,7 +358,6 @@ async function testControls(token) {
   );
   const second = await send(token, chat, waiting, "also this");
   assert.equal(second.status, 200, JSON.stringify(second.body));
-  // Its runtime holds it behind the first, and says so in its own words.
   const offered = await shown(token, viewOf(chat), (seen) => {
     const progress = progressOf(seen, second.body.turn_id);
     return progress?.state === "running" && progress.controls.length > 0 && progress;
@@ -492,8 +478,6 @@ try {
   assert.equal(after.status, 200, JSON.stringify(after.body));
   assert.equal((await settled(token, chat)).at(-1).progress.ending.kind, "answered");
 
-  // A stream open when core stops says so and ends, and so does one opened
-  // while core is away. The provider opens no second stream of core.
   const across = await open(token, viewOf(chat));
   assert.equal((await across.next()).kind, "snapshot");
   services("stop", "core");
@@ -509,8 +493,6 @@ try {
   assert.equal((await waited).status, 200, "a message sent while core was away was lost");
   assert.equal((await settled(token, chat)).at(-1).source.text, "while core was away");
 
-  // A new password ends an open stream within a keep-alive, and voids the
-  // token and every link.
   const signedIn = await open(token);
   assert.equal((await signedIn.next()).kind, "snapshot");
   choosePassword("a second good password");

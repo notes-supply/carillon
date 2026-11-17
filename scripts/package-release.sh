@@ -70,8 +70,6 @@ printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 cp -R packages/runtime-pi/skills "$STAGE/lib/pi-skills"
 
-# The web chat's page is built to one flat folder, which the provider serves
-# as it is. It is built first, because it is the quickest step to fail.
 pnpm --dir packages/web run build
 cp -R packages/web/dist "$STAGE/lib/web"
 

@@ -69,7 +69,6 @@ async fn a_request_that_does_not_name_this_provider_is_misdirected() -> Result<(
     let fixture = Fixture::new().await?;
     let browser = fixture.sign_in().await?;
     for (method, path) in ROUTES {
-        // The credential its route takes, so only the name refuses it.
         let credential = if path.starts_with("/v1") {
             OPERATOR_TOKEN
         } else {

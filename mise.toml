@@ -104,7 +104,6 @@ run = "pnpm --dir packages/web run build"
 description = "Check the built page in a browser against the fake provider"
 depends = ["build:web"]
 run = [
-  # Fetches the headless Chromium this Playwright drives, once.
   "pnpm --dir packages/web run install:browser",
   "pnpm --dir packages/web run test:browser",
 ]

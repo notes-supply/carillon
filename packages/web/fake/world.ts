@@ -18,13 +18,10 @@ export const PASSWORD = "correct horse battery staple";
 const AGENT = "assistant";
 export const AWAY_ANSWER = "Carillon is not answering right now. Try again in a moment.";
 
-/** How the provider answers the next message. */
 type Sending =
   | { kind: "accept" }
   | { kind: "refuse"; status: number; error: string }
-  /** Core takes the message and goes away before its receipt reaches the page. */
   | { kind: "lose_receipt" }
-  /** The provider reads none of the upload until the scenario's next step. */
   | { kind: "hold_upload" };
 
 type StoredFile = { name: string; type: FileLink["type"]; bytes: Uint8Array };
@@ -39,15 +36,11 @@ export type Recorded = {
 };
 
 export type World = {
-  /** Unix seconds. */
   now: number;
-  /** The last activity marker given: no two conversations share one. */
   marker: number;
   turns: number;
-  /** How many times the password changed: the token names it. */
   password: number;
   available: boolean;
-  /** `all` sends every turn whatever window the view asked for: a measuring device. */
   window: "asked" | "all";
   sending: Sending;
   agents: Agent[];
@@ -55,7 +48,6 @@ export type World = {
   custom_site: boolean;
   conversations: Recorded[];
   commands: Command[];
-  /** Event ID to the turn core made of it. */
   events: Map<string, string>;
   files: Map<string, StoredFile>;
   pressed: { event_id: string; action: Control } | undefined;
@@ -85,7 +77,6 @@ export function token(held: World): string {
   return `fake-token-${String(held.password)}`;
 }
 
-/** The `n`th made-up conversation UUID. */
 export function audience(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 }
@@ -117,7 +108,6 @@ function summary(conversation: Recorded): Conversation {
   };
 }
 
-/** Everything `view` shows, as core composes it and the provider passes it on. */
 export function snapshot(held: World, view: View): ChatSnapshot {
   const latest = held.conversations.toSorted((one, other) => other.activity - one.activity);
   const open = view.open;
@@ -154,7 +144,6 @@ function nextTurn(held: World): string {
   return `t-${String(held.turns).padStart(4, "0")}`;
 }
 
-/** A link to made-up bytes the fake serves under `/files`. */
 export function link(
   held: World,
   name: string,
@@ -182,10 +171,6 @@ function invokes(held: World, text: string): boolean {
   return held.commands.some((command) => first === `/${command.name}`);
 }
 
-/**
- * Core's admission of a message: the first one of a key records its
- * conversation, and a repeated event ID is answered with the first receipt.
- */
 export function admit(
   held: World,
   wanted: ConversationKey,
@@ -219,7 +204,6 @@ export function admit(
   return { turn_id: turn.turn_id, duplicate: false };
 }
 
-/** A turn the runtime opens itself. */
 export function open(held: World, conversation: Recorded, label: string | undefined): Turn {
   const turn: Turn = {
     turn_id: nextTurn(held),
@@ -250,7 +234,6 @@ export function end(
   touch(held, conversation);
 }
 
-/** The newest turn that has not ended, and its conversation. */
 export function working(held: World): { conversation: Recorded; turn: Turn } {
   const found = held.conversations
     .flatMap((conversation) => conversation.turns.map((turn) => ({ conversation, turn })))
@@ -260,7 +243,6 @@ export function working(held: World): { conversation: Recorded; turn: Turn } {
   return found;
 }
 
-/** The turn a message began. */
 export function turnOf(
   held: World,
   eventId: string,

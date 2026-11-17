@@ -353,7 +353,6 @@ fn commands_silences_and_a_runtime_s_own_turns_are_shown_apart() -> Result<()> {
     let opened = |label: Option<&str>| TurnSource::Opened {
         label: label.map(str::to_owned),
     };
-    // When a turn ended is not what tells these apart.
     let ended = |ending| Progress::Ended {
         finished_at: 0,
         ending,

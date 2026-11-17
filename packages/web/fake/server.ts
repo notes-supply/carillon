@@ -39,7 +39,6 @@ type Clock = "manual" | "live";
 
 export type Options = {
   port: number;
-  /** A flat folder with the built page, served beside the API. */
   site: string | undefined;
   scenario: string;
   clock: Clock;
@@ -53,18 +52,15 @@ type Play = {
   world: World;
   applied: number;
   clock: Clock;
-  /** Milliseconds of this process's clock at which the scenario's own clock read zero. */
   began: number;
   sent: boolean;
   timer: NodeJS.Timeout | undefined;
 };
 
-/** The policy `serve.rs` gives every answer. */
 const PAGE_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
   "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/** The files the provider serves from the page's folder. */
 const SITE_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript",
@@ -90,7 +86,6 @@ function plain(response: ServerResponse, status: number, text: string): void {
   response.end(text);
 }
 
-/** As the provider's JSON routes require: JSON under another content type is a 415. */
 function sentJson(request: IncomingMessage): boolean {
   return (
     request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() === "application/json"
@@ -113,7 +108,6 @@ async function text(request: IncomingMessage, limit: number): Promise<string | u
   return size > limit ? undefined : Buffer.concat(chunks).toString("utf8");
 }
 
-/** A raster image's type by its bytes, as `files.rs` reads it. Anything else downloads. */
 function typeOf(bytes: Uint8Array): FileLink["type"] {
   const start = Buffer.from(bytes.subarray(0, 12)).toString("latin1");
   if (start.startsWith("\u0089PNG\r\n\u001a\n")) return "image/png";
@@ -123,7 +117,6 @@ function typeOf(bytes: Uint8Array): FileLink["type"] {
   return "application/octet-stream";
 }
 
-/** The view a stream's query asks for, by the rules of core's `ViewQuery`. */
 export function viewOf(query: URLSearchParams): View | undefined {
   const known = new Set(["conversations", "agent_id", "audience_id", "turns"]);
   if ([...query.keys()].some((name) => !known.has(name))) return undefined;
@@ -149,12 +142,10 @@ export type Fake = { port: number; close(): Promise<void> };
 
 export async function serve(options: Options): Promise<Fake> {
   const streams = new Set<Stream>();
-  /** Stream messages written and streams ended, since the process began. */
   const counts = { written: 0, ended: 0 };
   const requests: string[] = [];
   let release: (() => void) | undefined;
   let holding: Promise<void> | undefined;
-  /** Callers of `/fake/state?wait=` that are answered once what they wait for holds. */
   let waiters: { ready(): boolean; resolve(): void }[] = [];
   let play = begin(options.scenario, options.clock);
 
@@ -188,7 +179,6 @@ export async function serve(options: Options): Promise<Fake> {
     counts.written += 1;
   }
 
-  /** Sends each stream the snapshot of its view, unless it is the one it has. */
   function publish(): void {
     if (!play.world.available) return;
     for (const stream of streams) {
@@ -244,7 +234,6 @@ export async function serve(options: Options): Promise<Fake> {
     },
   };
 
-  /** The scenario's next step, on the fake's clock at that step's time. */
   function apply(): string | undefined {
     const step = play.scenario.steps[play.applied];
     if (step === undefined) return undefined;
@@ -256,7 +245,6 @@ export async function serve(options: Options): Promise<Fake> {
     return step.label;
   }
 
-  /** On its own clock, the fake plays each step when its time has come. */
   function schedule(): void {
     clearTimeout(play.timer);
     const step = play.scenario.steps[play.applied];
@@ -340,7 +328,6 @@ export async function serve(options: Options): Promise<Fake> {
         return;
       }
       apply();
-      // For a measurement: when the step's snapshots had been written, on this machine's clock.
       const wrote_at = performance.timeOrigin + performance.now();
       json(response, { label: next, wrote_at, ...state() });
       return;
@@ -564,7 +551,6 @@ export async function serve(options: Options): Promise<Fake> {
     }
   }
 
-  /** A file of the page's flat folder, as `site.rs` serves it: a regular file of a type it knows. */
   async function site(response: ServerResponse, url: URL): Promise<void> {
     const chosen = url.searchParams.get("scenario");
     if (url.pathname === "/" && chosen !== null && scenarios[chosen] !== undefined)

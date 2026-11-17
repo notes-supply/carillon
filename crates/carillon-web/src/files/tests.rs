@@ -204,19 +204,16 @@ async fn a_link_is_the_same_all_day_and_the_next_day_s_works_a_day_longer() -> R
         let expiry = link.split('&').find_map(|pair| pair.strip_prefix("exp="));
         expiry.map(str::to_owned).context("no expiry")
     };
-    // 2023-11-14 from 22:13:20 UTC, which has 6400 seconds left.
     assert_eq!(Day::at(1_700_000_000).1.as_secs(), 6_400);
     assert_eq!(Day::at(1_700_006_399).1.as_secs(), 1);
     assert_eq!(Day::at(1_700_006_400).1.as_secs(), DAY);
     let early = minted(&fixture, 1_700_000_000, "capture/0", "chart.png").await?;
     let late = minted(&fixture, 1_700_006_399, "capture/0", "chart.png").await?;
     assert_eq!(early, late);
-    // The end of 2023-11-15, then of 2023-11-16.
     assert_eq!(expiry(early)?, "1700092800");
     let next = minted(&fixture, 1_700_006_400, "capture/0", "chart.png").await?;
     assert_eq!(expiry(next)?, "1700179200");
 
-    // What tomorrow's stream mints is another link, and it opens the file.
     let today = link(&fixture, "capture/0", "chart.png").await?;
     let tomorrow = minted(&fixture, now() + DAY, "capture/0", "chart.png").await?;
     assert_eq!(

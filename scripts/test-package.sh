@@ -56,7 +56,6 @@ case "${0##*/}" in
   pnpm)
     case "$1 $2" in
       'licenses list') cat npm/listing.json ;;
-      # The page's build, which leaves one flat folder.
       '--dir packages/web')
         [ "$3 $4" = 'run build' ]
         printf '%s\n' "$*" >>"$TRACE.pnpm"
@@ -169,7 +168,6 @@ for arch in x86_64 aarch64; do
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
   [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 2 ]
-  # The page is built once, and what the build left is what ships.
   [ "$(wc -l <"$TEST_ROOT/$arch.pnpm")" -eq 1 ]
   [ "$(tar -xOf "$archive" carillon-1.2.3/lib/web/index.html)" = page ]
   # The runtime's entry embeds what installed packages would have given it.

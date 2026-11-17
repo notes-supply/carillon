@@ -311,7 +311,6 @@ test("a picture stays on the page while its link is renewed at the day's end", a
   const picture = turns(page).first().getByRole("img", { name: "chart.png" });
   await expect(picture).toHaveJSProperty("naturalWidth", 1);
   const link = await picture.getAttribute("src");
-  // A mark on the element itself: a picture drawn again would not have it.
   await page.evaluate(
     `document.querySelector('img[alt="chart.png"]').setAttribute("data-shown-before", "yes")`,
   );

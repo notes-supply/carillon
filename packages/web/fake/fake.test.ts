@@ -1,9 +1,3 @@
-/**
- * Plays every scenario against the fake over HTTP, as a page would, with
- * nothing but Node. Each scenario runs twice. A test fails when a stream
- * message is not one the contract reads, when an answer lacks the headers a
- * real page meets, or when the two runs differ by a byte.
- */
 import { createHash } from "node:crypto";
 import type { Static } from "typebox";
 import { request as httpRequest } from "node:http";
@@ -43,7 +37,6 @@ const origin = `http://127.0.0.1:${String(fake.port)}`;
 
 type State = Static<typeof StateSchema>;
 
-/** What the driver has read of every stream since the process began. */
 const read = { messages: 0, ends: 0 };
 let arrived: (() => void) | undefined;
 
@@ -67,7 +60,6 @@ async function state(query = ""): Promise<State> {
   return answered;
 }
 
-/** Waits until the driver has read everything the fake wrote and seen every stream it ended. */
 async function settle(): Promise<void> {
   const { written, ended } = await state();
   while (read.messages < written || read.ends < ended)
@@ -126,7 +118,6 @@ function describe(message: Received): string {
   return `snapshot of ${listed}, open one has ${String(open.turns.length)} turns${open.earlier ? " and earlier ones" : ""} (${tally.join(", ")})`;
 }
 
-/** Opens a stream of `view` in place of the one before it, and reads it until it ends. */
 async function watch(run: Run, view: View): Promise<void> {
   expect(viewOf(new URL(origin + streamPath(view)).searchParams)).toStrictEqual(view);
   run.stream?.abort();
@@ -208,7 +199,6 @@ async function press(run: Run, message: MessageSource, action: Control): Promise
   await ask(run, "POST", controlPath(message), controlBody(action));
 }
 
-/** Signs in, wrongly and then rightly, and opens the first conversation listed. */
 async function arrive(run: Run): Promise<void> {
   await signIn(run, "a wrong password");
   await watch(run, DEFAULT);
@@ -218,7 +208,6 @@ async function arrive(run: Run): Promise<void> {
   if (first !== undefined) await watch(run, opening(first.key));
 }
 
-/** Sends 64 MiB that the provider does not read until the scenario's step. */
 async function upload(run: Run): Promise<void> {
   const file = new File([new Uint8Array(64 * 1024 * 1024)], "large.bin");
   const form = new Response(messageForm("A large file.", [file]));
@@ -402,7 +391,6 @@ const names = [
   ...Object.keys(scripts).filter((name) => name.startsWith("controls:")),
 ];
 
-// The two large scenarios each send 240 snapshots of 500 turns, twice.
 const BOUND = { timeout: 60_000 };
 
 test.each(names)("%s plays the same twice, in messages the contract reads", BOUND, async (name) => {

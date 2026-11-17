@@ -123,7 +123,6 @@ async fn commands_of_a_conversation_the_page_could_not_name_are_refused_before_c
 -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // An agent's ID is one path segment, as the page encodes it.
     let unknown = fixture.get(&commands("no%2Fbody", CHAT), &token).await?;
     assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
@@ -148,7 +147,6 @@ async fn commands_of_a_conversation_the_page_could_not_name_are_refused_before_c
             answer.text()
         );
     }
-    // The address the page had before a conversation named its agent.
     let unkeyed = fixture
         .get(&format!("/api/conversations/{CHAT}/commands"), &token)
         .await?;

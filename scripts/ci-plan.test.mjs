@@ -67,7 +67,6 @@ it("checks the page in a browser when the page or what builds it changes", () =>
     expect(lanes([path])).toEqual(["browser", "lint", "release", "ts"]);
   for (const path of ["package.json", "pnpm-workspace.yaml", "tsconfig.json"])
     expect(lanes([path])).toEqual(["browser", "lint", "release", "ts"]);
-  // The checks and the fake provider they run against ship in no release.
   expect(lanes(["packages/web/browser/door.spec.ts"])).toEqual(["browser", "lint", "ts"]);
   expect(lanes(["packages/web/fake/scenarios.ts"])).toEqual(["browser", "lint", "ts"]);
   expect(lanes(["packages/web/README.md", "packages/web/fake/README.md"])).toEqual([]);

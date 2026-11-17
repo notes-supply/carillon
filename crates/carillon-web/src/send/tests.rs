@@ -235,7 +235,6 @@ async fn a_text_that_begins_with_one_of_the_runtime_s_commands_is_sent_as_a_comm
 {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // The fake's runtime offers `assistant` the one command `skill:assistant`.
     let texts = [
         ("/skill:assistant", true),
         ("/skill:assistant with its arguments", true),
@@ -263,7 +262,6 @@ async fn a_text_that_begins_with_one_of_the_runtime_s_commands_is_sent_as_a_comm
         .collect();
     assert_eq!(intents(&fixture), expected);
 
-    // The page is shown what was decided, with the turn.
     let view = format!("conversations=1&agent_id=assistant&audience_id={CHAT}&turns=50");
     let snapshot = fixture.stream(&view, &token).await?.snapshot().await?;
     let shown: Vec<_> = snapshot["open"]["turns"]
@@ -293,7 +291,6 @@ async fn a_runtime_that_cannot_say_its_commands_leaves_the_text_a_message_and_is
 -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // Core answers the one read of the commands as it does while it is away.
     fixture.core().away_for_requests = 1;
     let text = "/skill:assistant now";
     let sent = send(&fixture, &token, "assistant", &[Part::Text(text)]).await?;

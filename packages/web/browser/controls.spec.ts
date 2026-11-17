@@ -16,17 +16,14 @@ const TITLE = "Write the long report.";
 const UNANSWERED = "Carillon did not answer. If the turn goes on, press it again.";
 const CONTROL = "**/api/messages/*/control";
 
-/** The turn that is answering, which offers stop. */
 function answering(page: Page): Locator {
   return atWork(turns(page).nth(0));
 }
 
-/** The message that waits behind it, which offers steer, interrupt and stop. */
 function waiting(page: Page): Locator {
   return atWork(turns(page).nth(1));
 }
 
-/** Presses a control and waits until the provider has answered it, so the next step finds it pressed. */
 async function press(page: Page, turn: Locator, name: string): Promise<void> {
   const answered = page.waitForResponse(CONTROL);
   await turn.getByRole("button", { name }).click();

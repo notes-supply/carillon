@@ -21,7 +21,6 @@ page() {
   cat >"$SRC/$1"
 }
 
-# Files that follow every rule.
 page main.ts <<'FILE'
 import { mount } from "svelte";
 import App from "./App.svelte";
@@ -54,14 +53,12 @@ page transcript/Prose.svelte <<'FILE'
 <div class="prose">{@html html}</div>
 FILE
 
-# A JavaScript file, in each of the two languages sgconfig.yml reads one as.
 for ending in js mjs cjs jsx; do
   page "rail/legacy.$ending" <<'FILE'
 export const double = (count) => count * 2;
 FILE
 done
 
-# A directory that is no domain, and names that say nothing of their subject.
 page widgets/Thing.svelte <<'FILE'
 <script lang="ts">
   let { count }: { count: number } = $props();
@@ -83,7 +80,6 @@ page rail/shared/Badge.svelte <<'FILE'
 <p>{count}</p>
 FILE
 
-# A TypeScript rule reads a component's script.
 page rail/Unread.svelte <<'FILE'
 <script lang="ts">
   let { count }: { count: number } = $props();
@@ -98,7 +94,6 @@ page rail/Unread.svelte <<'FILE'
 <p>{doubled}</p>
 FILE
 
-# What a wrapper module may do, a module off the list may not.
 page rail/unread.svelte.ts <<'FILE'
 export function followView(open: () => void): void {
   $effect(open);

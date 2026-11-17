@@ -106,8 +106,6 @@ async fn a_stream_begins_with_a_snapshot_of_its_view_and_asks_core_only_when_it_
     assert_eq!(page.snapshot().await?, expected);
     assert_eq!(fixture.core().asked, ["/v1/observe?conversations=50"]);
 
-    // A conversation core does not have is open all the same, whatever
-    // agent it names: its first message records it or is refused.
     for agent in ["second", "nobody"] {
         let mut page = fixture.stream(&open(agent), &token).await?;
         assert_eq!(
@@ -158,7 +156,6 @@ async fn a_snapshot_follows_each_change_to_what_the_view_shows() -> Result<()> {
     assert_eq!(
         shown(page.snapshot().await?)?,
         json!({
-            // Core's order, without the conversation the page did not make.
             "conversations": [
                 listed,
                 {
@@ -195,8 +192,6 @@ async fn a_change_the_page_is_not_shown_sends_nothing_in_five_seconds_of_a_pause
     let mut page = fixture.stream("conversations=50", &token).await?;
     page.snapshot().await?;
 
-    // Core's snapshot changes, and the page's does not: a channel stays
-    // behind, and so does a conversation the page did not make.
     {
         let mut core = fixture.core();
         "another-channel".clone_into(&mut core.conversations[0].channel_id);
@@ -340,7 +335,6 @@ fn written(sent: &str, chart: &str) -> Value {
                     "html": "<p>Here is the <strong>chart</strong>. &lt;script&gt;x&lt;/script&gt;</p>\n",
                     "files": [{"name": "chart.png", "size": 25, "type": "image/png", "url": chart}],
                 },
-                // A report offers no control, whatever the runtime listed.
                 "report": said("model"),
             },
         },
@@ -372,8 +366,6 @@ fn written(sent: &str, chart: &str) -> Value {
             "progress": {"state": "running", "activity": said("model"), "controls": []},
         },
         {
-            // Its runtime holds it behind another turn: the controls sit on
-            // the turn, beside what the runtime says.
             "turn_id": "t7", "source": from("m-7", "waiting"), "accepted_at": 10,
             "progress": {
                 "state": "running", "activity": said("queued"), "controls": ["steer", "stop"],
@@ -463,7 +455,6 @@ async fn a_new_password_ends_the_stream_as_signed_out_before_its_next_snapshot()
     let token = fixture.sign_in().await?;
     let mut page = fixture.stream("conversations=50", &token).await?;
     page.snapshot().await?;
-    // The same password again is a new hash, and so a new key.
     set_password(&fixture.password_file(), PASSWORD)?;
     fixture
         .core()
@@ -570,7 +561,6 @@ async fn a_stream_ends_without_a_last_message_when_its_utc_day_ends_on_a_paused_
     let before = now();
     let mut page = fixture.stream(&open("second"), &token).await?;
     let snapshot = page.snapshot().await?;
-    // A link works until the end of the day after the stream's.
     let link = &snapshot["open"]["turns"][0]["progress"]["ending"]["files"][0]["url"];
     let expires: u64 = link
         .as_str()
@@ -584,7 +574,6 @@ async fn a_stream_ends_without_a_last_message_when_its_utc_day_ends_on_a_paused_
     tokio::time::pause();
     let read = Instant::now();
     assert_eq!(page.next().await?, None, "the stream said why it ended");
-    // The stream opened between `before` and now, less than a minute ago.
     let waited = read.elapsed();
     assert!(
         waited <= Duration::from_secs(day_ends - before),

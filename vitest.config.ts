@@ -15,7 +15,6 @@ process.on("exit", () => {
 
 export default defineConfig({
   test: {
-    // Playwright runs the page's browser checks, against the built page.
     exclude: [...configDefaults.exclude, "packages/web/browser/**"],
     restoreMocks: true,
     env: {

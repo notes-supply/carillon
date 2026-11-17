@@ -18,7 +18,6 @@ function lanesOf(path) {
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
   if (path === "sgconfig.yml" || path.startsWith("lint/")) return ["lint"];
-  // The proof that the page's rules reach their files, which only the lint lane runs.
   if (path === "scripts/test-web-rules.sh") return ["lint"];
   if (path === ".oxlintrc.json" || path === "knip.json") return ["ts"];
   // Read only by CodeRabbit's own review.
@@ -42,12 +41,9 @@ function lanesOf(path) {
       ? ["rust", "ts", "release"]
       : ["rust", "release"];
   }
-  // The page's browser checks and the fake provider they run against reach
-  // no release. The rest of the page is built, checked in a browser and shipped.
   if (/^packages\/web\/(browser|fake)\//u.test(path)) return ["ts", "browser"];
   if (path.startsWith("packages/web/")) return ["ts", "release", "browser"];
   if (path.startsWith("packages/")) return ["ts", "release"];
-  // The workspace's dependencies and compiler options, which the page is built with too.
   if (/^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.json)$/u.test(path))
     return ["ts", "release", "browser"];
   // The public installer, which the release lane tests.

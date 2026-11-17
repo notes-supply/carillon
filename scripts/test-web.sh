@@ -52,8 +52,6 @@ providers() {
   sed -n -e '/^\[\[agents\]\]/q' -e 's/^id = "\(.*\)"$/\1/p' "$INSTALLATION/carillon.toml" | tr '\n' ' '
 }
 chat() { "$SCRIPTS/test-web-chat.sh" "$1" "$TEST_ROOT/headers"; }
-# How the provider answers the stream of the browser that last signed in. A
-# request for its headers alone opens no stream.
 signed_in() {
   curl --silent --head --output /dev/null --write-out '%{http_code}' -H "@$TEST_ROOT/headers" \
     "http://127.0.0.1:$((PORT + 4))/api/stream?conversations=1"
