@@ -31,8 +31,8 @@
   );
 
   function pressed(action: Control): void {
-    if (target !== undefined && session.token !== null)
-      void press(target, action, session.token, clock.now);
+    const credential = session.credential;
+    if (target !== undefined && credential !== null) void press(target, action, credential, clock.now);
     focusMessage();
   }
 </script>

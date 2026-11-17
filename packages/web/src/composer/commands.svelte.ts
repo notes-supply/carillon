@@ -1,5 +1,6 @@
 import { SvelteMap } from "svelte/reactivity";
 import { requestCommands } from "../api/commands.ts";
+import type { Credential } from "../api/credential.ts";
 import type { Command } from "../api/requests.ts";
 import type { ConversationKey } from "../api/stream.ts";
 import { addressOf } from "../session/address.ts";
@@ -9,11 +10,14 @@ const NO_COMMANDS: readonly Command[] = [];
 const catalogs = new SvelteMap<string, readonly Command[]>();
 const asked = new Set<string>();
 
-export async function loadCommands(key: ConversationKey, token: string | null): Promise<void> {
+export async function loadCommands(
+  key: ConversationKey,
+  credential: Credential | null,
+): Promise<void> {
   const address = addressOf(key);
-  if (token === null || asked.has(address)) return;
+  if (credential === null || asked.has(address)) return;
   asked.add(address);
-  const commands = await requestCommands(key, token);
+  const commands = await requestCommands(key, credential);
   if (commands === undefined) asked.delete(address);
   else catalogs.set(address, commands);
 }

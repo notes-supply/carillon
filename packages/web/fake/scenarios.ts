@@ -799,6 +799,20 @@ export const scenarios: Record<string, Scenario> = {
     world: planning,
     steps: [{ at: 2000, label: "the password changes", run: (stage) => stage.signOut() }],
   },
+  "signed-out-quietly": {
+    about:
+      "The password changes and the open stream is not told, as for up to ten seconds it may not be. Every request then is refused as signed out.",
+    world: controls,
+    steps: [
+      {
+        at: 2000,
+        label: "the password changes",
+        run: ({ world: held }) => {
+          held.password += 1;
+        },
+      },
+    ],
+  },
   unreadable: {
     about: "The provider sends a message this page's contract does not have, then a snapshot.",
     world: planning,

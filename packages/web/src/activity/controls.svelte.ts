@@ -1,5 +1,6 @@
 import { SvelteMap } from "svelte/reactivity";
 import { requestControl } from "../api/control.ts";
+import type { Credential } from "../api/credential.ts";
 import type { Control, MessageSource } from "../api/stream.ts";
 
 export type Target = { turnId: string; message: MessageSource; waiting: boolean };
@@ -67,12 +68,12 @@ export function offered(target: Target, controls: readonly Control[], now: numbe
 export async function press(
   target: Target,
   action: Control,
-  token: string,
+  credential: Credential,
   now: number,
 ): Promise<void> {
   const asked: Press = { kind: "asked", action, waiting: target.waiting, at: now };
   presses.set(target.turnId, asked);
-  const words = await requestControl(target.message, action, token);
+  const words = await requestControl(target.message, action, credential);
   if (words !== "" && presses.get(target.turnId) === asked)
     presses.set(target.turnId, { kind: "refused", words });
 }

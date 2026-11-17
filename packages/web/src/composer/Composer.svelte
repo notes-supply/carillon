@@ -57,7 +57,7 @@
   function wrote(written: string): void {
     dismissedAt = "";
     write(address, written);
-    if (written.startsWith("/")) void loadCommands(key, session.token);
+    if (written.startsWith("/")) void loadCommands(key, session.credential);
   }
 
   function take(command: Command): void {
@@ -88,7 +88,7 @@
 
   function submitted(event: SubmitEvent): void {
     event.preventDefault();
-    void send(key, session.token, limits);
+    void send(key, session.credential, limits);
   }
 
   function picked(event: Event & { currentTarget: HTMLSelectElement }): void {

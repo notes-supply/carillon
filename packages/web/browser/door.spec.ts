@@ -1,4 +1,19 @@
-import { EPOCH, PASSWORD, arrive, clockAt, expect, rail, test } from "./fixtures.ts";
+import type { Page } from "@playwright/test";
+import {
+  EPOCH,
+  PASSWORD,
+  arrive,
+  atWork,
+  clockAt,
+  expect,
+  message,
+  open,
+  rail,
+  send,
+  test,
+  turns,
+  type Fake,
+} from "./fixtures.ts";
 import { streams, tab } from "./tab.ts";
 
 test.beforeEach(async ({ page, fake }) => {
@@ -143,4 +158,44 @@ test("a browser that cannot store the token still signs in, until the page is lo
   await expect(page.getByRole("link", { name: "Plan the release." })).toBeVisible();
   await page.reload();
   await expect(page.getByLabel("Password")).toBeVisible();
+});
+
+/** Opens the running answer after the password changed, which the open stream was not told. */
+async function signedOutQuietly(page: Page, fake: Fake): Promise<void> {
+  await arrive(page, fake, "signed-out-quietly");
+  await open(page, "Write the long report.");
+  await expect(turns(page)).toHaveCount(2);
+  await fake.step("the password changes");
+}
+
+async function expectDoor(page: Page): Promise<void> {
+  await expect(page.getByRole("status")).toContainText("Sign in with the web chat's password.");
+  await expect(page.getByLabel("Password")).toBeFocused();
+  await expect(rail(page)).toBeHidden();
+}
+
+test("a message refused as signed out shows the door at once, and is in the composer after the sign-in", async ({
+  page,
+  fake,
+}) => {
+  await signedOutQuietly(page, fake);
+  await send(page, "Add the appendix too.");
+  await expectDoor(page);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await open(page, "Write the long report.");
+  await expect(message(page)).toHaveValue("Add the appendix too.");
+  await expect(turns(page)).toHaveCount(2);
+});
+
+test("a control refused as signed out shows the door at once", async ({ page, fake }) => {
+  await signedOutQuietly(page, fake);
+  await atWork(turns(page).nth(0)).getByRole("button", { name: "Stop" }).click();
+  await expectDoor(page);
+});
+
+test("the commands refused as signed out show the door at once", async ({ page, fake }) => {
+  await signedOutQuietly(page, fake);
+  await message(page).pressSequentially("/");
+  await expectDoor(page);
 });

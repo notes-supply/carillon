@@ -1,3 +1,4 @@
+import type { Credential } from "./credential.ts";
 import { ORIGIN } from "./origin.ts";
 import { bearer, messageForm, messagePath, reading, refusalWords } from "./requests.ts";
 import { retryPause } from "./retry.ts";
@@ -60,13 +61,13 @@ async function* each<Value>(stream: ReadableStream<Value>): AsyncGenerator<Value
 
 export async function* deliver(
   message: Outgoing,
-  token: string,
+  credential: Credential,
   signal: AbortSignal,
 ): AsyncGenerator<Sending, void, void> {
   const path = messagePath(message.key, message.eventId);
   for (let failures = 1; ; failures += 1) {
     yield { kind: "uploading", sent: 0, total: 0 };
-    const request = put(path, messageForm(message.text, message.files), token, signal);
+    const request = put(path, messageForm(message.text, message.files), credential.token, signal);
     yield* each(request.leaving);
     const answer = await request.answered;
     const read = reading(answer.status);
@@ -74,6 +75,7 @@ export async function* deliver(
       yield { kind: "received" };
       return;
     }
+    if (read === "signed_out") credential.refused();
     if (signal.aborted) break;
     if (read !== "away") {
       yield { kind: "refused", words: refusalWords(answer.status, answer.body) };

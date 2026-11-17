@@ -1,4 +1,5 @@
 import { AWAY, UNREADABLE } from "../api/requests.ts";
+import type { Credential } from "../api/credential.ts";
 import { requestSignIn } from "../api/sign-in.ts";
 import type { ChatSnapshot, Received } from "../api/stream.ts";
 import { cancelSends, settle } from "../composer/outbox.svelte.ts";
@@ -14,6 +15,10 @@ let seen = $state.raw<Seen>(new Map());
 export const session = {
   get token(): string | null {
     return token;
+  },
+  get credential(): Credential | null {
+    const held = token;
+    return held === null ? null : { token: held, refused: () => signOut(held) };
   },
   get snapshot(): ChatSnapshot | null {
     return snapshot;

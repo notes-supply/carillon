@@ -1,4 +1,5 @@
 import { SvelteMap } from "svelte/reactivity";
+import type { Credential } from "../api/credential.ts";
 import { mintEventId } from "../api/requests.ts";
 import { deliver, type Sending } from "../api/send.ts";
 import type { ConversationKey, Limits, Opened } from "../api/stream.ts";
@@ -99,13 +100,13 @@ export function sentTo(address: string): OnItsWay | Refused | undefined {
 
 export async function send(
   key: ConversationKey,
-  token: string | null,
+  credential: Credential | null,
   limits: Limits,
 ): Promise<void> {
   const address = addressOf(key);
   const text = draftOf(address);
   const files = attachedTo(address);
-  if (token === null || awaitingReceipt(address) !== undefined) return;
+  if (credential === null || awaitingReceipt(address) !== undefined) return;
   if (text.trim() === "" && files.length === 0) return;
   if (overLimit(files, limits) !== undefined) return;
   const message: OnItsWay = {
@@ -121,7 +122,7 @@ export async function send(
   write(address, "");
   for await (const stage of deliver(
     { key, eventId: message.eventId, text, files },
-    token,
+    credential,
     signal,
   )) {
     const waiting = onItsWay(address, message.eventId);

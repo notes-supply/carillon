@@ -30,7 +30,7 @@ To see the page as the provider serves it, run `vite build --watch` beside the f
 
 | Fact | Owner | Changes when |
 |---|---|---|
-| The token | `localStorage`, read through `session/token.ts`, for every tab. `session/session.svelte.ts` holds it as state. | A sign-in stores it and loads the page again, in this tab and in every tab at the door. `signed_out` on the stream drops it only when the refused token is still the stored one. Otherwise the tab goes on with the stored one. |
+| The token | `localStorage`, read through `session/token.ts`, for every tab. `session/session.svelte.ts` holds it as state, and hands it to each request as a `Credential` whose `refused` is its sign-out. | A sign-in stores it and loads the page again, in this tab and in every tab at the door. `signed_out` on the stream, or a request answered 401, drops it only when the refused token is still the stored one. Otherwise the tab goes on with the stored one. |
 | What the server knows | `session.snapshot`, one `$state.raw` value | A snapshot arrives and replaces it |
 | The notice | `session.notice` | `unavailable` or `unreadable` sets it. The next snapshot empties it |
 | What was seen of each conversation | `session.seen`, folded by `rail/unread.ts` | A snapshot arrives, or the address changes |
