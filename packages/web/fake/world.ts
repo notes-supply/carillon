@@ -42,7 +42,6 @@ export type World = {
   turns: number;
   passwordVersion: number;
   available: boolean;
-  window: "kept" | "ignored";
   sending: Sending;
   agents: Agent[];
   limits: Limits;
@@ -61,7 +60,6 @@ export function world(unixSeconds: number): World {
     turns: 0,
     passwordVersion: 1,
     available: true,
-    window: "kept",
     sending: { kind: "accept" },
     agents: [{ id: AGENT, name: "Carillon" }],
     limits: { files: 10, file_bytes: 1024 * 1024 * 1024, message_bytes: 2 * 1024 * 1024 * 1024 },
@@ -113,7 +111,7 @@ export function snapshot(held: World, view: View): ChatSnapshot {
   const latest = held.conversations.toSorted((one, other) => other.activity - one.activity);
   const open = view.open;
   const recorded = open === null ? undefined : find(held, open.key);
-  const shown = held.window === "ignored" ? Infinity : (open?.turns ?? 0);
+  const shown = open?.turns ?? 0;
   return {
     agents: held.agents,
     limits: held.limits,

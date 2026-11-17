@@ -474,14 +474,13 @@ const TALL = Array.from(
     `<p>Paragraph ${String(line + 1)} of a long answer, long enough that one turn is taller than the window it is read in.</p>`,
 ).join("\n");
 
-function large(now: number, window: World["window"]): World {
+function large(now: number): World {
   const held = many(
     now,
     499,
     (n) =>
       `<p>Answer ${String(n)} has a list and some code.</p>\n<ul>\n<li>One</li>\n<li>Two</li>\n</ul>\n<pre><code>step ${String(n)}\n</code></pre>\n`,
   );
-  held.window = window;
   ago(held, 5, () => {
     run(message(held, 1, "Message 500").turn, { ...IDLE, headline: "Tick 0" }, ["stop"]);
   });
@@ -855,13 +854,7 @@ export const scenarios: Record<string, Scenario> = {
   large: {
     about:
       "One conversation of 500 turns, the newest running. Each of 240 steps changes that one turn.",
-    world: (now) => large(now, "kept"),
-    steps: ticks,
-  },
-  "large-all": {
-    about:
-      "The large conversation, sent whole whatever window the view asks for: a measuring device, not what a provider does.",
-    world: (now) => large(now, "ignored"),
+    world: large,
     steps: ticks,
   },
 };
