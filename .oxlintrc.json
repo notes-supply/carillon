@@ -373,7 +373,7 @@
       }
     },
     {
-      "files": ["packages/web/src/session/token.ts", "packages/web/src/composer/draft.ts"],
+      "files": ["packages/web/src/session/token.ts"],
       "rules": {
         "eslint/no-restricted-globals": [
           "error",
@@ -384,6 +384,94 @@
           {
             "name": "window",
             "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "globalThis",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "self",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "location",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "history",
+            "message": "The route module reads and writes the address."
+          },
+          {
+            "name": "navigator",
+            "message": "Reach the browser through the module that owns that part of it."
+          },
+          {
+            "name": "fetch",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "EventSource",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "WebSocket",
+            "message": "Requests are made in src/api."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "indexedDB",
+            "message": "Storage is read and written in the module that owns the stored thing."
+          },
+          {
+            "name": "setTimeout",
+            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
+          },
+          {
+            "name": "setInterval",
+            "message": "A timer belongs to src/time."
+          },
+          {
+            "name": "requestAnimationFrame",
+            "message": "A frame callback belongs to a wrapper module that touches an element."
+          },
+          {
+            "name": "requestIdleCallback",
+            "message": "A timer belongs to src/time."
+          },
+          {
+            "name": "queueMicrotask",
+            "message": "A timer belongs to src/time."
+          },
+          {
+            "name": "Date",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "performance",
+            "message": "The clock in src/time says what time it is."
+          },
+          {
+            "name": "JSON",
+            "message": "Text becomes data once, in src/api, where it is checked."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/web/src/composer/draft.ts"],
+      "rules": {
+        "eslint/no-restricted-globals": [
+          "error",
+          {
+            "name": "document",
+            "message": "The framework draws the page."
           },
           {
             "name": "globalThis",

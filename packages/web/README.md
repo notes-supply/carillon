@@ -56,7 +56,8 @@ The modules that may reach outside the page's state are a short list, written in
 - `followView` in `session/route.svelte.ts` is the page's one `$effect`. It keeps one stream open for the view, which is the address and the window of turns, and aborts it when either changes.
 - `followEnd` in `transcript/follow-end.svelte.ts` is an attachment on the element that scrolls. A `ResizeObserver` tells it the content changed, and a `scroll` listener tells it whether the person is still at the end.
 - `focusedWhen` in `session/focus.svelte.ts` is an attachment that focuses the password field whenever the door waits for a password. The composer uses it for the message field, which each conversation gets anew, when `composer/desktop.ts` says the window is as wide as a desktop's.
-- `composer/Composer.svelte` listens on `<svelte:window>` for `storage`, to store again what another tab cleared, and on `<svelte:document>` for a dropped file. Svelte adds and removes those listeners with the component.
+- `whenClearedElsewhere` in `composer/draft.ts` listens for `storage`, so that what another tab cleared is stored again. `composer/outbox.svelte.ts` calls it once.
+- `takesDrops` in `composer/drop.svelte.ts` is an attachment on the composer that takes a file dropped anywhere on the page, and stops listening when the composer goes.
 - `api/send.ts` sends a message with the page's one `XMLHttpRequest`, the only request that reports its upload. It turns the request's events into a stream of stages, and aborts the request when the signal it was given does.
 - `clock` subscribes to a one-second interval with `createSubscriber`, so the interval runs only while something on the page reads the time.
 

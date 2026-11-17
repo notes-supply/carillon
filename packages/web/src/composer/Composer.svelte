@@ -10,6 +10,7 @@
   import Commands from "./Commands.svelte";
   import { loadCommands, offered } from "./commands.svelte.ts";
   import { onDesktop } from "./desktop.ts";
+  import { takesDrops } from "./drop.svelte.ts";
   import { overLimit } from "./limits.ts";
   import {
     attach,
@@ -20,7 +21,6 @@
     draftOf,
     send,
     sentTo,
-    storedElsewhere,
     write,
   } from "./outbox.svelte.ts";
 
@@ -107,17 +107,9 @@
     if (carried.length > 0) event.preventDefault();
     attach(address, carried);
   }
-
-  function dropped(event: DragEvent): void {
-    event.preventDefault();
-    attach(address, [...(event.dataTransfer?.files ?? [])]);
-  }
 </script>
 
-<svelte:window onstorage={storedElsewhere} />
-<svelte:document ondragover={(event) => event.preventDefault()} ondrop={dropped} />
-
-<div class="composer-edge">
+<div class="composer-edge" {@attach takesDrops((dropped) => attach(address, dropped))}>
   <div class="column">
     <p class="error" role="alert" hidden={refusal === ""}>
       <Words text={refusal} />

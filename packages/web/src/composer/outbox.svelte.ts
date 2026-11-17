@@ -3,7 +3,7 @@ import { mintEventId } from "../api/requests.ts";
 import { deliver, type Sending } from "../api/send.ts";
 import type { ConversationKey, Limits, Opened } from "../api/stream.ts";
 import { addressOf } from "../session/address.ts";
-import { addressOfDraft, storeDraft, storedDraft } from "./draft.ts";
+import { storeDraft, storedDraft, whenClearedElsewhere } from "./draft.ts";
 import { overLimit } from "./limits.ts";
 
 export type OnItsWay = {
@@ -63,10 +63,9 @@ export function write(address: string, text: string): void {
   store(address);
 }
 
-export function storedElsewhere(event: StorageEvent): void {
-  const address = addressOfDraft(event.key);
-  if (address !== undefined && event.newValue === null && written.has(address)) store(address);
-}
+whenClearedElsewhere((address) => {
+  if (written.has(address)) store(address);
+});
 
 export function attachedTo(address: string): readonly File[] {
   return attached.get(address) ?? NO_FILES;

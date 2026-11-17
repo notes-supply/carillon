@@ -8,7 +8,7 @@ function attempted<Value>(use: () => Value): Value | undefined {
   }
 }
 
-export function addressOfDraft(stored: string | null): string | undefined {
+function addressOfDraft(stored: string | null): string | undefined {
   return stored?.startsWith(PREFIX) === true ? stored.slice(PREFIX.length) : undefined;
 }
 
@@ -23,4 +23,11 @@ export function storeDraft(address: string, text: string): void {
     return text !== "";
   });
   if (kept !== true) attempted(() => localStorage.removeItem(stored));
+}
+
+export function whenClearedElsewhere(cleared: (address: string) => void): void {
+  window.addEventListener("storage", ({ key, newValue }) => {
+    const address = addressOfDraft(key);
+    if (address !== undefined && newValue === null) cleared(address);
+  });
 }
