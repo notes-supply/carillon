@@ -253,9 +253,10 @@ in `providers/<id>.toml`, such as `tailscale serve`'s. Setup registers it as `we
 `delivery = "retained"` and `max_upload_mib = 1024`. It refuses to serve an
 entry with any other delivery, whose answers would wait for a claim it
 never makes.
-It keeps no conversation. The page is plain files with no build step, read
-from disk on each request. The provider shows it one stream of complete
-snapshots, each made from one of core's snapshots of the page's view: the
+It keeps no conversation. The page is a Svelte page, `packages/web`, built to
+one folder of files that is read from disk on each request. The provider
+shows it one stream of complete snapshots, each made from one of core's
+snapshots of the page's view: the
 configured agents and core's limits on a message's files, the conversations,
 and the open conversation's turns. The page replaces what it had with each
 one. The provider opens core's stream once for each stream of the page's,
@@ -552,8 +553,8 @@ authority.
 ## Packaging
 
 `scripts/package-release.sh` builds one archive per Linux host architecture:
-the Rust programs for the host target, the web chat's page as the files it
-is written in (`lib/web`), the Discord module and the
+the Rust programs for the host target, the web chat's page as Vite builds it
+(`lib/web`), the Discord module and the
 card-colours example module for `wasm32-unknown-unknown`, the runtimes
 compiled with Bun, the systemd units,
 and `licenses/` with Carillon's licence and notices for the Rust crates, npm

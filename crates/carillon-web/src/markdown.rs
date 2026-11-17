@@ -185,7 +185,7 @@ mod tests {
             "[run](JaVaScRiPt:alert(1))",
             "[data](data:text/html,<script>alert(1)</script>)",
             "[file](file:///etc/passwd)",
-            "[relative](/api/session)",
+            "[relative](/api/stream)",
             "[other](//evil.example/x)",
             "![pixel](javascript:alert(1))",
             "<javascript:alert(1)>",
