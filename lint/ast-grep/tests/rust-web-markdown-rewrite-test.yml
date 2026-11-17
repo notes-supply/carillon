@@ -3,8 +3,12 @@ valid:
   - "fn cell(heading: bool) -> &'static str { if heading { \"<th>\" } else { \"<td>\" } }"
   - "fn anchor(url: &str) -> String { let mut tag = String::from(\"<a href=\\\"\"); tag.push_str(url); tag }"
   - "fn written(event: Event<'_>) -> Event<'_> { std::mem::replace(&mut held, event) }"
+  - "fn written(event: Event<'_>) -> Event<'_> { mem::replace(&mut held, event) }"
 invalid:
   - "fn render(rendered: String) -> String { rendered.replace(\"<a href=\", \"<a target=\\\"_blank\\\" href=\") }"
   - "fn render(rendered: String) -> String { rendered.replace(\"<th style=\\\"text-align: \", \"<th class=\\\"align-\") }"
   - "fn render(rendered: &str) -> String { html(rendered).replacen(\"<td style=\", \"<td class=\", 1) }"
   - "fn render(rendered: &mut String) { rendered.replace_range(..4, \"<td>\"); }"
+  - "fn render(rendered: &str, pattern: &Regex) -> String { pattern.replace_all(rendered, \"<td>\").into_owned() }"
+  - "fn render(rendered: &str) -> String { str::replace(rendered, \"<a \", \"<a rel=\\\"noopener\\\" \") }"
+  - "fn render(rendered: &str) -> String { str::replacen(rendered, \"<a \", \"<a rel=\\\"noopener\\\" \", 1) }"

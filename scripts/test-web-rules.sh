@@ -2,11 +2,12 @@
 # Proves what `ast-grep test` cannot. A rule test gives a rule one snippet with
 # no path, so it says nothing of a rule that is only a path, of the list of
 # modules a rule lets through, or of a TypeScript rule reading a component's
-# script. This scans a small page under the repository's own sgconfig.yml and
-# rules and compares every finding with the list below. It then scans the real
-# page with the `ignores` of the rules in web-outside.yml left out, so that each
-# module those rules let through is one that needs it, and the README's table
-# of them names the same modules.
+# script. This scans a small page, and two files of the web provider's crate,
+# under the repository's own sgconfig.yml and rules, and compares every finding
+# with the list below. It then scans the real page with the `ignores` of the
+# rules in web-outside.yml left out, so that each module those rules let
+# through is one that needs it, and the README's table of them names the same
+# modules.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -21,19 +22,26 @@ cp "$ROOT/sgconfig.yml" "$REAL/"
 cp -R "$ROOT/lint/ast-grep" "$PAGE/lint/"
 cp -R "$ROOT/packages/web/src" "$REAL/packages/web/"
 SRC=$PAGE/packages/web/src
+CRATE=$PAGE/crates/carillon-web/src
 WRAPPERS=web-outside.yml
 
-# `file rule` for each finding in the tree $1, from ast-grep's
+# `file rule` for each finding in the tree $1, with a file of the page named
+# from packages/web/src, from ast-grep's
 # `file:line:column: severity[rule]: message` lines.
 findings() {
   (cd "$1" && ast-grep scan --report-style short 2>/dev/null) |
-    sed -n 's|^packages/web/src/\([^:]*\):[0-9]*:[0-9]*: [a-z]*\[\([a-z-]*\)\]: .*$|\1 \2|p' |
+    sed -n 's|^\(packages/web/src/\)\{0,1\}\([^:]*\):[0-9]*:[0-9]*: [a-z]*\[\([a-z-]*\)\]: .*$|\2 \3|p' |
     LC_ALL=C sort -u
 }
 
 page() {
   mkdir -p "$(dirname -- "$SRC/$1")"
   cat >"$SRC/$1"
+}
+
+crate() {
+  mkdir -p "$(dirname -- "$CRATE/$1")"
+  cat >"$CRATE/$1"
 }
 
 page main.ts <<'FILE'
@@ -154,7 +162,19 @@ page rail/Reach.svelte <<'FILE'
 <button onclick={() => addEventListener("focus", () => (shown = 0))}>{shown}</button>
 FILE
 
+crate markdown/links.rs <<'FILE'
+pub fn rewrite(html: String) -> String {
+    html.replace("<a ", "<a rel=\"noopener\" ")
+}
+FILE
+crate send.rs <<'FILE'
+pub fn unquoted(name: &str) -> String {
+    name.replace("%22", "\"")
+}
+FILE
+
 cat >"$TEST_ROOT/expected" <<'FINDINGS'
+crates/carillon-web/src/markdown/links.rs rust-web-markdown-rewrite
 rail/Reach.svelte web-deferred
 rail/Reach.svelte web-interval
 rail/Reach.svelte web-markup-outside

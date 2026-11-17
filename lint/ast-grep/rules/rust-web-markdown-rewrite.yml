@@ -5,9 +5,15 @@ message: An answer's HTML is written once, tag by tag, and never rewritten.
 note: Write the tag in `Tags::written` while it walks the parser's events, as an `Html` event. A replacement on rendered HTML also rewrites what a person wrote that happens to look like the tag.
 files:
   - crates/carillon-web/src/markdown.rs
+  - crates/carillon-web/src/markdown/**
 rule:
   kind: call_expression
   has:
     field: function
-    kind: field_expression
-    has: { field: field, regex: "^replace(n|_range)?$" }
+    any:
+      - kind: field_expression
+        has: { field: field, regex: "^replace(n|_all|_range)?$" }
+      - kind: scoped_identifier
+        has: { field: name, regex: "^replace(n|_all|_range)?$" }
+        not:
+          has: { field: path, regex: "(^|::)mem$" }
