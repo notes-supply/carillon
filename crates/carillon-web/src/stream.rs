@@ -1,7 +1,8 @@
 //! `GET /api/stream`: what the page's view shows, as a stream of complete
 //! snapshots, and the page's one source of what the server knows. Each
-//! event is one message. The first is a snapshot or `unavailable`, and
-//! another snapshot follows whenever what the view shows has changed.
+//! event is one message. The first is a snapshot, `unavailable` or
+//! `signed_out`, and another snapshot follows whenever what the view shows
+//! has changed.
 //!
 //! How a stream ends says what the page does next. After `unavailable` it
 //! waits and opens another, and after `signed_out` it asks for the
