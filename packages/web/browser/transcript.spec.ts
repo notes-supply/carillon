@@ -178,7 +178,7 @@ test("what a turn did is folded behind its ending, and stays unfolded while anot
   await expect(answered.getByText("git log -5")).toBeVisible();
 });
 
-test("the transcript follows its end, and stays where a person scrolled to", async ({
+test("the transcript follows its end, and stays where a person scrolled to two frames after a turn arrives", async ({
   page,
   fake,
 }) => {
@@ -193,7 +193,6 @@ test("the transcript follows its end, and stays where a person scrolled to", asy
   await expect(turns(page).first().getByText("Message 1", { exact: true })).toBeInViewport();
   await fake.step("a second turn arrives");
   await expect(page.getByText("Second arrival.")).toBeAttached();
-  // Two frames, so a page that wrongly scrolls after it draws has done so before the check.
   await page.evaluate(
     "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
   );
@@ -268,7 +267,7 @@ test("a newest turn taller than the window shows from its top", async ({ page, f
   await expect(newest.getByText("Paragraph 12 of a long answer")).not.toBeInViewport();
 });
 
-test("a person reading inside a tall newest turn stays there when another turn arrives", async ({
+test("a person reading inside a tall newest turn stays there two frames after another turn arrives", async ({
   page,
   fake,
 }) => {
