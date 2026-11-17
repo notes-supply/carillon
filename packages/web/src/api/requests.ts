@@ -11,7 +11,7 @@ import {
 } from "./stream.ts";
 
 export const WINDOW_START = 50;
-export const WINDOW_STEP = 50;
+const WINDOW_STEP = 50;
 
 const Window = Type.Integer({ minimum: 1, maximum: WINDOW_LIMIT });
 
@@ -101,15 +101,13 @@ export const SignedInSchema = Type.Object(
   { token: Type.String({ minLength: 1 }) },
   { additionalProperties: false },
 );
-export type SignedIn = Static<typeof SignedInSchema>;
 
 export const SentSchema = Type.Object(
   { turn_id: Type.String({ minLength: 1 }), duplicate: Type.Boolean() },
   { additionalProperties: false },
 );
-export type Sent = Static<typeof SentSchema>;
 
-export const CommandSchema = Type.Object(
+const CommandSchema = Type.Object(
   {
     name: Type.String({ minLength: 1, maxLength: 100 }),
     description: Type.Optional(Type.String({ minLength: 1 })),
@@ -123,7 +121,6 @@ export const CommandCatalogSchema = Type.Object(
   { commands: Type.Array(CommandSchema) },
   { additionalProperties: false },
 );
-export type CommandCatalog = Static<typeof CommandCatalogSchema>;
 
 export function readAnswer<Schema extends TSchema>(
   schema: Schema,

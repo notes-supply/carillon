@@ -9,12 +9,7 @@
       "entry": ["src/crash-worker.ts"]
     },
     "packages/web": {
-      "entry": [
-        "src/api/stream.ts",
-        "src/api/requests.ts",
-        "src/activity/ledger.ts",
-        "fake/main.ts"
-      ],
+      "entry": ["fake/main.ts"],
       "project": ["src/**", "fake/**", "browser/**"],
       "playwright": {
         "config": ["browser/playwright.config.ts"],

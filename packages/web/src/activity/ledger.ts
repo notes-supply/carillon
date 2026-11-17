@@ -1,7 +1,7 @@
 import type { Activity, ActivityPhase, FinishedTool, Progress, WorkItem } from "../api/stream.ts";
 import { span } from "../time/words.ts";
 
-export type Mark = "past" | "done" | "failed" | "running" | "waiting";
+type Mark = "past" | "done" | "failed" | "running" | "waiting";
 export type Line = { mark: Mark; name: string; detail: string; time: string };
 export type Ledger = {
   phase: string;

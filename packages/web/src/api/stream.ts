@@ -16,10 +16,10 @@ const Count = Type.Integer({ minimum: 0 });
 const Words = Type.String({ minLength: 1 });
 const Present = Type.Optional(Type.Literal(true));
 
-export const AgentSchema = closed({ id: Words, name: Words });
+const AgentSchema = closed({ id: Words, name: Words });
 export type Agent = Static<typeof AgentSchema>;
 
-export const LimitsSchema = closed({
+const LimitsSchema = closed({
   files: Count,
   file_bytes: Count,
   message_bytes: Count,
@@ -32,7 +32,7 @@ export const ConversationKeySchema = closed({
 });
 export type ConversationKey = Static<typeof ConversationKeySchema>;
 
-export const ConversationSchema = closed({
+const ConversationSchema = closed({
   key: ConversationKeySchema,
   title: Type.String(),
   started_at: UnixSeconds,
@@ -42,7 +42,7 @@ export const ConversationSchema = closed({
 });
 export type Conversation = Static<typeof ConversationSchema>;
 
-export const FileLinkSchema = closed({
+const FileLinkSchema = closed({
   name: Words,
   size: Count,
   type: Type.Union([
@@ -56,7 +56,7 @@ export const FileLinkSchema = closed({
 });
 export type FileLink = Static<typeof FileLinkSchema>;
 
-export const MessageSourceSchema = closed({
+const MessageSourceSchema = closed({
   kind: Type.Literal("message"),
   event_id: Type.String({ pattern: EVENT_ID_PATTERN }),
   text: Type.String(),
@@ -65,13 +65,12 @@ export const MessageSourceSchema = closed({
 });
 export type MessageSource = Static<typeof MessageSourceSchema>;
 
-export const OpenedSourceSchema = closed({
+const OpenedSourceSchema = closed({
   kind: Type.Literal("opened"),
   label: Type.Optional(Words),
 });
-export type OpenedSource = Static<typeof OpenedSourceSchema>;
 
-export const ActivityPhaseSchema = Type.Union([
+const ActivityPhaseSchema = Type.Union([
   Type.Literal("starting"),
   Type.Literal("queued"),
   Type.Literal("model"),
@@ -82,15 +81,14 @@ export const ActivityPhaseSchema = Type.Union([
 ]);
 export type ActivityPhase = Static<typeof ActivityPhaseSchema>;
 
-export const RunningToolSchema = closed({
+const RunningToolSchema = closed({
   tool: Words,
   detail: Type.Optional(Words),
   started_at: UnixSeconds,
   estimated: Present,
 });
-export type RunningTool = Static<typeof RunningToolSchema>;
 
-export const FinishedToolSchema = closed({
+const FinishedToolSchema = closed({
   tool: Words,
   detail: Type.Optional(Words),
   ok: Type.Boolean(),
@@ -98,7 +96,7 @@ export const FinishedToolSchema = closed({
 });
 export type FinishedTool = Static<typeof FinishedToolSchema>;
 
-export const WorkItemSchema = closed({
+const WorkItemSchema = closed({
   id: Words,
   kind: Type.Union([
     Type.Literal("task"),
@@ -124,21 +122,19 @@ export const WorkItemSchema = closed({
 });
 export type WorkItem = Static<typeof WorkItemSchema>;
 
-export const WorkSchema = closed({
+const WorkSchema = closed({
   items: Type.Array(WorkItemSchema, { maxItems: 16 }),
   partial: Type.Boolean(),
   omitted: Type.Optional(Type.Integer({ minimum: 1 })),
 });
-export type Work = Static<typeof WorkSchema>;
 
-export const AgentInfoSchema = closed({
+const AgentInfoSchema = closed({
   model: Type.Optional(Words),
   effort: Type.Optional(Words),
   context: Type.Optional(closed({ used: Count, window: Type.Optional(Count) })),
 });
-export type AgentInfo = Static<typeof AgentInfoSchema>;
 
-export const ActivitySchema = closed({
+const ActivitySchema = closed({
   phase: ActivityPhaseSchema,
   headline: Type.Optional(Words),
   running: Type.Array(RunningToolSchema),
@@ -158,7 +154,7 @@ export const ControlSchema = Type.Union([
 ]);
 export type Control = Static<typeof ControlSchema>;
 
-export const EndingSchema = Type.Union([
+const EndingSchema = Type.Union([
   closed({
     kind: Type.Literal("answered"),
     html: Type.String(),
@@ -170,7 +166,7 @@ export const EndingSchema = Type.Union([
 ]);
 export type Ending = Static<typeof EndingSchema>;
 
-export const ProgressSchema = Type.Union([
+const ProgressSchema = Type.Union([
   closed({ state: Type.Literal("queued") }),
   closed({
     state: Type.Literal("running"),
@@ -186,7 +182,7 @@ export const ProgressSchema = Type.Union([
 ]);
 export type Progress = Static<typeof ProgressSchema>;
 
-export const TurnSchema = closed({
+const TurnSchema = closed({
   turn_id: Words,
   source: Type.Union([MessageSourceSchema, OpenedSourceSchema]),
   accepted_at: UnixSeconds,
@@ -194,7 +190,7 @@ export const TurnSchema = closed({
 });
 export type Turn = Static<typeof TurnSchema>;
 
-export const OpenedSchema = Type.Union([
+const OpenedSchema = Type.Union([
   closed({ kind: Type.Literal("unrecorded"), key: ConversationKeySchema }),
   closed({
     kind: Type.Literal("recorded"),
@@ -205,7 +201,7 @@ export const OpenedSchema = Type.Union([
 ]);
 export type Opened = Static<typeof OpenedSchema>;
 
-export const ChatSnapshotSchema = closed({
+const ChatSnapshotSchema = closed({
   agents: Type.Array(AgentSchema),
   limits: LimitsSchema,
   custom_site: Type.Boolean(),
@@ -215,7 +211,7 @@ export const ChatSnapshotSchema = closed({
 });
 export type ChatSnapshot = Static<typeof ChatSnapshotSchema>;
 
-export const StreamMessageSchema = Type.Union([
+const StreamMessageSchema = Type.Union([
   closed({ kind: Type.Literal("snapshot"), snapshot: ChatSnapshotSchema }),
   closed({ kind: Type.Literal("unavailable") }),
   closed({ kind: Type.Literal("signed_out") }),
