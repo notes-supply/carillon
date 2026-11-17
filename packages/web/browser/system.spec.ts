@@ -51,3 +51,17 @@ test("the marks of work move, and keep still when the system asks for less motio
   await expect(mark).toHaveCSS("animation-name", "none");
   await expect(ring).toHaveCSS("animation-name", "none");
 });
+
+test("the marks of a conversation at work strike one after another, half a strike apart", async ({
+  page,
+  fake,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await arrive(page, fake, "rail");
+  const marks = conversation(page, "Chart last week's numbers.")
+    .getByRole("img", { name: "At work" })
+    .locator("i");
+  await expect(marks.nth(0)).toHaveCSS("animation-delay", "0s");
+  await expect(marks.nth(1)).toHaveCSS("animation-delay", "-0.55s");
+  await expect(marks.nth(2)).toHaveCSS("animation-delay", "-1.1s");
+});

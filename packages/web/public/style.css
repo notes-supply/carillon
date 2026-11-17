@@ -549,6 +549,15 @@ a.file:hover {
   .mark.running {
     animation: strike 1100ms ease-in-out infinite alternate;
   }
+  .mark.running:nth-child(4n + 2) {
+    animation-delay: -550ms;
+  }
+  .mark.running:nth-child(4n + 3) {
+    animation-delay: -1100ms;
+  }
+  .mark.running:nth-child(4n) {
+    animation-delay: -1650ms;
+  }
   .mark.sounding {
     animation: sound 1800ms ease-out infinite;
   }
