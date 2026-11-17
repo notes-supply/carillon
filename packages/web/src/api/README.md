@@ -21,7 +21,7 @@ Each event is one `data` line of JSON, one of three messages:
 | `unavailable` | The provider is here and core is not.                     | The stream ends. |
 | `signed_out`  | The password changed. The token is void.                  | The stream ends. |
 
-The first event is a `snapshot` or `unavailable`. The provider sends a snapshot only when it differs from the last one it sent on that stream. A comment line every 10 s keeps the connection open. The provider ends every stream at UTC midnight, so the next one carries file links that work for another day.
+The first event is a `snapshot`, `unavailable` or `signed_out`, and a stream whose UTC day ends before its first snapshot is ready ends with none. The provider sends a snapshot only when it differs from the last one it sent on that stream. A comment line every 10 s keeps the connection open. The provider ends every stream at UTC midnight, so the next one carries file links that work for another day.
 
 `streamMessages(response.body)` yields each message as `Received`, which adds `{ kind: "unreadable" }` for an event the schema refuses. To stop reading, abort the request.
 
