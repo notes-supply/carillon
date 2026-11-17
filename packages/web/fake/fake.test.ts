@@ -5,7 +5,6 @@ import { afterAll, expect, test } from "vitest";
 import {
   CommandCatalogSchema,
   SIGN_IN_PATH,
-  SentSchema,
   SignedInSchema,
   bearer,
   commandsPath,
@@ -174,24 +173,26 @@ function eventId(n: number): string {
   return `m-${audience(900_000 + n)}`;
 }
 
-async function send(run: Run, conversation: ConversationKey, n: number, text: string) {
-  const answer = await ask(
-    run,
-    "PUT",
-    messagePath(conversation, eventId(n)),
-    messageForm(text, []),
+async function send(
+  run: Run,
+  conversation: ConversationKey,
+  n: number,
+  text: string,
+): Promise<void> {
+  await ask(run, "PUT", messagePath(conversation, eventId(n)), messageForm(text, []));
+}
+
+function messagesOf(run: Run, text: string): MessageSource[] {
+  const open = run.last?.open;
+  const turns = open?.kind === "recorded" ? open.turns : [];
+  return turns.flatMap(({ source }) =>
+    source.kind === "message" && source.text === text ? [source] : [],
   );
-  return readAnswer(SentSchema, answer);
 }
 
 function messageOf(run: Run, text: string): MessageSource {
-  const open = run.last?.open;
-  const turns = open?.kind === "recorded" ? open.turns : [];
-  const source = turns
-    .map((turn) => turn.source)
-    .find((each) => each.kind === "message" && each.text === text);
-  if (source?.kind !== "message")
-    throw new Error(`the open conversation lacks the message ${text}`);
+  const [source] = messagesOf(run, text);
+  if (source === undefined) throw new Error(`the open conversation lacks the message ${text}`);
   return source;
 }
 
@@ -281,13 +282,16 @@ const scripts: Record<string, (run: Run) => Promise<void>> = {
   },
   async "send-lost-receipt"(run) {
     await arrive(run);
-    expect(await send(run, key(1), 1, "Write the release notes.")).toBe(undefined);
+    await send(run, key(1), 1, "Write the release notes.");
     await watch(run, opening(key(1)));
     await send(run, key(1), 1, "Write the release notes.");
     await rest(run);
     await watch(run, opening(key(1)));
-    const receipt = await send(run, key(1), 1, "Write the release notes.");
-    expect(receipt?.duplicate, "the same event ID is answered as a duplicate").toBe(true);
+    await send(run, key(1), 1, "Write the release notes.");
+    expect(
+      messagesOf(run, "Write the release notes."),
+      "the same event ID is one turn",
+    ).toHaveLength(1);
   },
   async "send-held"(run) {
     await arrive(run);

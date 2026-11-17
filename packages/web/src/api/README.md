@@ -70,14 +70,14 @@ A `FileLink` is `{ name, size, type, url }`. `type` is `image/png`, `image/jpeg`
 | ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
 | `POST /api/sign-in`             | `signInBody(password)`                                                        | 200 `SignedInSchema`, 401 with the reason          |
 | `GET streamPath(view)`          |                                                                               | 200 event stream, 400, 401                         |
-| `PUT messagePath(key, eventId)` | `messageForm(text, files)`: one `text` part, then a `file` part for each file | 200 `SentSchema`, 400, 413, 422, 503, 507          |
+| `PUT messagePath(key, eventId)` | `messageForm(text, files)`: one `text` part, then a `file` part for each file | 200, 400, 413, 422, 503, 507                       |
 | `POST controlPath(message)`     | `controlBody(action)`                                                         | 204, 404, 409, 503                                 |
 | `GET commandsPath(key)`         |                                                                               | 200 `CommandCatalogSchema`, 422, 503               |
 | `GET <FileLink.url>`            |                                                                               | The file's bytes, 403 for a link that is void, 404 |
 
 Every request but the sign-in and a file link carries `Authorization: bearer(token)`. A JSON body goes with `Content-Type: application/json`, and the provider answers 415 to one without it.
 
-- `mintEventId()` names a message before its first attempt. Every retry sends the same ID, and core answers a repeat with the first receipt and `duplicate: true`.
+- `mintEventId()` names a message before its first attempt. Every retry sends the same ID, and core takes a repeat as the first message, so a retry never makes a second turn. A 2xx is the message's receipt, and the page does not read its body.
 - `mintAudienceId()` names a new conversation.
 - A send reports upload progress only through `XMLHttpRequest.upload`. `fetch` cannot.
 - `readAnswer(schema, body)` reads a 2xx body, and is `undefined` for a body the schema refuses.

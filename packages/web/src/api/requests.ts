@@ -102,11 +102,6 @@ export const SignedInSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const SentSchema = Type.Object(
-  { turn_id: Type.String({ minLength: 1 }), duplicate: Type.Boolean() },
-  { additionalProperties: false },
-);
-
 const CommandSchema = Type.Object(
   {
     name: Type.String({ minLength: 1, maxLength: 100 }),

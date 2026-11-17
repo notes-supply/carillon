@@ -3,7 +3,6 @@ import {
   AWAY,
   CommandCatalogSchema,
   SIGNED_OUT,
-  SentSchema,
   SignedInSchema,
   controlBody,
   controlPath,
@@ -83,12 +82,6 @@ test("a sign-in's body is the password as typed", () => {
 test("an answer is read only in the shape its route gives", () => {
   expect(readAnswer(SignedInSchema, '{"token":"9f2c"}')).toStrictEqual({ token: "9f2c" });
   expect(readAnswer(SignedInSchema, '{"token":""}')).toBe(undefined);
-  expect(readAnswer(SentSchema, '{"turn_id":"t1","duplicate":true}')).toStrictEqual({
-    turn_id: "t1",
-    duplicate: true,
-  });
-  expect(readAnswer(SentSchema, '{"turn_id":"t1"}')).toBe(undefined);
-  expect(readAnswer(SentSchema, "<html>")).toBe(undefined);
   expect(
     readAnswer(CommandCatalogSchema, '{"commands":[{"name":"status","hint":"[job]"}]}'),
   ).toStrictEqual({ commands: [{ name: "status", hint: "[job]" }] });
