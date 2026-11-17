@@ -38,7 +38,6 @@ use crate::{
     snapshot::ChatSnapshot,
 };
 
-/// One event's data.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Message<'a> {
@@ -220,7 +219,6 @@ impl Shown {
         })
     }
 
-    /// `message` as the stream's last event.
     fn last(&mut self, message: &Message<'_>) -> serde_json::Result<Event> {
         self.stage = Stage::Over;
         Ok(Event::default().data(written(message)?))

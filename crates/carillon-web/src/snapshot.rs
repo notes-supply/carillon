@@ -129,7 +129,6 @@ enum Source {
     },
 }
 
-/// How far a turn has come.
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum Progress {
@@ -162,7 +161,6 @@ enum Ending {
     },
     /// The message went into a turn already running, whose answer covers it.
     Steered,
-    /// Someone stopped it.
     Stopped,
 }
 
