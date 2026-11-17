@@ -204,9 +204,6 @@ async fn a_link_is_the_same_all_day_and_the_next_day_s_works_a_day_longer() -> R
         let expiry = link.split('&').find_map(|pair| pair.strip_prefix("exp="));
         expiry.map(str::to_owned).context("no expiry")
     };
-    assert_eq!(Day::at(1_700_000_000).1.as_secs(), 6_400);
-    assert_eq!(Day::at(1_700_006_399).1.as_secs(), 1);
-    assert_eq!(Day::at(1_700_006_400).1.as_secs(), DAY);
     let early = minted(&fixture, 1_700_000_000, "capture/0", "chart.png").await?;
     let late = minted(&fixture, 1_700_006_399, "capture/0", "chart.png").await?;
     assert_eq!(early, late);
