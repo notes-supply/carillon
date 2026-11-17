@@ -127,26 +127,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "Date",
             "message": "The clock in src/time says what time it is."
           },
@@ -176,12 +156,7 @@
                   "flushSync",
                   "createEventDispatcher"
                 ],
-                "message": "Lifecycle and scheduling calls live in the wrapper modules. A component uses what they export."
-              },
-              {
-                "name": "svelte/reactivity",
-                "importNames": ["createSubscriber"],
-                "message": "A subscription to something outside the page's state lives in a wrapper module."
+                "message": "The page makes no lifecycle or scheduling call. What reaches outside its state is an attachment or a subscription in a module the rules in lint/ast-grep/rules/web-outside.yml let through."
               },
               {
                 "name": "svelte/store",
@@ -258,26 +233,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "Date",
             "message": "The clock in src/time says what time it is."
           },
@@ -344,22 +299,6 @@
           {
             "name": "indexedDB",
             "message": "Storage is read and written in the module that owns the stored thing."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
           },
           {
             "name": "Date",
@@ -430,26 +369,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "Date",
             "message": "The clock in src/time says what time it is."
           },
@@ -518,26 +437,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "Date",
             "message": "The clock in src/time says what time it is."
           },
@@ -598,26 +497,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "Date",
             "message": "The clock in src/time says what time it is."
           },
@@ -629,8 +508,7 @@
             "name": "JSON",
             "message": "Text becomes data once, in src/api, where it is checked."
           }
-        ],
-        "eslint/no-restricted-imports": "off"
+        ]
       }
     },
     {
@@ -695,18 +573,6 @@
             "message": "Storage is read and written in the module that owns the stored thing."
           },
           {
-            "name": "requestAnimationFrame",
-            "message": "A frame callback belongs to a wrapper module that touches an element."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
             "name": "performance",
             "message": "The clock in src/time says what time it is."
           },
@@ -714,104 +580,7 @@
             "name": "JSON",
             "message": "Text becomes data once, in src/api, where it is checked."
           }
-        ],
-        "eslint/no-restricted-imports": "off"
-      }
-    },
-    {
-      "files": [
-        "packages/web/src/transcript/follow-end.svelte.ts",
-        "packages/web/src/session/focus.svelte.ts"
-      ],
-      "rules": {
-        "eslint/no-restricted-globals": [
-          "error",
-          {
-            "name": "document",
-            "message": "The framework draws the page."
-          },
-          {
-            "name": "window",
-            "message": "Reach the browser through the module that owns that part of it."
-          },
-          {
-            "name": "globalThis",
-            "message": "Reach the browser through the module that owns that part of it."
-          },
-          {
-            "name": "self",
-            "message": "Reach the browser through the module that owns that part of it."
-          },
-          {
-            "name": "location",
-            "message": "The route module reads and writes the address."
-          },
-          {
-            "name": "history",
-            "message": "The route module reads and writes the address."
-          },
-          {
-            "name": "navigator",
-            "message": "Reach the browser through the module that owns that part of it."
-          },
-          {
-            "name": "fetch",
-            "message": "Requests are made in src/api."
-          },
-          {
-            "name": "XMLHttpRequest",
-            "message": "Requests are made in src/api."
-          },
-          {
-            "name": "EventSource",
-            "message": "Requests are made in src/api."
-          },
-          {
-            "name": "WebSocket",
-            "message": "Requests are made in src/api."
-          },
-          {
-            "name": "localStorage",
-            "message": "Storage is read and written in the module that owns the stored thing."
-          },
-          {
-            "name": "sessionStorage",
-            "message": "Storage is read and written in the module that owns the stored thing."
-          },
-          {
-            "name": "indexedDB",
-            "message": "Storage is read and written in the module that owns the stored thing."
-          },
-          {
-            "name": "setTimeout",
-            "message": "A timer belongs to src/time or to a retry in src/api. Elsewhere it papers over an ordering the code should state."
-          },
-          {
-            "name": "setInterval",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "requestIdleCallback",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "queueMicrotask",
-            "message": "A timer belongs to src/time."
-          },
-          {
-            "name": "Date",
-            "message": "The clock in src/time says what time it is."
-          },
-          {
-            "name": "performance",
-            "message": "The clock in src/time says what time it is."
-          },
-          {
-            "name": "JSON",
-            "message": "Text becomes data once, in src/api, where it is checked."
-          }
-        ],
-        "eslint/no-restricted-imports": "off"
+        ]
       }
     }
   ]

@@ -1,0 +1,160 @@
+id: web-listener
+language: typescript
+severity: error
+message: A listener reaches outside the page's state. It lives in a module this rule lets through, and the page uses what that module exports.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/api/retry.ts
+  - packages/web/src/api/send.ts
+  - packages/web/src/api/watch.ts
+  - packages/web/src/composer/draft.ts
+  - packages/web/src/composer/drop.svelte.ts
+  - packages/web/src/session/route.svelte.ts
+  - packages/web/src/transcript/follow-end.svelte.ts
+rule:
+  regex: ^addEventListener$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-svelte-events
+language: typescript
+severity: error
+message: Svelte's `on` adds a listener outside the page's state. It lives in a module this rule lets through.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/session/route.svelte.ts
+rule:
+  kind: string_fragment
+  regex: ^svelte/events$
+---
+id: web-subscriber
+language: typescript
+severity: error
+message: A subscription to something outside the page's state lives in a module this rule lets through, and the page reads what that module exports.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/session/route.svelte.ts
+  - packages/web/src/time/clock.svelte.ts
+rule:
+  regex: ^createSubscriber$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-observer
+language: typescript
+severity: error
+message: An observer watches elements outside the page's state. It lives in a module this rule lets through.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/transcript/follow-end.svelte.ts
+rule:
+  regex: ^(Resize|Mutation|Intersection)Observer$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-timeout
+language: typescript
+severity: error
+message: A timeout belongs to a retry or a silence the provider's contract names. Elsewhere it papers over an ordering the code should state.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/api/retry.ts
+  - packages/web/src/api/watch.ts
+rule:
+  regex: ^setTimeout$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-interval
+language: typescript
+severity: error
+message: The clock in src/time ticks. Read `clock` for the time.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/time/clock.svelte.ts
+rule:
+  regex: ^setInterval$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-deferred
+language: typescript
+severity: error
+message: A frame, an idle moment, a microtask or a timed signal papers over an ordering the code should state. No module of the page needs one.
+files:
+  - packages/web/src/**
+rule:
+  any:
+    - pattern: AbortSignal.timeout
+    - regex: ^(requestAnimationFrame|requestIdleCallback|queueMicrotask)$
+      any:
+        - kind: identifier
+        - kind: property_identifier
+        - kind: shorthand_property_identifier_pattern
+---
+id: web-media-query
+language: typescript
+severity: error
+message: A media query reads the window outside the page's state. It lives in a module this rule lets through, and the stylesheet answers the rest.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/session/focus.svelte.ts
+rule:
+  regex: ^matchMedia$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
+id: web-attachment
+language: typescript
+severity: error
+message: An attachment reaches an element after it is drawn. It is written in a module this rule lets through, and a component names it.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/composer/drop.svelte.ts
+  - packages/web/src/session/focus.svelte.ts
+  - packages/web/src/transcript/follow-end.svelte.ts
+rule:
+  kind: string_fragment
+  regex: ^svelte/attachments$
+---
+id: web-markup-outside
+language: html
+severity: error
+message: A component's markup reaches outside the page's state only through what a module named in web-outside.yml exports.
+note: The rules above read a component's script. This one reads its markup, where a handler or an expression could call the same things.
+files:
+  - packages/web/src/**/*.svelte
+rule:
+  any:
+    - kind: text
+    - kind: attribute_name
+    - kind: attribute_value
+  regex: "\\b(addEventListener|createSubscriber|setTimeout|setInterval|requestAnimationFrame|requestIdleCallback|queueMicrotask|matchMedia|(Resize|Mutation|Intersection)Observer)\\b|AbortSignal\\.timeout"

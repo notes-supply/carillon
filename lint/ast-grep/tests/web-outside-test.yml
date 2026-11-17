@@ -1,0 +1,80 @@
+id: web-listener
+valid:
+  - "node.removeEventListener(\"scroll\", scrolled);"
+  - "const listening = $derived(open);"
+invalid:
+  - "node.addEventListener(\"scroll\", scrolled);"
+  - "node.ownerDocument.addEventListener(\"drop\", dropped);"
+  - "node.ownerDocument.defaultView?.addEventListener(\"resize\", resized);"
+  - "addEventListener(\"resize\", resized);"
+  - "AbortSignal.any([signal]).addEventListener(\"abort\", stopped);"
+  - "const { addEventListener } = node;"
+---
+id: web-svelte-events
+valid:
+  - "import { SvelteMap } from \"svelte/reactivity\";"
+invalid:
+  - "import { on } from \"svelte/events\";"
+  - "const { on } = await import(\"svelte/events\");"
+---
+id: web-subscriber
+valid:
+  - "import { SvelteMap } from \"svelte/reactivity\";"
+invalid:
+  - "import { createSubscriber } from \"svelte/reactivity\";"
+  - "const subscribed = reactivity.createSubscriber(start);"
+---
+id: web-observer
+valid:
+  - "let resized: ResizeObserver | undefined;"
+invalid:
+  - "const resized = new ResizeObserver(follow);"
+  - "const changed = new MutationObserver(follow);"
+  - "const seen = new IntersectionObserver(follow);"
+  - "const resized = new node.ownerDocument.defaultView.ResizeObserver(follow);"
+---
+id: web-timeout
+valid:
+  - "clearTimeout(timer);"
+invalid:
+  - "const timer = setTimeout(giveUp, 1000);"
+  - "const timer = window.setTimeout(giveUp, 1000);"
+---
+id: web-interval
+valid:
+  - "clearInterval(timer);"
+invalid:
+  - "const timer = setInterval(tick, 1000);"
+---
+id: web-deferred
+valid:
+  - "const either = AbortSignal.any([signal, stream.signal]);"
+invalid:
+  - "requestAnimationFrame(scrolled);"
+  - "requestIdleCallback(store);"
+  - "queueMicrotask(store);"
+  - "const late = AbortSignal.timeout(1000);"
+---
+id: web-media-query
+valid:
+  - "const wide = route.pane === \"room\";"
+invalid:
+  - "const wide = matchMedia(\"(min-width: 46rem)\").matches;"
+  - "const wide = node.ownerDocument.defaultView?.matchMedia(\"(min-width: 46rem)\").matches;"
+---
+id: web-attachment
+valid:
+  - "import type { HTMLAttributes } from \"svelte/elements\";"
+invalid:
+  - "import type { Attachment } from \"svelte/attachments\";"
+  - "export const hover: import(\"svelte/attachments\").Attachment = (node) => {};"
+---
+id: web-markup-outside
+valid:
+  - "<p>The page waits a second.</p>"
+  - "<script lang=\"ts\">\n  const timer = setTimeout(stop, 10);\n</script>\n\n<p>{count}</p>"
+invalid:
+  - "<button onclick={() => setTimeout(reset, 2000)}>Copy</button>"
+  - "<p>{matchMedia(\"(min-width: 46rem)\").matches}</p>"
+  - "<div class:wide={new ResizeObserver(follow)}></div>"
+  - "<p>{AbortSignal.timeout(1000).aborted}</p>"
