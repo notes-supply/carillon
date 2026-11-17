@@ -26,5 +26,5 @@ export const messageField: Attachment<HTMLElement> = (element) => {
 };
 
 export function focusMessage(): void {
-  if (onDesktop()) message?.focus();
+  message?.focus();
 }

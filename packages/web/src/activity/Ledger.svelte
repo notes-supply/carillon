@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Control, MessageSource } from "../api/stream.ts";
-  import { focusMessage } from "../session/focus.svelte.ts";
+  import { focusMessage, onDesktop } from "../session/focus.svelte.ts";
   import { session } from "../session/session.svelte.ts";
   import Words from "../session/Words.svelte";
   import { clock } from "../time/clock.svelte.ts";
@@ -33,7 +33,7 @@
   function pressed(action: Control): void {
     const credential = session.credential;
     if (target !== undefined && credential !== null) void press(target, action, credential, clock.now);
-    focusMessage();
+    if (onDesktop()) focusMessage();
   }
 </script>
 

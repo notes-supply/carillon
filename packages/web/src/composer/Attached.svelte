@@ -1,20 +1,15 @@
 <script lang="ts">
+  import { focusMessage } from "../session/focus.svelte.ts";
   import { size } from "../transcript/files.ts";
 
-  let {
-    files,
-    remove,
-    after,
-  }: {
-    files: readonly File[];
-    remove: (file: File) => void;
-    after: HTMLElement | undefined;
-  } = $props();
+  let { files, remove }: { files: readonly File[]; remove: (file: File) => void } = $props();
 
   let removers = $state<(HTMLButtonElement | null)[]>([]);
 
   function removed(file: File, index: number): void {
-    (removers[index + 1] ?? after)?.focus();
+    const next = removers[index + 1];
+    if (next) next.focus();
+    else focusMessage();
     remove(file);
   }
 </script>

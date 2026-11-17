@@ -34,7 +34,6 @@
     recorded: boolean;
   } = $props();
 
-  let field = $state<HTMLTextAreaElement>();
   let chooser = $state<HTMLInputElement>();
   let pointed = $state.raw({ address: "", choice: 0 });
   let dismissedAt = $state("");
@@ -114,14 +113,13 @@
     </p>
     <Commands {offers} {choice} {take} />
     <form class="composer" onsubmit={submitted}>
-      <Attached {files} remove={(file) => detach(address, file)} after={field} />
+      <Attached {files} remove={(file) => detach(address, file)} />
       {#key key.audience_id}
         <textarea
           rows="1"
           aria-label="Message"
           placeholder="Write to Carillon"
           value={text}
-          bind:this={field}
           oninput={(event) => wrote(event.currentTarget.value)}
           onkeydown={pressed}
           onpaste={pasted}
