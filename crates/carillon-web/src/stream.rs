@@ -23,8 +23,8 @@ use axum::{
     extract::{Query, State},
     response::sse::{Event, Sse},
 };
-use carillon_interface::{InterfaceError, Observation};
-use carillon_protocol::observation::{KEEP_ALIVE, Snapshot, View};
+use carillon_interface::Observation;
+use carillon_protocol::observation::{KEEP_ALIVE, View};
 use futures_util::{Stream, stream};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, sleep_until};
@@ -75,7 +75,8 @@ impl TryFrom<View> for Viewed {
 
 /// How far one page's stream has come.
 enum Stage {
-    /// Core has not been asked yet, and only core decides the first message.
+    /// Core has not been asked yet, and only core ends the wait for its
+    /// first answer.
     Unshown,
     /// A snapshot is shown, so the day's end or the provider stopping may
     /// end the stream.
@@ -84,11 +85,14 @@ enum Stage {
     Over,
 }
 
-/// What a stream waited for.
-enum Heard {
+/// What a stream has made to send. Only [`Shown::send`] makes it an event.
+enum Ready {
     /// Nothing, for as long as a connection may stay silent.
     Quiet,
-    Core(Result<Option<Snapshot>, InterfaceError>),
+    /// A snapshot that differs from the one last sent, as written.
+    Snapshot(serde_json::Result<String>),
+    /// Core cannot be reached, refused the view or ended its stream.
+    Unavailable,
 }
 
 /// One page's stream of its view.
@@ -133,58 +137,45 @@ pub(crate) async fn stream(
 
 impl Shown {
     async fn next(mut self) -> Option<(serde_json::Result<Event>, Self)> {
-        let event = self.event().await?;
-        if event.is_err() {
-            self.stage = Stage::Over;
-        }
+        let ready = self.ready().await?;
+        let event = self.send(ready)?;
         Some((event, self))
     }
 
-    /// The next event to send, or `None` once the stream is over. Before
-    /// each one the password is read again, so a new one ends every stream
-    /// within a keep-alive.
-    async fn event(&mut self) -> Option<serde_json::Result<Event>> {
+    /// What to send next, or `None` once the stream is over.
+    async fn ready(&mut self) -> Option<Ready> {
         loop {
             let heard = match &mut self.stage {
                 Stage::Over => return None,
-                Stage::Unshown => {
-                    Heard::Core(match self.web.core.observe(&self.viewed.view).await {
-                        Ok(mut observation) => {
-                            let first = observation.next().await;
-                            self.stage = Stage::Showing(Box::new(observation));
-                            first
-                        }
-                        Err(failure) => Err(failure),
-                    })
-                }
+                Stage::Unshown => match self.web.core.observe(&self.viewed.view).await {
+                    Ok(mut observation) => {
+                        let first = observation.next().await;
+                        self.stage = Stage::Showing(Box::new(observation));
+                        first
+                    }
+                    Err(failure) => Err(failure),
+                },
                 Stage::Showing(observation) => tokio::select! {
                     biased;
                     () = self.web.stopping.cancelled() => return None,
                     () = sleep_until(self.day_ends) => return None,
-                    () = sleep_until(self.quiet_until) => Heard::Quiet,
-                    next = observation.next() => Heard::Core(next),
+                    () = sleep_until(self.quiet_until) => return Some(Ready::Quiet),
+                    next = observation.next() => next,
                 },
             };
-            if !self.key.is_current(&self.web.browser.password_file) {
-                return Some(self.last(&Message::SignedOut));
-            }
             let snapshot = match heard {
-                Heard::Quiet => {
-                    self.quiet_until = Instant::now() + KEEP_ALIVE;
-                    return Some(Ok(Event::default().comment("keep-alive")));
-                }
-                Heard::Core(Ok(Some(snapshot))) => snapshot,
-                Heard::Core(Ok(None)) => {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
                     warn!("core ended the stream of the page's view");
-                    return Some(self.last(&Message::Unavailable));
+                    return Some(Ready::Unavailable);
                 }
-                Heard::Core(Err(failure)) => {
+                Err(failure) => {
                     warn!(
                         status = %failure.status,
                         error = %failure.message,
                         "core does not show the page its view"
                     );
-                    return Some(self.last(&Message::Unavailable));
+                    return Some(Ready::Unavailable);
                 }
             };
             let links = Links {
@@ -193,18 +184,40 @@ impl Shown {
                 day: self.day,
             };
             let snapshot = ChatSnapshot::of(&links, self.viewed.open.as_ref(), snapshot).await;
-            let data = match written(&Message::Snapshot {
+            match written(&Message::Snapshot {
                 snapshot: &snapshot,
             }) {
-                Ok(data) => data,
-                Err(error) => return Some(Err(error)),
-            };
-            if data != self.sent {
-                self.sent = data;
-                self.quiet_until = Instant::now() + KEEP_ALIVE;
-                return Some(Ok(Event::default().data(&self.sent)));
+                Ok(data) if data == self.sent => {}
+                data => return Some(Ready::Snapshot(data)),
             }
         }
+    }
+
+    /// `ready` as the event the page is sent, or `None` once the stream's
+    /// day has ended. Every event leaves through here, and nothing here
+    /// awaits, so the day and the password it reads are the ones the event
+    /// leaves under. A new password ends every stream within a keep-alive.
+    fn send(&mut self, ready: Ready) -> Option<serde_json::Result<Event>> {
+        let leaving = Instant::now();
+        if leaving >= self.day_ends {
+            return None;
+        }
+        if !self.key.is_current(&self.web.browser.password_file) {
+            return Some(self.last(&Message::SignedOut));
+        }
+        self.quiet_until = leaving + KEEP_ALIVE;
+        Some(match ready {
+            Ready::Quiet => Ok(Event::default().comment("keep-alive")),
+            Ready::Snapshot(Ok(data)) => {
+                self.sent = data;
+                Ok(Event::default().data(&self.sent))
+            }
+            Ready::Snapshot(Err(error)) => {
+                self.stage = Stage::Over;
+                Err(error)
+            }
+            Ready::Unavailable => self.last(&Message::Unavailable),
+        })
     }
 
     /// `message` as the stream's last event.

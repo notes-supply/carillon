@@ -1,7 +1,7 @@
 //! The page's stream, read as a page reads it, over a fake of core that
 //! streams as core does.
 
-use std::time::Duration;
+use std::{fs::OpenOptions, path::PathBuf, time::Duration};
 
 use anyhow::{Context as _, Result};
 use axum::http::StatusCode;
@@ -12,11 +12,11 @@ use carillon_protocol::{
     turns::ControlAction,
 };
 use serde_json::{Value, json};
-use tokio::time::Instant;
+use tokio::{sync::oneshot, task::JoinHandle, time::Instant};
 
 use crate::{
     browser::{now, set_password},
-    fixture::{Fixture, PASSWORD, conversation, key},
+    fixture::{Fixture, PASSWORD, Page, conversation, key},
 };
 
 const CHAT: &str = "0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b";
@@ -430,6 +430,88 @@ async fn a_new_password_ends_a_quiet_stream_within_a_keep_alive_of_a_paused_cloc
     Ok(())
 }
 
+/// Returns once something opens the named pipe `pipe` to read it. Opening
+/// it to write waits for that reader, so it is opened on a thread outside
+/// the runtime, which a test that fails before the reader comes does not
+/// wait for as it ends.
+async fn read_from(pipe: PathBuf) -> Result<()> {
+    let (opened, writer) = oneshot::channel();
+    std::thread::spawn(move || opened.send(OpenOptions::new().write(true).open(pipe).map(drop)));
+    Ok(writer.await??)
+}
+
+/// A page's first message, while the provider makes it. The open
+/// conversation's turn sent two files that are named pipes. Making a
+/// snapshot opens each file it links to, and opening a pipe waits until it
+/// is opened to write, so the provider has opened the first and waits at
+/// the second until `finish`.
+struct Making {
+    message: JoinHandle<(Result<Option<Value>>, Page)>,
+    held: PathBuf,
+}
+
+impl Making {
+    async fn start(fixture: &Fixture, token: &str) -> Result<Self> {
+        let store = fixture.directory.path().join("state/attachments/piped");
+        std::fs::create_dir_all(&store)?;
+        let [reached, held] = ["0", "1"].map(|name| store.join(name));
+        let piped = std::process::Command::new("mkfifo")
+            .args([&reached, &held])
+            .status()?;
+        assert!(piped.success());
+        let files = ["piped/0", "piped/1"].map(|path| TurnAttachment {
+            path: path.to_owned(),
+            name: "notes.txt".to_owned(),
+            size: 5,
+            content_type: None,
+            sha256: "ab".repeat(32),
+        });
+        let sent = TurnSource::Message {
+            event_id: event(1),
+            text: "notes".to_owned(),
+            command: false,
+            files: files.into(),
+        };
+        {
+            let mut core = fixture.core();
+            core.conversations.push(conversation("second", CHAT, 1)?);
+            core.turns.insert(
+                key("second", CHAT)?,
+                vec![turn("t1", sent, Progress::Queued)],
+            );
+        }
+        let mut page = fixture.stream(&open("second"), token).await?;
+        let mut message = tokio::spawn(async move { (page.next().await, page) });
+        tokio::select! {
+            opened = read_from(reached) => opened?,
+            sent = &mut message => {
+                anyhow::bail!("a snapshot was made without opening its files: {:?}", sent?.0)
+            }
+        }
+        Ok(Self { message, held })
+    }
+
+    /// The message the page is sent once the provider may finish.
+    async fn finish(self) -> Result<(Option<Value>, Page)> {
+        read_from(self.held).await?;
+        let (message, page) = self.message.await?;
+        Ok((message?, page))
+    }
+}
+
+#[tokio::test]
+async fn a_new_password_while_a_snapshot_is_made_ends_the_stream_as_signed_out_instead()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let making = Making::start(&fixture, &token).await?;
+    set_password(&fixture.password_file(), PASSWORD)?;
+    let (message, mut page) = making.finish().await?;
+    assert_eq!(message, Some(json!({"kind": "signed_out"})));
+    assert_eq!(page.next().await?, None, "the stream went on");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_core_that_cannot_be_reached_or_refuses_is_unavailable_and_is_asked_once() -> Result<()> {
     let fixture = Fixture::new().await?;
@@ -531,6 +613,19 @@ async fn a_stream_ends_without_a_last_message_when_its_utc_day_ends_on_a_paused_
     );
     let least = Duration::from_secs((day_ends - before).saturating_sub(60));
     assert!(waited >= least, "{waited:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_snapshot_made_past_its_utc_day_is_not_sent_and_the_stream_ends_on_a_paused_clock()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let making = Making::start(&fixture, &token).await?;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(DAY)).await;
+    let (message, _) = making.finish().await?;
+    assert_eq!(message, None, "a snapshot was sent after its day");
     Ok(())
 }
 
