@@ -48,7 +48,11 @@ use futures_util::{StreamExt as _, stream};
 use serde_json::{Value, json};
 use sse_core::{SseDecoder, SseEvent};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, sync::Notify, sync::watch, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 

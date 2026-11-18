@@ -6,9 +6,9 @@ mod interactions;
 use interactions::interaction_source;
 use interactions::{handle_interaction, run_interaction};
 
-use crate::conversations::{InteractionSource, admit_interaction};
 use crate::{
     attachments::Downloads,
+    conversations::{InteractionSource, admit_interaction},
     gateway::{Dispatch, Gateway, Identity, record_path, take_record},
     inbound::{
         Ingress, PREPARATION_DEADLINE, QueuedMessage, Settlements, known_receipt,

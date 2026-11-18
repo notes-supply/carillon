@@ -12,13 +12,15 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
-use carillon_protocol::model::{
-    ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
-    EVENT_BODY_LIMIT, EventReceipt, EventStatus, ExternalEvent, IDENTIFIER_LIMIT, JOB_READ_LIMIT,
-    Job, NATIVE_CONTEXT, RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity,
-    TurnInspection, TurnSummary,
+use carillon_protocol::{
+    model::{
+        ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
+        EVENT_BODY_LIMIT, EventReceipt, EventStatus, ExternalEvent, IDENTIFIER_LIMIT,
+        JOB_READ_LIMIT, Job, NATIVE_CONTEXT, RuntimeTurnRequest, SelectedProvider, StateCounts,
+        TurnActivity, TurnInspection, TurnSummary,
+    },
+    observation::ConversationKey,
 };
-use carillon_protocol::observation::ConversationKey;
 pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
 use std::{

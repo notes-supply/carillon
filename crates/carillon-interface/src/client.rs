@@ -5,14 +5,16 @@ use crate::{
 };
 use anyhow::Result;
 use carillon_installation::loopback;
-use carillon_protocol::model::{
-    CommandCatalog, ConversationQuery, Delivery, DeliveryAck, DeliveryOutcome,
-    DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
-    JobPage, PROVIDER_HEADER,
+use carillon_protocol::{
+    model::{
+        CommandCatalog, ConversationQuery, Delivery, DeliveryAck, DeliveryOutcome,
+        DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
+        JobPage, PROVIDER_HEADER,
+    },
+    observation::View,
+    settings::{RuntimeSettings, SettingsRequest},
+    turns::{ControlAction, TurnControl},
 };
-use carillon_protocol::observation::View;
-use carillon_protocol::settings::{RuntimeSettings, SettingsRequest};
-use carillon_protocol::turns::{ControlAction, TurnControl};
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;

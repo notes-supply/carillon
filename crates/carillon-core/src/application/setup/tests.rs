@@ -3,13 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
+use carillon_installation::config::{ASSISTANT, Config, LoadedConfig, ProviderRole};
 
 use super::{
     Bundled, Options, SavedT3, adopt_release, initialize, registered_runtimes, run, saved_t3,
     set_up_t3, setup,
 };
-use crate::application::admin::{ASSISTANT, assistant, backup, register, set_provider};
+use crate::application::admin::{assistant, backup, register, set_provider};
 
 /// A new installation on `runtime`: on Pi with Carillon's assistant working
 /// in `workspace`, on T3 with no agent yet.

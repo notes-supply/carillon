@@ -7,7 +7,7 @@ use std::{
     io::{BufReader, BufWriter, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -16,14 +16,15 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
-use carillon_installation::bundled::Bundled;
-pub(super) use carillon_installation::config::ASSISTANT;
-use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    attachment_staging, hash_token, new_token, validate_provider_identity,
+use carillon_installation::{
+    bundled::Bundled,
+    config::{
+        ASSISTANT, AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider,
+        ProviderRole, attachment_staging, hash_token, new_token, validate_provider_identity,
+    },
+    filesystem::{atomic_write, sync_ancestors, sync_tree},
+    maintenance::ServiceLock,
 };
-use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
-use carillon_installation::maintenance::ServiceLock;
 
 use crate::{attachments, db::Database};
 
@@ -402,7 +403,7 @@ pub(super) fn unpack_regular(archive_path: &Path, target: &Path) -> Result<()> {
         if path.is_absolute()
             || path
                 .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+                .any(|component| component == Component::ParentDir)
         {
             bail!("archive contains unsafe path {}", path.display());
         }
@@ -421,9 +422,7 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     for (field, path) in installation_paths(&config) {
         if path.is_empty()
             || path.is_absolute()
-            || path
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || path.components().any(|part| part == Component::ParentDir)
         {
             bail!("backup and restore require {field} to be installation-relative without '..'");
         }

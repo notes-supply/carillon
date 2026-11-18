@@ -11,10 +11,12 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::{
-    LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
+use carillon_installation::{
+    config::{
+        LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
+    },
+    filesystem::{PublishError, publish},
 };
-use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::turns::ControlAction;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
