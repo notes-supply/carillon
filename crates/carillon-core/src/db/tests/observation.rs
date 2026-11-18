@@ -457,3 +457,46 @@ fn the_read_of_a_window_stops_at_the_turn_its_files_pass_the_snapshot_limit() ->
     );
     Ok(())
 }
+
+#[test]
+fn the_read_of_the_list_stops_at_the_conversation_that_passes_the_snapshot_limit() -> Result<()> {
+    let directory = tempdir()?;
+    let path = directory.path().join("state.sqlite3");
+    let database = Database::create(&path)?;
+    // A megabyte of channel each, as an earlier core recorded any length:
+    // the newest 17 pass the limit.
+    let channel = "c".repeat(1 << 20);
+    for index in 0..20 {
+        let message = ExternalEvent {
+            channel_id: channel.clone(),
+            ..event(&index.to_string(), &format!("conversation {index}"))
+        };
+        say(&database, "discord", &message)?;
+    }
+    // The oldest is listed last, and a read that reaches it fails.
+    rusqlite::Connection::open(&path)?.execute(
+        "UPDATE conversations SET channel_id = x'ff' WHERE audience_id = 'conversation 0'",
+        [],
+    )?;
+    let list = |conversations| -> Result<View> {
+        Ok(View {
+            conversations: Limit::new(conversations)?,
+            open: None,
+        })
+    };
+    let newest = database.observed("discord", &list(1)?)?.conversations;
+    let conversation = serde_json::to_vec(&newest[0])?.len();
+    let refused = database
+        .observed("discord", &list(20)?)
+        .err()
+        .context("a list over the limit was shown")?;
+    let TooLarge(size) = refused
+        .downcast()
+        .context("the read went on past the limit")?;
+    assert!(size > SNAPSHOT_LIMIT, "{size}");
+    assert!(
+        size <= SNAPSHOT_LIMIT + conversation,
+        "{size} is more than a conversation over"
+    );
+    Ok(())
+}
