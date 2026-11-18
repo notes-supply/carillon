@@ -6,13 +6,13 @@ use carillon_protocol::{
     model::{AnswerFile, StagedAttachments, StagedFile, TurnAttachment},
     observation::{
         Conversation, ConversationKey, Ending, Limit, ObservedTurn, OpenView, Opened as Shown,
-        Progress, View,
+        Progress, SNAPSHOT_LIMIT, View,
     },
     turns::{Silence, TurnOpening},
 };
 
 use super::{super::Opened, *};
-use crate::{answers::KeptFile, attachments::Capture};
+use crate::{answers::KeptFile, attachments::Capture, db::TooLarge};
 
 /// Accepts `event` from `interface` and returns its turn.
 fn say(database: &Database, interface: &str, event: &ExternalEvent) -> Result<String> {
@@ -396,4 +396,64 @@ fn commands_silences_and_a_runtime_s_own_turns_are_shown_apart() -> Result<()> {
     });
     assert_eq!(came.collect::<Vec<_>>(), expected);
     keeps_back(&shown, &["operator detail"])
+}
+
+#[test]
+fn the_read_of_a_window_stops_at_the_turn_its_files_pass_the_snapshot_limit() -> Result<()> {
+    let directory = tempdir()?;
+    let database = Database::create(&directory.path().join("state.sqlite3"))?;
+    // One byte of text and 100 files each, with the longest names and
+    // media types core admits: together over the limit, the text far under.
+    let files = (0..100)
+        .map(|ordinal| StagedFile {
+            name: format!("{ordinal:03}{}", "n".repeat(1021)),
+            size: 0,
+            content_type: Some("t".repeat(255)),
+        })
+        .collect::<Vec<_>>();
+    let capture = Capture {
+        id: "capture".to_owned(),
+        digests: vec!["digest".to_owned(); files.len()],
+    };
+    for index in 0..130 {
+        let message = ExternalEvent {
+            content: "x".to_owned(),
+            attachments: Some(StagedAttachments {
+                batch: "batch".to_owned(),
+                files: files.clone(),
+            }),
+            ..event(&index.to_string(), "conversation")
+        };
+        let admission = Admission::Queued {
+            providers: &json!([]),
+            resource_snapshot_id: "resources",
+        };
+        database.accept_event("discord", "runtime", &message, admission, Some(&capture))?;
+    }
+    let window = |turns| -> Result<View> {
+        Ok(View {
+            conversations: Limit::default(),
+            open: Some(OpenView {
+                conversation: ConversationKey::new("agent".to_owned(), "conversation".to_owned())?,
+                turns: Limit::new(turns)?,
+            }),
+        })
+    };
+    let Some(Shown::Recorded { turns: newest, .. }) =
+        database.observed("discord", &window(1)?)?.open
+    else {
+        bail!("the conversation is not recorded");
+    };
+    let turn = serde_json::to_vec(&newest[0])?.len();
+    let refused = database
+        .observed("discord", &window(130)?)
+        .err()
+        .context("a window over the limit was read whole")?;
+    let TooLarge(size) = refused.downcast()?;
+    assert!(size > SNAPSHOT_LIMIT, "{size}");
+    assert!(
+        size <= SNAPSHOT_LIMIT + turn,
+        "{size} is more than a turn over"
+    );
+    Ok(())
 }
