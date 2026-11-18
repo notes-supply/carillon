@@ -13,11 +13,11 @@ use axum::{
     body::Body,
     http::{
         Method, Request, StatusCode,
-        header::{AUTHORIZATION, HOST, ORIGIN},
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN},
     },
 };
 use carillon_installation::config::LoadedConfig;
-use futures_util::FutureExt as _;
+use futures_util::{FutureExt as _, StreamExt as _, stream};
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use serde_json::json;
@@ -322,6 +322,30 @@ async fn a_guess_is_small() -> Result<()> {
     let fixture = Fixture::new().await?;
     let long = fixture.send(guess(&"x".repeat(5000))?).await?;
     assert_eq!(long.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let right = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(right.status, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_guess_still_arriving_10_seconds_after_its_headers_is_answered_408() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let start = Instant::now();
+    // A byte a second never leaves the body idle long enough to time out.
+    let body = json!({ "password": PASSWORD }).to_string().into_bytes();
+    let trickle = stream::iter(body).then(|byte| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok::<_, std::io::Error>(vec![byte])
+    });
+    let trickled = fixture
+        .send(
+            request(Method::POST, "/api/sign-in")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from_stream(trickle))?,
+        )
+        .await?;
+    assert_eq!(trickled.status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(start.elapsed().as_secs(), 10, "{:?}", start.elapsed());
     let right = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(right.status, StatusCode::OK);
     Ok(())
