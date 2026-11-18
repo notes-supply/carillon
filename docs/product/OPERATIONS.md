@@ -1072,6 +1072,8 @@ credentials to the runtime (Pi keeps
 its own under `~/.carillon/pi`, separate from `~/.pi`). Loopback tokens in
 `credentials/` authenticate the services to each other; `operator` authorizes
 diagnostics and maintenance. None of them reach prompts, sessions or logs.
+The services send them straight to each other on loopback, never through a
+proxy the environment names and never after a redirect.
 Changing a credential takes a restart.
 
 Each provider's settings name its token's file: `bot_token_file` for Discord

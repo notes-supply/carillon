@@ -91,9 +91,13 @@ const NamedTurnSchema = Type.Object({
 });
 
 export function createCoreClient(options: CoreClientOptions): CoreClient {
-  /** A POST of `body`, or a GET without one. */
-  const call = (path: string, body?: unknown, signal?: AbortSignal) =>
-    fetch(`${options.url}${path}`, {
+  /**
+   * A POST of `body`, or a GET without one, straight to core. Bun sends even
+   * a loopback request through a proxy the environment names, credential
+   * included, and only a foreign listener would answer with a redirect.
+   */
+  const call = (path: string, body?: unknown, signal?: AbortSignal) => {
+    const init: RequestInit & { readonly proxy: false } = {
       method: body === undefined ? "GET" : "POST",
       headers: {
         authorization: `Bearer ${options.token}`,
@@ -101,11 +105,15 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      proxy: false,
+      redirect: "error",
       signal: AbortSignal.any([
         AbortSignal.timeout(CALL_TIMEOUT_MS),
         ...(signal === undefined ? [] : [signal]),
       ]),
-    });
+    };
+    return fetch(`${options.url}${path}`, init);
+  };
   return {
     settle: async (turnId, outcome) => {
       const response = await call(
