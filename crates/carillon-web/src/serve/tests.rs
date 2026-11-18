@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use axum::{
     body::Body,
     http::{
@@ -707,6 +707,14 @@ async fn hold_every_connection(address: SocketAddr, token: &str) -> Result<Vec<T
     // The cap's connections and the test's own ends of them pass the soft
     // descriptor limit a service manager gives a process by default.
     let descriptors = getrlimit(Resource::Nofile);
+    let needed = u64::try_from(2 * MAX_CONNECTIONS + 64)?;
+    if let Some(maximum) = descriptors.maximum {
+        ensure!(
+            maximum >= needed,
+            "holding every connection takes about {needed} descriptors, past this process's \
+             hard limit of {maximum}"
+        );
+    }
     setrlimit(
         Resource::Nofile,
         Rlimit {
