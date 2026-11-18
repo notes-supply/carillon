@@ -723,6 +723,31 @@ async fn bytes_between_parts_past_the_bound_are_refused_without_holding_them_who
 }
 
 #[tokio::test]
+async fn a_first_part_s_headers_may_end_64_kib_into_the_body_and_not_a_byte_later() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let hello = form(&[Part::Text("hello")]);
+    let head =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\n").len();
+    // The window counts from the body's first byte, so a preamble sets where
+    // the first part's headers end.
+    for (past, status) in [(0, StatusCode::OK), (1, StatusCode::PAYLOAD_TOO_LARGE)] {
+        let mut body = vec![b'p'; 64 * 1024 - head + past];
+        body.extend_from_slice(&hello);
+        let answer = fixture
+            .send(message(&token, &path("assistant", EVENT), body)?)
+            .await?;
+        assert_eq!(answer.status, status, "{past} past: {}", answer.text());
+    }
+    let core = fixture.core();
+    let [(event, _)] = core.events.as_slice() else {
+        anyhow::bail!("expected one event, not {}", core.events.len());
+    };
+    assert_eq!(event.content, "hello");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
