@@ -158,7 +158,11 @@ impl Kept {
                     Ok(())
                 });
             if let Err(error) = removed {
-                warn!(capture, %error, "an answer's capture is left for startup reconciliation");
+                warn!(
+                    capture,
+                    error = format!("{error:#}"),
+                    "an answer's capture is left for startup reconciliation"
+                );
             }
         }
         drop((keeping, reservation));

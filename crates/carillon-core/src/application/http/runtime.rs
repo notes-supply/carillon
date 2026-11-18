@@ -181,13 +181,25 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
                 match &stalled {
                     _ if !new => {}
                     Stalled::Inbox(InboxFailure::Misinstalled(_)) => {
-                        error!(runtime_id, error = %stalled, "queued turns wait for the runtime provider's installation to be fixed");
+                        error!(
+                            runtime_id,
+                            error = format!("{stalled:#}"),
+                            "queued turns wait for the runtime provider's installation to be fixed"
+                        );
                     }
                     Stalled::Inbox(_) => {
-                        warn!(runtime_id, error = %stalled, "queued turns wait for the runtime provider");
+                        warn!(
+                            runtime_id,
+                            error = format!("{stalled:#}"),
+                            "queued turns wait for the runtime provider"
+                        );
                     }
                     Stalled::Core(_) => {
-                        error!(runtime_id, error = %stalled, "queued turns wait for core's registry or storage");
+                        error!(
+                            runtime_id,
+                            error = format!("{stalled:#}"),
+                            "queued turns wait for core's registry or storage"
+                        );
                     }
                 }
                 wait

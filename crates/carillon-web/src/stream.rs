@@ -172,7 +172,7 @@ impl Shown {
                 Err(failure) => {
                     warn!(
                         status = %failure.status,
-                        error = %failure.message,
+                        error = format!("{failure:#}"),
                         "core does not show the page its view"
                     );
                     return Some(Ready::Unavailable);

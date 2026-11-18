@@ -187,7 +187,10 @@ impl Supervisor {
         let id = match ended {
             Ok((id, ())) => id,
             Err(failure) => {
-                error!(error = %failure, "runtime dispatcher ended abnormally");
+                error!(
+                    error = format!("{failure:#}"),
+                    "runtime dispatcher ended abnormally"
+                );
                 failure.id()
             }
         };

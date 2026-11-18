@@ -70,7 +70,10 @@ impl Drop for Batch {
         if let Err(error) = std::fs::remove_dir_all(&self.directory)
             && error.kind() != io::ErrorKind::NotFound
         {
-            warn!(%error, "staged attachments could not be removed; the provider removes them at startup");
+            warn!(
+                error = format!("{error:#}"),
+                "staged attachments could not be removed; the provider removes them at startup"
+            );
         }
     }
 }

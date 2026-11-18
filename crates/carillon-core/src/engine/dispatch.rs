@@ -78,7 +78,7 @@ impl Core {
                 Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                 Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
             };
-            warn!(turn_id = %turn.turn_id, %error, "captured attachment is not usable; turn not handed over");
+            warn!(turn_id = %turn.turn_id, error = format!("{error:#}"), "captured attachment is not usable; turn not handed over");
             self.refuse(&turn, error, Some(explanation)).await?;
             return Ok(WorkerStep::Advanced);
         }
@@ -106,7 +106,7 @@ impl Core {
                     },
                     |explanation| format!("runtime refused the turn: {explanation}"),
                 );
-                warn!(turn_id = %turn.turn_id, %error, "turn did not complete");
+                warn!(turn_id = %turn.turn_id, error = format!("{error:#}"), "turn did not complete");
                 self.refuse(&turn, error, explanation.as_deref()).await?;
                 Ok(WorkerStep::Advanced)
             }

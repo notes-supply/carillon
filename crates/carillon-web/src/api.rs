@@ -36,7 +36,7 @@ pub(crate) fn from_core(failure: InterfaceError) -> InterfaceError {
     if failure.status.is_client_error() || failure.status == StatusCode::INSUFFICIENT_STORAGE {
         return failure;
     }
-    warn!(status = %failure.status, error = %failure.message, "core did not answer for the page");
+    warn!(status = %failure.status, error = format!("{failure:#}"), "core did not answer for the page");
     refusal(StatusCode::SERVICE_UNAVAILABLE, AWAY)
 }
 

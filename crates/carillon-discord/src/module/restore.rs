@@ -10,7 +10,10 @@ impl Module {
     /// them; the change's own failure is what the caller reports.
     pub(super) async fn restore(&self, app: Option<&DiscordApp>, definitions: &[Value]) {
         if let Err(error) = self.reconcile_definitions(app, definitions).await {
-            warn!(%error, "Discord keeps the refused module's commands until the provider starts again");
+            warn!(
+                error = format!("{error:#}"),
+                "Discord keeps the refused module's commands until the provider starts again"
+            );
         }
     }
 }

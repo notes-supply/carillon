@@ -26,7 +26,7 @@ pub async fn settled(
             Ok(EventStatus::Unknown) => return Ok(None),
             Ok(EventStatus::Capturing) => {}
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, %event_id, "waiting to ask core about an event");
+                warn!(error = format!("{failure:#}"), %event_id, "waiting to ask core about an event");
             }
             Err(failure) => return Err(failure),
         }
@@ -49,7 +49,7 @@ pub async fn submit_event_with_retry(
         }
         match core.submit_event(event).await {
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit an event");
+                warn!(error = format!("{failure:#}"), event_id = %event.event_id, "waiting to submit an event");
                 stopping.run_until_cancelled(sleep(RETRY)).await;
             }
             outcome => return Some(outcome),

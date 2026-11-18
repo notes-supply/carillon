@@ -423,7 +423,7 @@ impl Run {
                         }
                     }
                     Err(error) => {
-                        warn!(capture = %capture.id, %error, "capture left for startup reconciliation");
+                        warn!(capture = %capture.id, error = format!("{error:#}"), "capture left for startup reconciliation");
                     }
                 }
                 Err(failure)

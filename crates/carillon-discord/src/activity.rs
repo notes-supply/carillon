@@ -244,7 +244,7 @@ impl CardRecords {
             .map_err(|error| PublishError::NotPublished(error.into()))
             .and_then(|bytes| publish(&self.path, &bytes, 0o600));
         if let Err(error) = saved {
-            warn!(path = %self.path.display(), %error, "activity card records were not saved");
+            warn!(path = %self.path.display(), error = format!("{error:#}"), "activity card records were not saved");
             return false;
         }
         true
@@ -360,7 +360,7 @@ pub(crate) async fn activity_monitor(
                     // Unknown is not ended: every card keeps what it shows.
                     Err(failure) => {
                         if reachable {
-                            warn!(error = %failure.message, "cannot read jobs from core");
+                            warn!(error = format!("{failure:#}"), "cannot read jobs from core");
                         }
                         reachable = false;
                     }
@@ -370,26 +370,37 @@ pub(crate) async fn activity_monitor(
         }
     }
     drop(reading);
-    let last = async {
-        // The jobs the last deliveries settled show their summaries.
-        if cards.is_some() && !jobs.is_empty() {
-            let named = jobs.keys().cloned().collect::<Vec<_>>();
-            match read_named(&core, &named, &HashSet::new()).await {
-                Ok(read) => {
-                    take_read(read, true, &mut jobs);
-                }
-                Err(failure) => {
-                    warn!(error = %failure.message, "cannot read jobs from core at stop");
-                }
-            }
-        }
-        // Jobs still open end their tasks, which leave their cards recorded.
-        drop(jobs);
-        while tasks.join_next().await.is_some() {}
-    };
+    let last = finish(&core, cards.is_some(), jobs, &mut tasks);
     if timeout(FINAL_DRAIN, last).await.is_err() {
         warn!("activity cards still finishing at stop are left to the next start");
     }
+}
+
+/// Reads core once more for `jobs`, when there are `cards`, so the jobs the
+/// last deliveries settled show their summaries, and waits for `tasks`.
+async fn finish(
+    core: &CoreClient,
+    cards: bool,
+    mut jobs: BTreeMap<String, watch::Sender<Known>>,
+    tasks: &mut JoinSet<()>,
+) {
+    if cards && !jobs.is_empty() {
+        let named = jobs.keys().cloned().collect::<Vec<_>>();
+        match read_named(core, &named, &HashSet::new()).await {
+            Ok(read) => {
+                take_read(read, true, &mut jobs);
+            }
+            Err(failure) => {
+                warn!(
+                    error = format!("{failure:#}"),
+                    "cannot read jobs from core at stop"
+                );
+            }
+        }
+    }
+    // Jobs still open end their tasks, which leave their cards recorded.
+    drop(jobs);
+    while tasks.join_next().await.is_some() {}
 }
 
 /// What one read of core showed: every job at work, and every job `named`

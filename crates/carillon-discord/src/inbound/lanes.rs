@@ -181,7 +181,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     Err(failure) => {
                         // Preparation code does not panic; if it ever does,
                         // the lane it held stays blocked rather than reordered.
-                        warn!(error = %failure, "a Discord message preparation task failed");
+                        warn!(error = format!("{failure:#}"), "a Discord message preparation task failed");
                         continue;
                     }
                 };
@@ -260,7 +260,7 @@ async fn settle(ingress: &Ingress, event: &ExternalEvent) {
     match submit_event_with_retry(&ingress.core, &ingress.stopping, event).await {
         Some(Ok(_)) => {}
         Some(Err(failure)) => {
-            warn!(error = %failure.message, event_id = %event.event_id, "core refused a command after its answer was late");
+            warn!(error = format!("{failure:#}"), event_id = %event.event_id, "core refused a command after its answer was late");
             ingress.reactions.show_outcome(target, Feedback::Failed);
         }
         None => {
