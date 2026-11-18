@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 
 use anyhow::ensure;
+use carillon_protocol::observation::KEEP_ALIVE;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -337,7 +338,14 @@ async fn a_stream_its_page_reads_stays_open_through_two_minutes_of_a_paused_cloc
     let opened = Instant::now();
     let mut read = [0; 4096];
     while opened.elapsed() < Duration::from_secs(120) {
-        let length = page.read(&mut read).await?;
+        let length = tokio::time::timeout(2 * KEEP_ALIVE, page.read(&mut read))
+            .await
+            .with_context(|| {
+                format!(
+                    "the stream sent nothing for two keep-alives, {:?} after it opened",
+                    opened.elapsed()
+                )
+            })??;
         ensure!(
             length > 0,
             "the stream closed {:?} after it opened",
