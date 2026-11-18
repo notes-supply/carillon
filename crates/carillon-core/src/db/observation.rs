@@ -3,13 +3,13 @@
 //! all of it, so every part of a snapshot is of the same moment. Nothing
 //! here writes.
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use carillon_protocol::{
     conversations::TurnSource,
     model::{TurnActivity, TurnState},
     observation::{
-        Conversation, ConversationKey, Ending, ObservedTurn, OpenView, Opened, Progress, Snapshot,
-        View,
+        Conversation, ConversationKey, Ending, ObservedTurn, OpenView, Opened, Progress,
+        SNAPSHOT_LIMIT, Snapshot, View,
     },
     turns::Silence,
 };
@@ -19,6 +19,12 @@ use super::{
     CapturedFile, Database, OptionalExtension, RUNTIME_EVENT_PREFIX, Result, answer_files,
     captured_files, optional_json_column, optional_state_column, params, state_column,
 };
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "this view's snapshot takes at least {0} bytes, over the {SNAPSHOT_LIMIT} a snapshot may take: ask for fewer turns"
+)]
+pub(crate) struct TooLarge(pub(crate) usize);
 
 /// A running turn and the runtime that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,7 +186,8 @@ fn progress(
 }
 
 /// The interface's conversation `open` names, with the newest turns it
-/// asks for.
+/// asks for. Its turns' text is in the serialized snapshot at least once,
+/// so the read stops as soon as that text alone is over [`SNAPSHOT_LIMIT`].
 fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Result<Opened> {
     let key = &open.conversation;
     let Some(conversation) = connection
@@ -210,17 +217,20 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
         key.audience_id(),
         u32::from(limit) + 1
     ])?;
-    let (mut turns, mut earlier) = (Vec::new(), false);
+    let (mut turns, mut earlier, mut text) = (Vec::new(), false, 0);
     while let Some(row) = rows.next()? {
         if turns.len() == usize::from(limit) {
             earlier = true;
             break;
         }
         let turn_id: String = row.get(0)?;
+        let input: String = row.get(2)?;
         let delivered = match row.get::<_, Option<String>>(8)? {
             Some(content) => Some((content, optional_state_column(row, 9)?)),
             None => None,
         };
+        text += input.len() + delivered.as_ref().map_or(0, |(content, _)| content.len());
+        ensure!(text <= SNAPSHOT_LIMIT, TooLarge(text));
         let report = optional_json_column(row, 7)?;
         let progress = progress(
             &turn_id,
@@ -231,7 +241,7 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
         )?;
         turns.push(ObservedTurn {
             turn_id,
-            source: source(row.get(1)?, row.get(2)?, row.get(3)?),
+            source: source(row.get(1)?, input, row.get(3)?),
             accepted_at: row.get(5)?,
             progress,
         });

@@ -25,7 +25,7 @@ use tokio::{sync::watch, time::Instant};
 use tracing::warn;
 
 use super::{ApiError, AppState, activity::activities, interface_provider};
-use crate::db::HeldTurn;
+use crate::db::{HeldTurn, TooLarge};
 
 /// How long after a snapshot that shows a running turn core composes the
 /// next one, which asks the turn's runtime again.
@@ -35,12 +35,6 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// changes are committed, a stream costs two compositions a second, and a
 /// runtime two calls a second for each running turn the stream shows.
 const COMPOSITION_GAP: Duration = Duration::from_millis(500);
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "this view's snapshot takes {0} bytes, over the {SNAPSHOT_LIMIT} a snapshot may take: ask for fewer turns"
-)]
-struct TooLarge(usize);
 
 /// One reader's stream of a view.
 struct Observation {
