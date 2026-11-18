@@ -30,8 +30,7 @@ fn wanted(known: &Known) -> Vec<ControlAction> {
         .and_then(|job| job.at_work())
         .filter(|turn| turn.state == TurnState::Running)
         .and_then(|turn| turn.activity.as_ref())
-        .map(|activity| activity.controls.clone())
-        .unwrap_or_default()
+        .map_or_default(|activity| activity.controls.clone())
 }
 
 /// Keeps a job's message offering what its readings say, as the settings

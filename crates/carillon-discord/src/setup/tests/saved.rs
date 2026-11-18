@@ -132,10 +132,7 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
     let config = installation(directory.path(), "201", TOKEN)?;
     let before = saved_files(&config)?;
     let (result, shown) = run(&config, "127.0.0.1:1".parse()?, &[]).await;
-    let failure = result
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+    let failure = result.err().map_or_default(|error| format!("{error:#}"));
     assert!(
         failure.starts_with(
             "Discord did not say whether the saved bot token still works; nothing was changed: "

@@ -731,8 +731,7 @@ mod tests {
         let held = MaintenanceLock::acquire(home)?;
         let refusal = super::run_locked(&program, &arguments, home)
             .err()
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_default();
+            .map_or_default(|error| format!("{error:#}"));
         assert!(
             refusal.contains("another Carillon maintenance operation"),
             "{refusal}"

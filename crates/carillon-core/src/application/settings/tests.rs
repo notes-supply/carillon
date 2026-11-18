@@ -260,10 +260,7 @@ fn a_key_names_a_line_and_a_value_one_of_its_choices() -> Result<()> {
 }
 
 fn refusal(result: Result<Change>) -> String {
-    result
-        .err()
-        .map(|error| error.to_string())
-        .unwrap_or_default()
+    result.err().map_or_default(|error| error.to_string())
 }
 
 #[test]
@@ -602,12 +599,8 @@ async fn channels_are_listed_shown_and_changed_left_to_right() -> Result<()> {
 async fn the_first_refusal_stops_the_rest_and_an_unknown_change_is_never_sent() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let (config, stub, served) = installation(directory.path()).await?;
-    let failure = |result: Result<String>| {
-        result
-            .err()
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_default()
-    };
+    let failure =
+        |result: Result<String>| result.err().map_or_default(|error| format!("{error:#}"));
     assert_eq!(
         failure(run(&config, None, &["300", "agent=assistant", "thinking=low"]).await),
         "agent: Agent is read-only."

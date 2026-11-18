@@ -630,10 +630,7 @@ async fn setup_during_other_maintenance_changes_neither_token_nor_settings() -> 
     let address = discord(Arc::new(Discord::default())).await?;
     let held = carillon_installation::maintenance::MaintenanceLock::acquire(&config.root)?;
     let (result, _) = run(&config, address, &[TOKEN, "", "", "", "", ""]).await;
-    let refusal = result
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+    let refusal = result.err().map_or_default(|error| format!("{error:#}"));
     assert!(
         refusal.contains("were not changed") && refusal.contains("another Carillon maintenance"),
         "{refusal}"
@@ -700,10 +697,7 @@ async fn setup_of_a_disabled_provider_is_refused_before_any_question() -> anyhow
         }
     }
     let (result, shown) = run(&config, "127.0.0.1:1".parse()?, &[]).await;
-    let refusal = result
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+    let refusal = result.err().map_or_default(|error| format!("{error:#}"));
     assert_eq!(
         refusal,
         "discord-private is disabled in carillon.toml; enable it with `carillon provider \

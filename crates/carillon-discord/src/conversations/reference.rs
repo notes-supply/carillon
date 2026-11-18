@@ -225,8 +225,7 @@ impl Reader<'_> {
         sender
             .and_then(|sender| sender.channel_id)
             .filter(|channel| channel.to_string() != self.channel_id)
-            .map(|channel| format!(" from <#{channel}>"))
-            .unwrap_or_default()
+            .map_or_default(|channel| format!(" from <#{channel}>"))
     }
 }
 

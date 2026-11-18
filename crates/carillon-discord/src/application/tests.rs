@@ -665,8 +665,7 @@ async fn agent_operations_authenticate_before_parsing_and_refuse_simulation() ->
 fn names(module: &Value) -> Vec<&str> {
     module["commands"]
         .as_array()
-        .map(|names| names.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default()
+        .map_or_default(|names| names.iter().filter_map(Value::as_str).collect())
 }
 
 /// Saves the settings `state` serves with the custom module `custom.wasm`

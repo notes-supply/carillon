@@ -307,14 +307,11 @@ fn insert_element(array: &mut Array, index: usize, mut value: toml_edit::Value) 
     let following = if array.trailing_comma() {
         trailing(array)
     } else {
-        array
-            .get_mut(last)
-            .map(|last| {
-                let suffix = raw(last.decor().suffix()).to_owned();
-                last.decor_mut().set_suffix("");
-                suffix
-            })
-            .unwrap_or_default()
+        array.get_mut(last).map_or_default(|last| {
+            let suffix = raw(last.decor().suffix()).to_owned();
+            last.decor_mut().set_suffix("");
+            suffix
+        })
     };
     let (line, rest) = split_after_newline(&following);
     let (own, following) = match (line.is_empty(), previous.contains('\n')) {

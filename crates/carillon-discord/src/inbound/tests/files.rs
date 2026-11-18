@@ -251,18 +251,14 @@ fn submit(core: &Shared, staging: &std::path::Path, event: &ExternalEvent) -> Re
     let entry = format!("submit {}", event.event_id);
     core.trace.push(entry.clone());
     core.times.push((entry, Instant::now()));
-    let staged = event
-        .attachments
-        .as_ref()
-        .map(|batch| {
-            (0..batch.files.len())
-                .map(|ordinal| {
-                    std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let staged = event.attachments.as_ref().map_or_default(|batch| {
+        (0..batch.files.len())
+            .map(|ordinal| {
+                std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
+                    .unwrap_or_default()
+            })
+            .collect()
+    });
     core.staged.push(staged);
     core.submissions.push(event.clone());
     if core.unavailable.contains(&event.event_id) {

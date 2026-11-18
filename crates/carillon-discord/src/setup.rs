@@ -224,8 +224,7 @@ pub(crate) async fn setup(
         })
         .collect::<Result<Vec<_>>>()?;
     let direct = answering_direct_messages(loaded, &settings)?
-        .map(|agent| format!(" Direct messages from them go to {agent}."))
-        .unwrap_or_default();
+        .map_or_default(|agent| format!(" Direct messages from them go to {agent}."));
     prompt.say(&format!(
         "{} answers {} in {} on {guild}.{direct}",
         bot.name,
