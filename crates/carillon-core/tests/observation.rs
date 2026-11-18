@@ -144,6 +144,27 @@ async fn stop(mut core: Child) -> Result<Duration> {
     Ok(told.elapsed())
 }
 
+/// The most memory `core` has held since [`reset_peak`], as Linux records it.
+fn peak(core: &Child) -> Result<u64> {
+    let pid = core.id().context("core already ended")?;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .context("the process status has no peak")?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()?;
+    Ok(kib << 10)
+}
+
+/// Lowers `core`'s recorded peak to what it holds now.
+fn reset_peak(core: &Child) -> Result<()> {
+    let pid = core.id().context("core already ended")?;
+    Ok(std::fs::write(format!("/proc/{pid}/clear_refs"), "5")?)
+}
+
 fn open(audience: &str) -> Result<View> {
     Ok(View {
         conversations: Limit::default(),
@@ -191,6 +212,60 @@ async fn an_interface_follows_its_view_until_core_stops_and_again_once_core_is_b
     let again = observation.next().await?.context("no first snapshot")?;
     assert_eq!(again.conversations.len(), 1);
     assert_eq!(queued(&again), [(turn_id, Progress::Queued)]);
+    stop(core).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_window_over_the_snapshot_limit_is_refused_before_its_text_is_all_read() -> Result<()> {
+    let installation = Installation::create()?;
+    let core = installation.serve().await?;
+    // 64 MiB of text in one window, four times what a snapshot may take.
+    let window: u16 = 64;
+    let megabyte = "x".repeat(1 << 20);
+    for index in 0..window {
+        let event = format!("long {index}");
+        installation
+            .say(&event, "someone", megabyte.clone())
+            .await?;
+    }
+    let shown = |turns| -> Result<View> {
+        Ok(View {
+            conversations: Limit::default(),
+            open: Some(OpenView {
+                conversation: ConversationKey::new("assistant".to_owned(), "someone".to_owned())?,
+                turns: Limit::new(turns)?,
+            }),
+        })
+    };
+    let (client, whole) = (installation.client()?, shown(window)?);
+    reset_peak(&core)?;
+    let held = peak(&core)?;
+    let (one, two) = tokio::join!(client.observe(&whole), client.observe(&whole));
+    for read in [one, two] {
+        let refused = read.err().context("a window over the limit was shown")?;
+        assert_eq!(
+            refused.status,
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            refused.message
+        );
+    }
+    let grew = peak(&core)?.saturating_sub(held);
+    assert!(
+        grew < u64::from(window) << 20,
+        "core's peak grew by {grew} bytes"
+    );
+    let fewer = client
+        .observe(&shown(8)?)
+        .await?
+        .next()
+        .await?
+        .context("no first snapshot")?;
+    let Some(Opened::Recorded { turns, .. }) = fewer.open else {
+        bail!("the conversation is not recorded");
+    };
+    assert_eq!(turns.len(), 8);
     stop(core).await?;
     Ok(())
 }
