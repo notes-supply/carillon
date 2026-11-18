@@ -39,6 +39,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
+use tower_http::timeout::RequestBodyTimeoutLayer;
 use tracing::{info, warn};
 
 use crate::{
@@ -155,6 +156,12 @@ const MAX_CONNECTIONS: usize = 512;
 /// at a time, does not hold it open.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a request's body may send nothing before the request fails and
+/// its connection closes, so a peer that sends a request's headers and then
+/// nothing does not hold the connection open. It bounds each pause, not the
+/// whole body: an upload from a phone on a weak network pauses and goes on.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How long the provider waits after a failed accept, such as one refused
 /// for want of a descriptor, so the failure is not retried in a busy loop.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
@@ -231,10 +238,10 @@ pub(crate) async fn until_stopped(
     }
 }
 
-/// Every route. The gate wraps them all, the fallback included, so a route
-/// added here cannot be reached around it. A route added under `/api` needs
-/// the browser's token and one under `/v1` the operator's credential,
-/// whether or not it remembers to ask.
+/// Every route. The gate and [`BODY_IDLE_TIMEOUT`] wrap them all, the
+/// fallback included, so a route added here cannot be reached around them. A
+/// route added under `/api` needs the browser's token and one under `/v1` the
+/// operator's credential, whether or not it remembers to ask.
 pub(crate) fn router(web: Arc<Web>) -> Router {
     // Each has a fallback of its own, inside its layer: a path that is no
     // route is refused like one that is, and never reaches the page's files.
@@ -260,6 +267,7 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .route("/files/{*path}", get(files::file))
         .fallback(site::file)
         .layer(from_fn_with_state(Arc::clone(&web), gate))
+        .layer(RequestBodyTimeoutLayer::new(BODY_IDLE_TIMEOUT))
         .with_state(web)
 }
 
