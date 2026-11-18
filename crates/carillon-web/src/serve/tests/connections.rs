@@ -8,7 +8,7 @@ use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpSocket, TcpStream},
-    sync::Notify,
+    sync::{Mutex, Notify},
 };
 
 use super::*;
@@ -72,6 +72,10 @@ async fn hold_an_upload(address: SocketAddr, token: &str) -> Result<TcpStream> {
     Ok(browser)
 }
 
+/// Holding every connection takes most of the descriptors a process may
+/// have, so tests that do take turns when they share a process.
+static HOLDING_EVERY_CONNECTION: Mutex<()> = Mutex::const_new(());
+
 async fn hold_every_connection(address: SocketAddr, token: &str) -> Result<Vec<TcpStream>> {
     // The cap's connections and the test's own ends of them pass the soft
     // descriptor limit a service manager gives a process by default.
@@ -101,6 +105,7 @@ async fn hold_every_connection(address: SocketAddr, token: &str) -> Result<Vec<T
 #[tokio::test]
 async fn a_connection_past_the_cap_is_unanswered_for_a_second_until_a_held_one_closes() -> Result<()>
 {
+    let _holding = HOLDING_EVERY_CONNECTION.lock().await;
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -147,6 +152,7 @@ async fn a_connection_past_the_cap_is_unanswered_for_a_second_until_a_held_one_c
 #[tokio::test]
 async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_of_a_paused_clock()
 -> Result<()> {
+    let _holding = HOLDING_EVERY_CONNECTION.lock().await;
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
