@@ -6,12 +6,8 @@
 //! run, by `UnitsLock`, held as [`HeldUnits`].
 
 use std::{
-    fmt,
-    fs::{self, HomeDirs},
-    os::unix::{
-        fs::{DirBuilderExt as _, HomeDirsExt as _},
-        process::CommandExt as _,
-    },
+    fmt, fs,
+    os::unix::{fs::DirBuilderExt as _, process::CommandExt as _},
     path::{Path, PathBuf},
     process::Command as Process,
     time::{Duration, Instant},
@@ -234,11 +230,15 @@ impl<'a> Services<'a> {
 }
 
 fn unit_directory() -> Result<PathBuf> {
-    HomeDirs::xdg()
-        .context("HOME must be an absolute path")?
-        .config_home()
-        .map(|configuration| configuration.join("systemd/user"))
-        .context("the user has no configuration folder")
+    let configuration = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+    {
+        Some(directory) => PathBuf::from(directory),
+        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
+    };
+    if !configuration.is_absolute() {
+        bail!("HOME and XDG_CONFIG_HOME must be absolute paths");
+    }
+    Ok(configuration.join("systemd/user"))
 }
 
 /// Reverse the registration script's `Environment="CARILLON_HOME=…"` quoting.
