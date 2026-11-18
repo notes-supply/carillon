@@ -32,7 +32,7 @@ use crate::{
     api::{AWAY, from_core},
     browser::refusal,
     identity::{ConversationId, ConversationKey, EventId},
-    send::bound::{BodyError, Meter, Metered},
+    send::bound::{BodyError, Meter},
     serve::Web,
 };
 
@@ -257,7 +257,7 @@ pub(crate) async fn send(
             )
         })?;
     let meter = Meter::new();
-    let parts = Multipart::new(Metered::new(body, Arc::clone(&meter)), boundary);
+    let parts = Multipart::new(meter.feed(body), boundary);
     let key = ConversationKey {
         agent_id,
         audience_id,

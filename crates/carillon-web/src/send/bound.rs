@@ -7,27 +7,23 @@
 //! while it looks for their end. A header that never ends makes the provider
 //! hold all of it.
 //!
-//! [`Metered`] wraps the body and feeds the parser at most [`BETWEEN_PARTS`]
-//! bytes between one part and the next. [`Meter::parts`] opens that window
-//! before a boundary and its headers are read; [`Meter::data`] lifts it while
-//! a part's data streams, since that data is bounded elsewhere.
+//! [`Meter::feed`] feeds the parser the body at most [`BETWEEN_PARTS`] bytes
+//! between one part and the next. [`Meter::parts`] opens that window before
+//! a boundary and its headers are read; [`Meter::data`] lifts it while a
+//! part's data streams, since that data is bounded elsewhere.
 //! [`Meter::refuse`] caps every later window at [`REFUSED_DRAIN`] past the
 //! refusal, so the rest of a refused message is read within one budget,
 //! boundaries and headers included. A window a peer overruns ends the request
 //! with [`BodyError::Overrun`], which the handler answers 413.
 
-use std::{
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
-    },
-    task::{Context, Poll},
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering::Relaxed},
 };
 
-use axum::body::{Body, BodyDataStream};
+use axum::body::Body;
 use bytes::Bytes;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _, stream};
 
 /// The most a peer may send between two parts: the preamble before the first
 /// boundary, a boundary line, and a part's headers. A real boundary and
@@ -52,8 +48,8 @@ pub(crate) enum BodyError {
     Read(axum::Error),
 }
 
-/// How far into the body the parser may read, and whether it was already
-/// told the open window was spent. The handler and the body share one.
+/// How far into the body the parser may read. The handler opens the
+/// windows, and the body it feeds the parser spends them.
 pub(crate) struct Meter {
     /// Bytes the body has fed the parser.
     fed: AtomicUsize,
@@ -61,7 +57,6 @@ pub(crate) struct Meter {
     end: AtomicUsize,
     /// Where every window ends once the message is refused.
     limit: AtomicUsize,
-    spent: AtomicBool,
 }
 
 impl Meter {
@@ -70,7 +65,36 @@ impl Meter {
             fed: AtomicUsize::new(0),
             end: AtomicUsize::new(0),
             limit: AtomicUsize::new(usize::MAX),
-            spent: AtomicBool::new(false),
+        })
+    }
+
+    /// `body` as the parser reads it: no further than the open window, and
+    /// every byte counted. A frame that outruns the window is fed in parts.
+    ///
+    /// When the window is spent, the body waits once, so the parser parses
+    /// what it holds. A parser that asks again with the window still spent
+    /// has asked past it, and the body ends with [`BodyError::Overrun`].
+    pub(crate) fn feed(
+        self: &Arc<Self>,
+        body: Body,
+    ) -> impl Stream<Item = Result<Bytes, BodyError>> + Send + 'static {
+        let start = (Arc::clone(self), body.into_data_stream(), Bytes::new());
+        stream::try_unfold(start, |(meter, mut body, mut held)| async move {
+            if meter.budget() == 0 {
+                tokio::task::yield_now().await;
+                if meter.budget() == 0 {
+                    return Err(BodyError::Overrun);
+                }
+            }
+            if held.is_empty() {
+                let Some(frame) = body.next().await else {
+                    return Ok(None);
+                };
+                held = frame.map_err(BodyError::Read)?;
+            }
+            let fed = held.split_to(held.len().min(meter.budget()));
+            meter.fed.fetch_add(fed.len(), Relaxed);
+            Ok(Some((fed, (meter, body, held))))
         })
     }
 
@@ -95,73 +119,11 @@ impl Meter {
 
     fn open(&self, end: usize) {
         self.end.store(end.min(self.limit.load(Relaxed)), Relaxed);
-        self.spent.store(false, Relaxed);
     }
 
     fn budget(&self) -> usize {
         self.end
             .load(Relaxed)
             .saturating_sub(self.fed.load(Relaxed))
-    }
-}
-
-/// The body, feeding the parser no more than the open window allows.
-pub(crate) struct Metered {
-    inner: BodyDataStream,
-    meter: Arc<Meter>,
-    /// Bytes split off a frame that overran the window, held until the window
-    /// reopens.
-    leftover: Option<Bytes>,
-}
-
-impl Metered {
-    pub(crate) fn new(body: Body, meter: Arc<Meter>) -> Self {
-        Self {
-            inner: body.into_data_stream(),
-            meter,
-            leftover: None,
-        }
-    }
-
-    /// Yields up to `budget` bytes of `chunk`, holding any remainder. The
-    /// parser gets the window's worth; the rest waits for the window to
-    /// reopen, when the part it belongs to is read.
-    fn hand_over(&mut self, mut chunk: Bytes, budget: usize) -> Bytes {
-        if chunk.len() > budget {
-            self.leftover = Some(chunk.split_off(budget));
-        }
-        self.meter.fed.fetch_add(chunk.len(), Relaxed);
-        chunk
-    }
-}
-
-impl Stream for Metered {
-    type Item = Result<Bytes, BodyError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        let budget = this.meter.budget();
-        if budget == 0 {
-            // The window is spent. The parser is told once to work with what
-            // it has; a second ask with no part read in between means the
-            // headers, the preamble or a refused message outran the window,
-            // so the request ends. The parser only asks again once more body
-            // has arrived, which a self-wake lets it do while the body stays
-            // parked.
-            if this.meter.spent.swap(true, Relaxed) {
-                return Poll::Ready(Some(Err(BodyError::Overrun)));
-            }
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        if let Some(chunk) = this.leftover.take() {
-            return Poll::Ready(Some(Ok(this.hand_over(chunk, budget))));
-        }
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(this.hand_over(chunk, budget)))),
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(BodyError::Read(error)))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
     }
 }
