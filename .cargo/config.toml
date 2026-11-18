@@ -1,2 +1,14 @@
 [registry]
 global-min-publish-age = "7 days"
+
+[unstable]
+profile-rustflags = true
+
+# rustc's parallel front end shortens dev and test builds of the workspace's
+# crates when cargo can grant it threads. Dependencies keep their flags, so
+# their cached builds stay valid, and release builds are untouched.
+[profile.dev]
+rustflags = ["-Zthreads=8"]
+
+[profile.dev.package."*"]
+rustflags = []
