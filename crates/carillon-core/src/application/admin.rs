@@ -567,12 +567,11 @@ mod tests {
         )
     }
 
-    /// A base port for backups that must find their services stopped, away
-    /// from 44800-44842, where the install, maintenance and operations tests
-    /// run real services by default, and below Linux's default ephemeral
-    /// range (32768-60999), from which any socket on the host, including this
-    /// binary's own, may be given a port.
-    const OFFLINE_BACKUP_PORT: u16 = 31_400;
+    /// An installation whose services a backup finds stopped: nothing
+    /// listened on its ports a moment ago.
+    fn offline_installation(root: &Path, workspace: &Path) -> Result<PathBuf> {
+        initialize_test_installation(root, workspace, crate::ports::available_base_port()?)
+    }
 
     #[test]
     fn initialization_rejects_unusable_workspaces_without_publishing_state() -> Result<()> {
@@ -721,7 +720,7 @@ mod tests {
     fn backup_refuses_special_entries_without_publishing_and_can_retry() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize_test_installation(&root, directory.path(), 45_100)?;
+        let config_path = offline_installation(&root, directory.path())?;
         let config = LoadedConfig::load(&config_path)?;
         let private = root.join("state/components/custom");
         fs::create_dir_all(&private)?;
@@ -772,7 +771,7 @@ mod tests {
     fn backup_archive_is_owner_only() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize_test_installation(&root, directory.path(), 44_100)?;
+        let config_path = offline_installation(&root, directory.path())?;
         let destination = directory.path().join("backup.tar.gz");
 
         backup(&LoadedConfig::load(&config_path)?, &destination)?;
@@ -788,7 +787,7 @@ mod tests {
     fn backup_restores_sparse_files_as_regular_files() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize_test_installation(&root, directory.path(), 44_900)?;
+        let config_path = offline_installation(&root, directory.path())?;
         let path = root.join("sparse-executable");
         let file = fs::File::create(&path)?;
         file.set_len(1_048_576)?;
@@ -818,7 +817,7 @@ mod tests {
     fn backup_rejects_symlink_and_traversal_destinations_inside_installation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize_test_installation(&root, directory.path(), 44_400)?;
+        let config_path = offline_installation(&root, directory.path())?;
         let mut config = LoadedConfig::load(&config_path)?;
         let inside = root.join("backups");
         fs::create_dir(&inside)?;
@@ -852,7 +851,7 @@ mod tests {
         for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
-            let config_path = initialize_test_installation(&root, directory.path(), 44_500)?;
+            let config_path = offline_installation(&root, directory.path())?;
             let external = directory.path().join("external");
             fs::create_dir(&external)?;
             fs::write(external.join("owned-state"), b"must not be omitted")?;
@@ -897,7 +896,7 @@ mod tests {
         for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
-            let config_path = initialize_test_installation(&root, directory.path(), 44_700)?;
+            let config_path = offline_installation(&root, directory.path())?;
             let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
             match field {
                 "data_dir" => config.data_dir = root.join("state"),
@@ -968,8 +967,7 @@ mod tests {
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
-            let config_path =
-                initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
+            let config_path = offline_installation(&source, directory.path())?;
             let valid = directory.path().join("valid.tar.gz");
             backup(&LoadedConfig::load(&config_path)?, &valid)?;
             let database = source.join("state/carillon.sqlite3");
@@ -1074,8 +1072,7 @@ mod tests {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
                 let source = directory.path().join("source");
-                let config_path =
-                    initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
+                let config_path = offline_installation(&source, directory.path())?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
                 let snapshot =
@@ -1178,11 +1175,7 @@ mod tests {
 
         let directory = tempdir()?;
         let source = directory.path().join("source");
-        let config = LoadedConfig::load(&initialize_test_installation(
-            &source,
-            directory.path(),
-            44_950,
-        )?)?;
+        let config = LoadedConfig::load(&offline_installation(&source, directory.path())?)?;
         let core = installed_core(&config)?;
         let staging = config
             .value
@@ -1323,7 +1316,7 @@ mod tests {
     fn backup_restores_opaque_native_state_without_bundled_provider_requirements() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("source");
-        let config_path = initialize_test_installation(&root, directory.path(), 44_900)?;
+        let config_path = offline_installation(&root, directory.path())?;
         let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
         config
             .providers
@@ -1380,7 +1373,7 @@ mod tests {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace)?;
         fs::write(workspace.join("user-file"), b"user-owned")?;
-        let config_path = initialize_test_installation(&root, &workspace, 44_600)?;
+        let config_path = offline_installation(&root, &workspace)?;
         fs::write(root.join("state/owned-state"), b"durable state")?;
         fs::write(root.join("agents/default/SYSTEM.md"), b"agent instructions")?;
         let output = directory.path().join("backups");
@@ -1413,7 +1406,7 @@ mod tests {
     fn failed_restore_leaves_target_retryable() -> Result<()> {
         let directory = tempdir()?;
         let source = directory.path().join("source");
-        let config_path = initialize_test_installation(&source, directory.path(), 44_200)?;
+        let config_path = offline_installation(&source, directory.path())?;
         let valid_archive = directory.path().join("valid.tar.gz");
         backup(&LoadedConfig::load(&config_path)?, &valid_archive)?;
 
@@ -1450,7 +1443,7 @@ mod tests {
     fn restore_uses_the_invoking_users_ownership() -> Result<()> {
         let directory = tempdir()?;
         let source = directory.path().join("source");
-        let config_path = initialize_test_installation(&source, directory.path(), 44_300)?;
+        let config_path = offline_installation(&source, directory.path())?;
         let valid = directory.path().join("valid.tar.gz");
         backup(&LoadedConfig::load(&config_path)?, &valid)?;
         let mut original = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(valid)?));

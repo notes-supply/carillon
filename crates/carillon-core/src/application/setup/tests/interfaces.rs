@@ -121,21 +121,17 @@ fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> 
         (
             Bundled::Discord,
             Bundled::Web,
-            "url = \"http://127.0.0.1:44004\"",
+            4,
             "max_upload_mib = 1024\ndelivery = \"retained\"\n",
         ),
-        (
-            Bundled::Web,
-            Bundled::Discord,
-            "url = \"http://127.0.0.1:44001\"",
-            "max_upload_mib = 20\n",
-        ),
+        (Bundled::Web, Bundled::Discord, 1, "max_upload_mib = 20\n"),
     ];
-    for (has, adds, url, facts) in cases {
+    for (has, adds, above_core, facts) in cases {
         let directory = tempfile::tempdir()?;
         let home = directory.path().join("home");
         let agents = vec![assistant(directory.path())];
-        let config_path = initialize(&home, 44_000, &[has, Bundled::Pi], agents)?;
+        let base = crate::ports::available_base_port()?;
+        let config_path = initialize(&home, base, &[has, Bundled::Pi], agents)?;
         let refused_by_a_full_walk = "runtime-pi";
         set_provider(&config_path, refused_by_a_full_walk, false)?;
         let expected_by_its_owner = "version = \"0.0.7\"";
@@ -159,9 +155,11 @@ fn naming_an_interface_adds_it_and_touches_nothing_else_of_an_installation() -> 
             std::fs::read_to_string(&config_path)?,
             format!(
                 "{providers}\n[[providers]]\nid = \"{id}\"\nrole = \"interface\"\n\
-                 program = \"{program}\"\nversion = \"{}\"\n{url}\ntoken_hash = \"{}\"\n\
-                 enabled = true\n{facts}{agents}",
-                added.version, added.token_hash
+                 program = \"{program}\"\nversion = \"{}\"\nurl = \"http://127.0.0.1:{}\"\n\
+                 token_hash = \"{}\"\nenabled = true\n{facts}{agents}",
+                added.version,
+                base + above_core,
+                added.token_hash
             )
         );
         let call = format!("setup --provider {id}\n");
@@ -195,7 +193,7 @@ fn program_ending(directory: &Path, name: &str, status: u8) -> anyhow::Result<()
 fn an_interface_whose_setup_does_not_finish_is_not_added_and_a_retry_adds_it() -> anyhow::Result<()>
 {
     let directory = tempfile::tempdir()?;
-    let (home, config_path) = web_only(directory.path(), 44_000)?;
+    let (home, config_path) = web_only(directory.path(), crate::ports::available_base_port()?)?;
     let before = std::fs::read(&config_path)?;
     let add = || {
         let named = ("CARILLON_TEST_SETUP_INTERFACE", "discord".as_ref());

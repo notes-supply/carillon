@@ -16,6 +16,10 @@ pub use engine::{
 };
 pub use runtime_client::RuntimeClient;
 
+#[cfg(test)]
+#[path = "../tests/support/ports.rs"]
+mod ports;
+
 /// Fails unless `result` is a refusal whose message, causes included,
 /// mentions `reason`.
 #[cfg(test)]
