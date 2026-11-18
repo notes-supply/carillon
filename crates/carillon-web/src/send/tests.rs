@@ -775,25 +775,30 @@ async fn a_body_that_ends_with_the_window_partway_through_a_part_s_headers_did_n
         format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\nX-Pad: ")
             .into_bytes();
     window.resize(64 * 1024, b'p');
-    // The window fills the first frame, so a byte past it comes in a second.
-    for (frames, status) in [
-        (vec![window.clone()], StatusCode::BAD_REQUEST),
+    // The window fills the first frame, so what comes past it comes in a
+    // second: a byte, or a read that failed.
+    let failed = || Err(std::io::Error::other("the browser went away"));
+    for (frames, status, past) in [
+        (vec![Ok(window.clone())], StatusCode::BAD_REQUEST, "the end"),
         (
-            vec![window.clone(), b"p".to_vec()],
+            vec![Ok(window.clone()), Ok(b"p".to_vec())],
             StatusCode::PAYLOAD_TOO_LARGE,
+            "a byte",
+        ),
+        (
+            vec![Ok(window.clone()), failed()],
+            StatusCode::BAD_REQUEST,
+            "a failed read",
         ),
     ] {
-        let sent = frames.len();
         let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
             .header(
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={BOUNDARY}"),
             )
-            .body(Body::from_stream(stream::iter(
-                frames.into_iter().map(Ok::<_, std::io::Error>),
-            )))?;
+            .body(Body::from_stream(stream::iter(frames)))?;
         let answer = fixture.send(request).await?;
-        assert_eq!(answer.status, status, "{sent} frames: {}", answer.text());
+        assert_eq!(answer.status, status, "{past}: {}", answer.text());
     }
     Ok(())
 }
