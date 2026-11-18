@@ -7,7 +7,6 @@
  * so it lives in the runtime's state directory, readable only by its owner,
  * never in an agent's resources.
  */
-import { createHash } from "node:crypto";
 import { open, type FileHandle } from "node:fs/promises";
 import {
   defineExtension,
@@ -16,10 +15,12 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import {
+  createMcpToolName,
   McpClient,
   McpError,
   McpHttpError,
   McpSessionExpiredError,
+  normalizeMcpInputSchema,
   StdioTransport,
   StreamableHttpTransport,
   toLlmContent,
@@ -57,8 +58,6 @@ const FileSchema = Type.Object(
  * two servers' tool names are alike.
  */
 const SERVER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
-/** Providers allow tool names of at most 64 characters. */
-const LONGEST_TOOL_NAME = 64;
 /** The most of an MCP failure the model or the log sees. */
 const LONGEST_FAILURE = 1_000;
 /** A connection that held this long was healthy, so the next one waits from the start. */
@@ -307,17 +306,12 @@ function failed(tool: string, reason: string) {
 function toolsOf(server: string, tools: readonly Tool[], client: McpClient): ToolRegistration[] {
   const names = new Set<string>();
   return tools.map((tool) => {
-    const name = toolName(server, tool.name, names);
+    const name = createMcpToolName(server, tool.name, (taken) => names.has(taken));
     names.add(name);
     return defineTool({
       name,
       description: tool.description ?? tool.title ?? tool.name,
-      // Providers take an object schema, and some refuse one without properties.
-      parameters: Type.Unsafe<Record<string, unknown>>({
-        ...tool.inputSchema,
-        type: "object",
-        properties: tool.inputSchema["properties"] ?? {},
-      }),
+      parameters: Type.Unsafe<Record<string, unknown>>(normalizeMcpInputSchema(tool.inputSchema)),
       deferred: true,
       async execute(args, _api, context) {
         let result: CallToolResult;
@@ -346,15 +340,4 @@ function toolsOf(server: string, tools: readonly Tool[], client: McpClient): Too
       },
     });
   });
-}
-
-/**
- * `mcp__<server>__<tool>` with every character but A-Z, a-z, 0-9 and _ as
- * _, shortened with a hash of both names when too long or already taken.
- */
-function toolName(server: string, tool: string, taken: ReadonlySet<string>): string {
-  const name = `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/gu, "_");
-  if (name.length <= LONGEST_TOOL_NAME && !taken.has(name)) return name;
-  const hash = createHash("sha256").update(`${server}\0${tool}`).digest("hex").slice(0, 8);
-  return `${name.slice(0, LONGEST_TOOL_NAME - hash.length - 1)}_${hash}`;
 }
