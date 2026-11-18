@@ -44,7 +44,11 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_a
     assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
     serving.await??;
     // A timer is a millisecond coarse.
-    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    let stopped = told.elapsed();
+    ensure!(
+        (Duration::from_secs(2)..=Duration::from_millis(2001)).contains(&stopped),
+        "the stop took {stopped:?}"
+    );
     Ok(())
 }
 
@@ -165,7 +169,11 @@ async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_
         .await
         .context("a provider holding every connection it serves did not stop")???;
     // A timer is a millisecond coarse.
-    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    let stopped = told.elapsed();
+    ensure!(
+        (Duration::from_secs(2)..=Duration::from_millis(2001)).contains(&stopped),
+        "the stop took {stopped:?}"
+    );
     drop(browsers);
     Ok(())
 }
