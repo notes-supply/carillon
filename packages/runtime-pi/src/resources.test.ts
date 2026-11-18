@@ -329,7 +329,7 @@ it.each([
       "extensions/waits.ts": "await new Promise(() => undefined);\nexport default {};\n",
       "settings.json": JSON.stringify({ extensions: ["extensions/waits.ts"] }),
     },
-    "extensions/waits.ts could not be loaded: its module did not finish importing within 0.2 seconds",
+    "extensions/waits.ts could not be loaded: its module did not finish importing within 5 seconds",
   ],
   ["a SYSTEM.md it cannot read", { "SYSTEM.md": "Be careful." }, "EACCES"],
   [
@@ -344,7 +344,7 @@ it.each([
   "answers a message whose resources have %s on the last that loaded, telling the agent why",
   async (_name, files, problem) => {
     const { read, results, answers } = callingPrevious(2);
-    const agent = await fixture({ answers, importDeadlineMs: 200 });
+    const agent = await fixture({ answers });
     await agent.ask("turn-1", "hello", { resource_root: await agent.snapshot(previous) });
     const root = await agent.snapshot(files);
     if (Object.hasOwn(files, "SYSTEM.md")) await chmod(join(root, "SYSTEM.md"), 0);
