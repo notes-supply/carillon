@@ -39,7 +39,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
-use tower_http::timeout::RequestBodyTimeoutLayer;
+use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
 use tracing::{info, warn};
 
 use crate::{
@@ -162,6 +162,12 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// whole body: an upload from a phone on a weak network pauses and goes on.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a sign-in has, once its headers are read, to arrive whole and be
+/// checked. Anyone who can reach the provider can send one, and a body sent a
+/// byte at a time is never idle, so this bounds how long a peer without the
+/// password holds a connection. A guess is a few bytes and its check a second.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long the provider waits after a failed accept, such as one refused
 /// for want of a descriptor, so the failure is not retried in a busy loop.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
@@ -257,10 +263,14 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
     Router::new()
         .route("/health", get(health))
         // Anyone who can reach the provider can send a guess, and a guess is
-        // read whole before it is checked, so its body is kept small.
+        // read whole before it is checked, so its body is kept small and its
+        // time short.
         .route(
             "/api/sign-in",
-            post(api::sign_in).layer(DefaultBodyLimit::max(4096)),
+            post(api::sign_in).layer((
+                DefaultBodyLimit::max(4096),
+                TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, SIGN_IN_TIMEOUT),
+            )),
         )
         .nest("/api", api)
         .nest("/v1", operator)
