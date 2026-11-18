@@ -183,9 +183,8 @@ const SIGN_IN_BODY: usize = r#"{"password":""}"#.len() + 6 * MAX_PASSWORD;
 /// How long a connection may wait to write before it is closed, so a peer
 /// that stops reading an answer does not hold it open. It bounds each wait,
 /// not the whole answer. The kernel wakes a waiting writer only once much of
-/// a full socket buffer has drained: a reader taking 10 KB a second kept a
-/// writer waiting 33 s. So only a reader slower than about 5 KB a second is
-/// cut off.
+/// a full socket buffer has drained, so a slow reader that keeps reading can
+/// keep a write waiting for tens of seconds.
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long the provider waits after an accept fails for want of something
