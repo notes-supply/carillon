@@ -132,6 +132,30 @@ async fn cross_guild_mutation_is_rejected_before_write() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn the_mock_fails_a_test_that_made_a_request_no_step_expects() -> anyhow::Result<()> {
+    let server = Mock::new(Vec::new()).await?;
+    let result = server
+        .execute(json!({"action":"channels.delete","channel_id":"2"}))
+        .await?;
+    result
+        .err()
+        .context("a request no step expects should fail")?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finished()))
+        .err()
+        .context("the mock passed a request no step expected")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_mock_fails_a_test_that_never_made_an_expected_request() -> anyhow::Result<()> {
+    let server = Mock::new(vec![get("/api/v10/channels/2", channel_fixture("1"))]).await?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finished()))
+        .err()
+        .context("the mock passed with an expected request never made")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn history_has_an_honest_cursor_and_preserves_string_ids() -> anyhow::Result<()> {
     let server = Mock::new(vec![
         get("/api/v10/channels/2", channel_fixture("1")),
