@@ -180,9 +180,10 @@ A Stop and the runtime's close wait for a running handler. An extension's
 hooks cost them one deadline, once, and each further extension whose hooks
 are late costs one more. While a handler is hanging, a Stop still stops
 the turn, but core's control relay gives up after 5 seconds, so
-`discord.log` and `core.log` record the Stop as not taken (504). Once it has closed after SIGINT or SIGTERM, the
-runtime ends its process, so nothing a module left open, such as a request
-that never answers, keeps it running. The deadline cannot stop a handler
+`discord.log` and `core.log` record the Stop as not taken (504). Once it has closed after SIGINT or SIGTERM, and
+Pi has saved a sign-in it was refreshing, the runtime ends its process, so
+nothing a module left open, such as a request that never answers, keeps it
+running. The deadline cannot stop a handler
 that never yields, and it does not cover an extension's tools, section
 `render` functions or `wraps`.
 

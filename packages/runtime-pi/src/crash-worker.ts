@@ -80,7 +80,7 @@ const runtime = await createPiRuntime({
   agents: [{ id: "default", workspace: root }],
   componentDirectory: root,
   skillsDirectory: fileURLToPath(BUILT_IN_SKILLS),
-  catalogue: { models, defaultThinking: () => "medium" },
+  catalogue: { models, defaultThinking: () => "medium", settled: () => Promise.resolve() },
   core: createCoreClient({ url, providerId: "runtime-pi", token: "test-only" }),
   images: {
     prepare: (bytes, mimeType) =>
