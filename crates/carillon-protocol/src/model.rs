@@ -123,6 +123,12 @@ pub struct Health {
 /// sent as. An interface keeps what a person wrote within it.
 pub const EVENT_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
+/// The most bytes a runtime reads of a turn core hands it, as JSON: any
+/// event core accepts, with room for what core adds to it, such as the
+/// turn's directories and its files' paths. A runtime refuses a larger
+/// turn with 413.
+pub const TURN_REQUEST_LIMIT: usize = EVENT_BODY_LIMIT + 64 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalEvent {
     pub event_id: String,

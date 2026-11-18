@@ -1,7 +1,10 @@
 //! Both languages consume the same wire examples, including canonical round trips.
 use anyhow::{Context as _, Result};
 use carillon_protocol::{
-    model::{CommandCatalog, ExternalEvent, OpenedTurn, RuntimeTurnRequest, TurnActivity},
+    model::{
+        CommandCatalog, ExternalEvent, OpenedTurn, RuntimeTurnRequest, TURN_REQUEST_LIMIT,
+        TurnActivity,
+    },
     settings::{Page, RuntimeSettings, SettingsRequest, Subject, Value as SettingValue},
     turns::{ANSWER_FILE_LIMIT, RunningTurn, RuntimeTurnControl, TurnOpening, TurnOutcome},
 };
@@ -180,15 +183,18 @@ fn shared_activity_wire_fixtures() -> Result<()> {
 
 #[derive(Deserialize)]
 struct TurnFixtures {
+    request_limit: usize,
     requests: Vec<Value>,
 }
 
-/// Core produces these requests; the runtime's schema validates them.
+/// Core produces these requests, within the size runtimes read; the
+/// runtime's schema validates them.
 #[test]
 fn shared_runtime_turn_wire_fixtures() -> Result<()> {
     let fixtures: TurnFixtures = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/turns.json"
     ))?;
+    assert_eq!(TURN_REQUEST_LIMIT, fixtures.request_limit);
     for value in &fixtures.requests {
         round_trip::<RuntimeTurnRequest>(value)?;
     }

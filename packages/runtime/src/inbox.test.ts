@@ -1,4 +1,4 @@
-import type { ControlAction } from "@carillon/protocol";
+import { TURN_REQUEST_LIMIT, type ControlAction } from "@carillon/protocol";
 import { once } from "node:events";
 import { expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
@@ -97,6 +97,31 @@ it("answers 202 once a turn is kept, and passes a refusal through", async () => 
       body: { error: "invalid runtime turn request" },
     });
     expect((await call("/v1/inbox", turn("hello"), "wrong")).status).toBe(403);
+  } finally {
+    await close();
+  }
+});
+
+it("takes a turn as large as core hands over and refuses a larger one with 413", async () => {
+  let kept = 0;
+  const { call, close } = await serve({
+    submit: () => {
+      kept += 1;
+      return Promise.resolve();
+    },
+    control: () => Promise.resolve(),
+  });
+  const sized = (bytes: number) =>
+    turn("x".repeat(bytes - Buffer.byteLength(JSON.stringify(turn("")))));
+  try {
+    expect(await call("/v1/inbox", sized(TURN_REQUEST_LIMIT))).toEqual({ status: 202, body: {} });
+    expect(await call("/v1/inbox", sized(TURN_REQUEST_LIMIT + 1))).toEqual({
+      status: 413,
+      body: {
+        error: "That message is too large for this agent's runtime, which takes about 2 MiB.",
+      },
+    });
+    expect(kept).toBe(1);
   } finally {
     await close();
   }
