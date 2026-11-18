@@ -49,6 +49,7 @@ interface Overrides {
   readonly token?: string;
   readonly projectId?: string;
   readonly reconnectDelayMs?: number;
+  readonly timeoutMs?: number;
   readonly connect?: Connect;
   /** The stops file as the runtime reads it at start; by default, none kept yet. */
   readonly stops?: StopsFile;
@@ -70,7 +71,7 @@ export function build(overrides: Overrides = {}) {
     ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
     reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
     settleMs: 500,
-    timeoutMs: 2_000,
+    timeoutMs: overrides.timeoutMs ?? 2_000,
   });
 }
 
