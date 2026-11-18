@@ -145,9 +145,10 @@ before it copies any file. A runtime reads a turn of up to 2 MiB and 64 KiB
 (`TURN_REQUEST_LIMIT`), which holds any event core accepts and what core
 adds to it: the channel recorded with the conversation's first message, the
 turn's directories, and each file's path and digest. It refuses a larger
-turn with 413, which interrupts that turn,
-so the turns behind it are still handed over. The runtime later settles the turn with
-its own credential: answered, failed with an explanation it judged safe to
+turn with 413. Core then interrupts that turn, which the runtime never held,
+so the turns behind it are still handed over. The runtime later settles each
+turn it took with its own credential: answered, failed with an explanation it
+judged safe to
 show, steered into an answer that another message carries, on Pi the newest
 of those that joined it, or stopped. Steered and
 stopped deliver a silence the interface shows on the message instead of a
