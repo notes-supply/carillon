@@ -71,8 +71,9 @@ another and starts from its first snapshot. Core authenticates the caller
 before it reads the view, and composes the first snapshot before it
 answers, so a view it does not accept is refused with 400 and one whose
 snapshot is over 16 MiB with 413. It stops reading a window once the text of
-its turns alone is over 16 MiB, so it never holds the whole of a window it
-refuses.
+its turns alone is over 16 MiB. A window whose text fits but whose JSON does
+not, such as one full of characters JSON escapes, is still read whole before
+it is refused.
 
 A snapshot is composed in a fixed order. Core reads which turns of the open
 window run, asks their runtimes what they are doing outside any
