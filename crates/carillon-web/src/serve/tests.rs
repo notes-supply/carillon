@@ -326,10 +326,10 @@ async fn the_longest_password_signs_in_with_every_byte_escaped_and_a_longer_gues
 -> Result<()> {
     let fixture = Fixture::new().await?;
     let file = fixture.password_file();
-    let signing_in = |body: String| {
+    let signing_in = |body: Body| {
         request(Method::POST, "/api/sign-in")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(body))
+            .body(body)
     };
     // JSON writes a control character as `\u0001`, six bytes for one.
     let longest = "\u{1}".repeat(4096);
@@ -337,9 +337,13 @@ async fn the_longest_password_signs_in_with_every_byte_escaped_and_a_longer_gues
     let body = json!({ "password": longest }).to_string();
     assert_eq!(body.len(), 24_591);
 
-    let longer = fixture.send(signing_in(format!("{body} "))?).await?;
+    // A body that never ends is answered 413 only if the provider refuses
+    // it as it arrives. Read to its end, it would be answered 408.
+    let longer =
+        stream::iter([Ok::<_, std::io::Error>(format!("{body} "))]).chain(stream::pending());
+    let longer = fixture.send(signing_in(Body::from_stream(longer))?).await?;
     assert_eq!(longer.status, StatusCode::PAYLOAD_TOO_LARGE);
-    let signed_in = fixture.send(signing_in(body)?).await?;
+    let signed_in = fixture.send(signing_in(Body::from(body))?).await?;
     assert_eq!(signed_in.status, StatusCode::OK, "{}", signed_in.text());
     let hash = std::fs::read_to_string(&file)?;
     let refused = set_password(&file, &"\u{1}".repeat(4097))
