@@ -11,7 +11,7 @@
 //! bytes between one part and the next. [`Meter::parts`] opens that window
 //! before a boundary and its headers are read; [`Meter::data`] lifts it while
 //! a part's data streams, since that data is bounded elsewhere. A window a
-//! peer overruns ends the request with [`PartHeaderTooLarge`], which the
+//! peer overruns ends the request with [`BodyError::Overrun`], which the
 //! handler answers 413.
 
 use std::{
@@ -32,18 +32,16 @@ use futures_util::Stream;
 /// headers are far smaller; this is room, not a target.
 pub(crate) const BETWEEN_PARTS: usize = 64 * 1024;
 
-/// A window of [`BETWEEN_PARTS`] bytes was overrun, so the request is refused
-/// rather than held.
-#[derive(Debug)]
-pub(crate) struct PartHeaderTooLarge;
-
-impl std::fmt::Display for PartHeaderTooLarge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a multipart part's headers are larger than the provider reads")
-    }
+/// Why the body stopped feeding the parser.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BodyError {
+    /// A window of [`BETWEEN_PARTS`] bytes was overrun, so the request is
+    /// refused rather than held.
+    #[error("a multipart part's headers are larger than the provider reads")]
+    Overrun,
+    #[error(transparent)]
+    Read(axum::Error),
 }
-
-impl std::error::Error for PartHeaderTooLarge {}
 
 /// How many bytes the body may still feed the parser before the current
 /// window is reset, and whether the parser was already told the window was
@@ -116,10 +114,8 @@ impl Metered {
     }
 }
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
 impl Stream for Metered {
-    type Item = Result<Bytes, BoxError>;
+    type Item = Result<Bytes, BodyError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -131,7 +127,7 @@ impl Stream for Metered {
             // refused. The parser only asks again once more body has arrived,
             // which a self-wake lets it do while the body stays parked.
             if this.meter.spent.swap(true, Relaxed) {
-                return Poll::Ready(Some(Err(Box::new(PartHeaderTooLarge))));
+                return Poll::Ready(Some(Err(BodyError::Overrun)));
             }
             cx.waker().wake_by_ref();
             return Poll::Pending;
@@ -141,7 +137,7 @@ impl Stream for Metered {
         }
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(this.hand_over(chunk, budget)))),
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.into()))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(BodyError::Read(error)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }

@@ -32,7 +32,7 @@ use crate::{
     api::{AWAY, from_core},
     browser::refusal,
     identity::{ConversationId, ConversationKey, EventId},
-    send::bound::{Meter, Metered, PartHeaderTooLarge},
+    send::bound::{BodyError, Meter, Metered},
     serve::Web,
 };
 
@@ -52,7 +52,7 @@ const REFUSED_DRAIN: u64 = 2 * MIB;
 
 fn malformed(error: &multer::Error) -> InterfaceError {
     if let multer::Error::StreamReadFailed(source) = error
-        && source.downcast_ref::<PartHeaderTooLarge>().is_some()
+        && let Some(BodyError::Overrun) = source.downcast_ref()
     {
         return refusal(
             StatusCode::PAYLOAD_TOO_LARGE,
