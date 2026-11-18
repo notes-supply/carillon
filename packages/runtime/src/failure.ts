@@ -69,10 +69,15 @@ const LABELLED = new RegExp(
   String.raw`(${CREDENTIAL}["']?(?:[ \t]+[^\s:=]+)?[ \t]*[:=][ \t]*)("[^"]*"|'[^']*'|[^\s,;]+)`,
   "giu",
 );
-const ASSIGNMENT = /([^\s=&?]+=)("[^"]*"|'[^']*'|[^\s&,;]+)/gu;
+// A pattern tried from every position inside a long run of characters reads
+// the run again from each one, in time quadratic in the text, on the
+// runtime's event loop. So each pattern below that reads a run starts where
+// the run starts, or, as ASSIGNMENT does, at the character that ends it.
+const ASSIGNMENT = /(?<=[^\s=&?])=("[^"]*"|'[^']*'|[^\s&,;]+)/gu;
 const AUTH_SCHEME = /((?<![A-Za-z])(?:bearer|basic)[ \t]+)(\S+)/giu;
-const URL_PARTS = /([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#@]*@)?([^\s?#]*)([?#]\S*)?/giu;
-const USERINFO = /[^\s:/@]+:[^\s/@]*@[^\s@]/u;
+const URL_PARTS =
+  /(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#@]*@)?([^\s?#]*)([?#]\S*)?/giu;
+const USERINFO = /(?<![^\s/@]):*[^\s:/@]+:[^\s/@]*@[^\s@]/u;
 // Unlabelled long runs of token characters: keys, JWT segments, signatures.
 const OPAQUE = /[A-Za-z0-9_+=-]{32,}/gu;
 
@@ -117,7 +122,7 @@ export function redactCredentials(text: string): string {
     )
     .replace(AUTH_SCHEME, "$1[redacted]")
     .replace(LABELLED, "$1[redacted]")
-    .replace(ASSIGNMENT, "$1[redacted]")
+    .replace(ASSIGNMENT, "=[redacted]")
     .replace(OPAQUE, "[redacted]");
 }
 
