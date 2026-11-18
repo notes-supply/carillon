@@ -669,37 +669,55 @@ async fn a_refused_message_is_read_to_its_end_before_it_is_answered() -> Result<
 }
 
 #[tokio::test]
-async fn a_part_header_past_the_bound_is_refused_without_holding_it_whole() -> Result<()> {
+async fn bytes_between_parts_past_the_bound_are_refused_without_holding_them_whole() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // A part header that never ends: a file name far longer than the between-
-    // parts bound, with no closing quote or blank line. Nothing but that bound
-    // stops the parser buffering all of it while it looks for the header's end.
-    let mut body =
-        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"")
-            .into_bytes();
-    body.resize(body.len() + 256 * 1024, b'A');
-    let (mut browser, provider) = tokio::io::duplex(64 * 1024);
-    let upload = tokio::spawn(async move { browser.write_all(&body).await });
-    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
-        .header(
-            CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .body(Body::from_stream(ReaderStream::new(provider)))?;
-    let answer = fixture.send(request).await?;
-    upload.abort();
-    assert_eq!(
-        answer.status,
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "{}",
-        answer.text()
-    );
-    assert_eq!(
-        answer.json()?,
-        json!({"error": "A message's parts are larger than the web chat reads."})
-    );
-    assert_eq!(staged(&fixture)?, 0);
+    let flood = "A".repeat(256 * 1024);
+    let text =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nhello\r\n");
+    // None of these reaches the end the parser looks for: a boundary, a
+    // header's blank line, or the line end after a boundary. Nothing but the
+    // bound stops the parser reading all of it.
+    for (body, said) in [
+        (flood.clone(), "a preamble"),
+        (
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{flood}"
+            ),
+            "a first part's header",
+        ),
+        (
+            format!("{text}--{BOUNDARY}\r\nX-Pad: {flood}"),
+            "a header after a part's data",
+        ),
+        (
+            format!("{text}--{BOUNDARY}{}", " ".repeat(flood.len())),
+            "padding after a boundary",
+        ),
+    ] {
+        let (mut browser, provider) = tokio::io::duplex(64 * 1024);
+        let upload = tokio::spawn(async move { browser.write_all(body.as_bytes()).await });
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(ReaderStream::new(provider)))?;
+        let answer = fixture.send(request).await?;
+        upload.abort();
+        assert_eq!(
+            answer.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{said}: {}",
+            answer.text()
+        );
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message's parts are larger than the web chat reads."}),
+            "{said}"
+        );
+        assert_eq!(staged(&fixture)?, 0, "{said}");
+    }
     assert!(fixture.core().asked.is_empty(), "core was asked");
     Ok(())
 }
