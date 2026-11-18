@@ -6,7 +6,7 @@
  * request ID make each step happen once, so a restart at any point opens,
  * places and settles every turn once.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   defineTask,
   type ConversationId,

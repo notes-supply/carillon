@@ -42,6 +42,8 @@ const THINKING_NAMES: Record<ModelThinkingLevel, string> = {
 export interface PiCatalogue {
   readonly models: Models;
   defaultThinking(model: Model<Api>): ModelThinkingLevel;
+  /** Resolves once sign-in writes under way, such as a refreshed OAuth token, are saved. */
+  settled(): Promise<void>;
 }
 
 /** The model a conversation's next requests run, as pi-durable stores it; none when nothing applies. */
@@ -69,6 +71,7 @@ export async function openPiCatalogue(stateDirectory: string): Promise<PiCatalog
           settings.getDefaultThinkingLevel() ??
           "medium",
       ),
+    settled: () => models.settleCredentialWrites(),
   };
 }
 

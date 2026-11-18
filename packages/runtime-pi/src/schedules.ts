@@ -7,7 +7,8 @@
  * way. Deselecting `schedules` ends each schedule when it is next due, and
  * stops a run whose turn is still opening.
  */
-import type { Context, JsonValue } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord/json";
 import {
   defineDocFamily,
   defineExtension,

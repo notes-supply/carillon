@@ -61,7 +61,7 @@ export function deterministicCatalogue(): PiCatalogue {
       }),
     );
   }
-  return { models, defaultThinking: () => "medium" };
+  return { models, defaultThinking: () => "medium", settled: () => Promise.resolve() };
 }
 
 const answer: FauxResponseFactory = async (context, options, _state, model) => {

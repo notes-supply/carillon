@@ -8,7 +8,7 @@
  * turn the runtime opens. With `wait`, the call owns the child and returns
  * its answer.
  */
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import {
   clampThinkingLevel,
   StringEnum,

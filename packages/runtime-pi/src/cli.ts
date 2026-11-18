@@ -138,9 +138,10 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   }
   const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
+  const catalogue = await openCatalogue();
   const { runtime, close } = await openRuntime(config, stateDirectory, embedded, {
     agents: config.agents,
-    catalogue: await openCatalogue(),
+    catalogue,
     core: createCoreClient({ url: config.coreUrl, providerId: config.runtime.id, token }),
     inlineImages,
   });
@@ -174,6 +175,7 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     server.closeAllConnections();
     await stopped;
   }
+  await catalogue.settled();
   // User extensions run in this process, and what one left open, such as a
   // request that never answers, must not keep a stopped runtime running.
   process.exit(0);

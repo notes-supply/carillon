@@ -15,12 +15,12 @@
     "@earendil-works/pi-coding-agent": "catalog:",
     "@earendil-works/pi-durable": "catalog:",
     "@earendil-works/pi-mcp": "catalog:",
-    "croner": "10.0.1",
+    "croner": "11.0.0",
     "smol-toml": "catalog:",
-    "typebox": "catalog:",
-    "ws": "catalog:"
+    "typebox": "catalog:"
   },
   "devDependencies": {
-    "@types/ws": "8.18.2"
+    "@types/ws": "8.18.2",
+    "ws": "catalog:"
   }
 }

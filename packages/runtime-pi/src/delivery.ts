@@ -4,7 +4,8 @@
  * decides the outcome once, and posts it until core has recorded it. A
  * restart resumes either phase where it stood.
  */
-import type { Context, JsonValue } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord/json";
 import {
   AgentDoc,
   AssistantEntry,

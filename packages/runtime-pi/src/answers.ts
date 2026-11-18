@@ -5,7 +5,7 @@
  * it, so a restart before or after keeps them; core then keeps a copy of
  * each with the answer. A run that ends without an answer drops them.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   defineTool,
   LiveDoc,
@@ -109,18 +109,14 @@ export async function takeAttached(
 
 /** The size of a regular file the runtime can read, or why it cannot attach it. */
 async function readable(path: string): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK).catch(
+  await using handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK).catch(
     (failure: unknown) => {
       throw new Error(unopened(path, failure));
     },
   );
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) throw new Error(`${path} is not a regular file.`);
-    return size(stats.size);
-  } finally {
-    await handle.close();
-  }
+  const stats = await handle.stat();
+  if (!stats.isFile()) throw new Error(`${path} is not a regular file.`);
+  return size(stats.size);
 }
 
 function unopened(path: string, failure: unknown): string {

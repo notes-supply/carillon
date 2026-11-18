@@ -119,7 +119,11 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
   model.setResponses(options.answers ?? []);
   const models = createModels();
   models.setProvider(model.provider);
-  const catalogue: PiCatalogue = { models, defaultThinking: () => "medium" };
+  const catalogue: PiCatalogue = {
+    models,
+    defaultThinking: () => "medium",
+    settled: () => Promise.resolve(),
+  };
   const memories = new Map<string, MemoryStorage>();
   function storage(agentId: string): Promise<Storage> {
     if (options.durable === true)

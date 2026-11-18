@@ -7,7 +7,7 @@
  * The model's thinking, as it streams, becomes the turn's notes: each
  * thinking block one bounded note from its beginning, never the answer.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { AssistantMessage, Message, Models } from "@earendil-works/pi-ai";
 import {
   AgentDoc,
