@@ -18,14 +18,14 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use carillon_protocol::observation::{
-    KEEP_ALIVE, Opened, Progress, SNAPSHOT_EVENT, SNAPSHOT_LIMIT, Snapshot, View,
+    KEEP_ALIVE, Opened, Progress, SNAPSHOT_EVENT, Snapshot, View,
 };
 use futures_util::{Stream, StreamExt as _, stream};
 use tokio::{sync::watch, time::Instant};
 use tracing::warn;
 
 use super::{ApiError, AppState, activity::activities, interface_provider};
-use crate::db::{HeldTurn, TooLarge};
+use crate::db::{Bounded, HeldTurn, TooLarge};
 
 /// How long after a snapshot that shows a running turn core composes the
 /// next one, which asks the turn's runtime again.
@@ -51,7 +51,7 @@ struct Observation {
 /// refused learns nothing of what core would accept. The first snapshot is
 /// composed before the answer begins, so a view core cannot show is refused
 /// with a status: 400 for a view that is not one, 413 for one whose
-/// snapshot is over [`SNAPSHOT_LIMIT`].
+/// snapshot is over [`SNAPSHOT_LIMIT`](carillon_protocol::observation::SNAPSHOT_LIMIT).
 pub(super) async fn observe(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -105,13 +105,11 @@ impl Observation {
             .core
             .snapshot(&self.interface_id, &self.view, sample)
             .await?;
-        let serialized = serde_json::to_string(&snapshot)?;
+        let mut serialized = Bounded::new(Vec::new());
+        serialized.add(&snapshot)?;
         self.composed = Instant::now();
         self.running = shows_a_running_turn(&snapshot);
-        if serialized.len() > SNAPSHOT_LIMIT {
-            return Err(TooLarge(serialized.len()).into());
-        }
-        Ok(serialized)
+        Ok(String::from_utf8(serialized.into_inner())?)
     }
 
     /// The next snapshot to send, once what the view shows differs from

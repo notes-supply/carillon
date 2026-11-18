@@ -53,6 +53,10 @@ impl<W: io::Write> Bounded<W> {
             }
         })
     }
+
+    pub(crate) fn into_inner(self) -> W {
+        self.into
+    }
 }
 
 impl<W: io::Write> io::Write for Bounded<W> {
