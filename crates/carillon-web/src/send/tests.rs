@@ -695,16 +695,35 @@ async fn bytes_between_parts_past_the_bound_are_refused_without_holding_them_who
             "padding after a boundary",
         ),
     ] {
-        let (mut browser, provider) = tokio::io::duplex(64 * 1024);
-        let upload = tokio::spawn(async move { browser.write_all(body.as_bytes()).await });
+        let body = Bytes::from(body);
+        let length = body.len();
+        let read = Arc::new(AtomicUsize::new(0));
+        // Each frame waits a turn, as hyper's wait for the socket, so the
+        // parser parses between frames rather than taking every one at once.
+        let frames = {
+            let read = Arc::clone(&read);
+            stream::iter((0..length).step_by(1024)).then(move |at| {
+                let frame = body.slice(at..length.min(at + 1024));
+                let read = Arc::clone(&read);
+                async move {
+                    tokio::task::yield_now().await;
+                    read.fetch_add(frame.len(), Relaxed);
+                    Ok::<_, std::io::Error>(frame)
+                }
+            })
+        };
         let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
             .header(
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={BOUNDARY}"),
             )
-            .body(Body::from_stream(ReaderStream::new(provider)))?;
+            .body(Body::from_stream(frames))?;
         let answer = fixture.send(request).await?;
-        upload.abort();
+        let read = read.load(Relaxed);
+        assert!(
+            read < length,
+            "{said}: the provider read all {length} bytes"
+        );
         assert_eq!(
             answer.status,
             StatusCode::PAYLOAD_TOO_LARGE,
