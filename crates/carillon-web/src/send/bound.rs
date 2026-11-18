@@ -82,7 +82,8 @@ impl Meter {
     ///
     /// When the window is spent, the body waits once, so the parser parses
     /// what it holds. A parser that asks again with the window still spent
-    /// has asked past it, and the body ends with [`BodyError::Overrun`].
+    /// has asked past it. A body that has ended there then ends, and one
+    /// with more ends with [`BodyError::Overrun`] and feeds none of the rest.
     pub(crate) fn feed(
         self: &Arc<Self>,
         body: Body,
@@ -92,6 +93,9 @@ impl Meter {
             if meter.budget() == 0 {
                 tokio::task::yield_now().await;
                 if meter.budget() == 0 {
+                    if held.is_empty() && body.next().await.is_none() {
+                        return Ok(None);
+                    }
                     return Err(BodyError::Overrun);
                 }
             }
