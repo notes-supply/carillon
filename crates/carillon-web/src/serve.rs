@@ -155,6 +155,10 @@ const MAX_CONNECTIONS: usize = 512;
 /// at a time, does not hold it open.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the provider waits after a failed accept, such as one refused
+/// for want of a descriptor, so the failure is not retried in a busy loop.
+const ACCEPT_RETRY: Duration = Duration::from_secs(1);
+
 /// Serves `web` on `listener` until `asked_to_stop` completes, then lets
 /// the requests in flight be answered for at most [`DRAIN`]. Every stream
 /// ends as soon as its page reads again.
@@ -178,16 +182,18 @@ pub(crate) async fn until_stopped(
     loop {
         let next = async {
             let permit = Arc::clone(&connections).acquire_owned().await;
-            (permit, listener.accept().await)
+            let accepted = listener.accept().await;
+            if let Err(error) = &accepted {
+                warn!(%error, "accepting a connection failed");
+                tokio::time::sleep(ACCEPT_RETRY).await;
+            }
+            (permit, accepted)
         };
         let (permit, stream) = tokio::select! {
             (permit, accepted) = next => match (permit, accepted) {
                 (Ok(permit), Ok((stream, _))) => (permit, stream),
                 (Err(_), _) => break,
-                (Ok(_), Err(error)) => {
-                    warn!(%error, "accepting a connection failed");
-                    continue;
-                }
+                (Ok(_), Err(_)) => continue,
             },
             () = &mut asked_to_stop => break,
         };
