@@ -160,10 +160,11 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// ends as soon as its page reads again.
 ///
 /// A connection is served only while one of [`MAX_CONNECTIONS`] permits is
-/// free. The provider speaks HTTP/1.1, which is what `tailscale serve`
-/// forwards to it, and the timer makes hyper's header-read timeout apply from
-/// the first poll, so a peer that opens a connection and sends no request, or
-/// sends one slowly, loses it rather than holding it open.
+/// free, and a stop is heard while the provider waits for one. The provider
+/// speaks HTTP/1.1, which is what `tailscale serve` forwards to it, and the
+/// timer makes hyper's header-read timeout apply from the first poll, so a
+/// peer that opens a connection and sends no request, or sends one slowly,
+/// loses it rather than holding it open.
 pub(crate) async fn until_stopped(
     listener: TcpListener,
     web: Arc<Web>,
@@ -175,13 +176,15 @@ pub(crate) async fn until_stopped(
     let graceful = GracefulShutdown::new();
     let mut asked_to_stop = pin!(asked_to_stop);
     loop {
-        let Ok(permit) = Arc::clone(&connections).acquire_owned().await else {
-            break;
+        let next = async {
+            let permit = Arc::clone(&connections).acquire_owned().await;
+            (permit, listener.accept().await)
         };
-        let (stream, _) = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok(pair) => pair,
-                Err(error) => {
+        let (permit, stream) = tokio::select! {
+            (permit, accepted) = next => match (permit, accepted) {
+                (Ok(permit), Ok((stream, _))) => (permit, stream),
+                (Err(_), _) => break,
+                (Ok(_), Err(error)) => {
                     warn!(%error, "accepting a connection failed");
                     continue;
                 }
