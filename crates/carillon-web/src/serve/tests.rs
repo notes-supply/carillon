@@ -17,6 +17,7 @@ use axum::{
 };
 use carillon_installation::config::LoadedConfig;
 use hmac::{Hmac, KeyInit as _, Mac as _};
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use serde_json::json;
 use sha2::Sha256;
 use tokio::{
@@ -26,7 +27,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{HEADER_READ_TIMEOUT, until_stopped};
+use super::{HEADER_READ_TIMEOUT, MAX_CONNECTIONS, until_stopped};
 use crate::{
     browser::{Address, addresses, password_file, set_password},
     fixture::{
@@ -709,6 +710,64 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_o
     serving.await??;
     // A timer is a millisecond coarse.
     assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_of_a_paused_clock()
+-> Result<()> {
+    // The cap's connections and the test's own ends of them pass the soft
+    // descriptor limit a service manager gives a process by default.
+    let descriptors = getrlimit(Resource::Nofile);
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: descriptors.maximum,
+            ..descriptors
+        },
+    )?;
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+
+    // Every connection the provider serves holds a message whose upload
+    // never comes, so none of them ends and the provider waits for one to.
+    let upload = format!(
+        "PUT /api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/\
+         m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b HTTP/1.1\r\nHost: {AUTHORITY}\r\n\
+         Authorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary=b\r\n\
+         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n"
+    );
+    let mut browsers = Vec::with_capacity(MAX_CONNECTIONS);
+    for _ in 0..MAX_CONNECTIONS {
+        let mut browser = TcpStream::connect(address).await?;
+        browser.write_all(upload.as_bytes()).await?;
+        let mut ready = [0; 25];
+        browser.read_exact(&mut ready).await?;
+        assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
+        browsers.push(browser);
+    }
+
+    tokio::time::pause();
+    let told = Instant::now();
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), serving)
+        .await
+        .context("a provider holding every connection it serves did not stop")???;
+    // A timer is a millisecond coarse.
+    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    drop(browsers);
     Ok(())
 }
 
