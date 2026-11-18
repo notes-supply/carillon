@@ -117,13 +117,17 @@ export class DiscordClient {
           : "The Discord provider did not confirm the operation. It may have taken effect; inspect the target before repeating it.",
       );
     try {
-      const response = await fetch(url, {
+      // Bun sends even a loopback request through a proxy the environment
+      // names, credential included.
+      const init: RequestInit & { readonly proxy: false } = {
         method: "POST",
+        proxy: false,
         redirect: "error",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify(operation),
         signal: AbortSignal.any([AbortSignal.timeout(35_000), ...(signal ? [signal] : [])]),
-      });
+      };
+      const response = await fetch(url, init);
       // The provider is trusted, but a bounded body protects the model context and memory.
       const reader = response.body?.getReader();
       if (!reader) throw uncertain();

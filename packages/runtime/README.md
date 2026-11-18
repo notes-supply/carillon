@@ -18,7 +18,8 @@ depend on it; it imports neither. Import modules by path
   the displayable part of an explanation; other failures are logged,
   redacted.
 - [`core.ts`](src/core.ts): a runtime's client of core, with its own
-  credential: `settle` a turn it holds, in one attempt the caller repeats
+  credential, which it sends straight to core, never through a proxy or
+  after a redirect: `settle` a turn it holds, in one attempt the caller repeats
   until core says what it made of the outcome, `open` one of its own, and
   list the turns core records `running` on it, for a process that forgot
   them, setting apart an entry it cannot read. [`testing.ts`](src/testing.ts) is a

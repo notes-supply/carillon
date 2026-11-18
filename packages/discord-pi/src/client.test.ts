@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -127,6 +128,38 @@ it("never follows credential-bearing redirects and refuses bad local credentials
   await expect(new DiscordClient(undefined).call({ action: "server.info" })).rejects.toMatchObject({
     outcome: "unavailable",
   });
+});
+
+it("sends the operator credential only to the provider, never to an environment proxy or a redirect target, under Bun as packaged", async () => {
+  const redirected = await fixture(307, "", true);
+  let proxied = 0;
+  const proxy = createServer((_request, response) => {
+    proxied++;
+    response.writeHead(502).end();
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  cleanups.push(() => new Promise<void>((resolve) => proxy.close(() => resolve())));
+  const address = proxy.address();
+  if (address === null || typeof address === "string") throw new Error("Missing test address");
+  const origin = `http://127.0.0.1:${String(address.port)}`;
+  const script = `
+    import { DiscordClient } from ${JSON.stringify(join(import.meta.dirname, "client.ts"))};
+    const client = new DiscordClient(JSON.parse(process.argv[1]));
+    console.log(await client.call({ action: "server.info" }).then(() => "answered", (failure) => failure.outcome));
+  `;
+  const child = spawn("bun", ["-e", script, JSON.stringify(redirected.context)], {
+    env: { ...process.env, HTTP_PROXY: origin, http_proxy: origin, ALL_PROXY: origin },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+  await once(child, "close");
+  expect(proxied).toBe(0);
+  expect(redirected.requests()).toBe(1);
+  expect({ stdout, stderr }).toEqual({ stdout: "unavailable\n", stderr: "" });
 });
 
 it("bounds response bytes and propagates cancellation without retry", async () => {

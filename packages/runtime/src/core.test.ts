@@ -1,5 +1,8 @@
+import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { Server } from "node:http";
+import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { CoreRefusal, createCoreClient, UnreadableListing } from "./core.ts";
 import { startFakeCore, type FakeCore } from "./testing.ts";
@@ -127,6 +130,50 @@ it("lists the turns core records running, sets apart one it cannot read, and thr
     status: 403,
     message: "core did not list the turns it records running: answered 403",
   });
+});
+
+async function listener(status: number, headers: Record<string, string> = {}) {
+  const requests: string[] = [];
+  const server = new Server((request, response) => {
+    requests.push(`${String(request.method)} ${String(request.url)}`);
+    response.writeHead(status, headers).end();
+  }).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("expected a TCP port");
+  return { origin: `http://127.0.0.1:${String(address.port)}`, requests, server };
+}
+
+it("sends its credential only to core, never to an environment proxy or a redirect target, under Bun as packaged", async () => {
+  const proxy = await listener(502);
+  const service = await listener(307, { location: "http://192.0.2.1/stolen" });
+  const script = `
+    import { createCoreClient } from ${JSON.stringify(join(import.meta.dirname, "core.ts"))};
+    const core = createCoreClient({ url: process.argv[1], providerId: "runtime-durable", token: "durable-only" });
+    console.log(await core.running().then(() => "listed", (failure) => failure.name));
+  `;
+  try {
+    const child = spawn("bun", ["-e", script, service.origin], {
+      env: {
+        ...process.env,
+        HTTP_PROXY: proxy.origin,
+        http_proxy: proxy.origin,
+        ALL_PROXY: proxy.origin,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    await once(child, "close");
+    expect(proxy.requests).toEqual([]);
+    expect(service.requests).toEqual(["GET /v1/runtime/turns"]);
+    expect({ stdout, stderr }).toEqual({ stdout: "TypeError\n", stderr: "" });
+  } finally {
+    proxy.server.close();
+    service.server.close();
+  }
 });
 
 it("throws a failure worth asking again when core's list breaks off, and an unreadable one when it is no list", async () => {
