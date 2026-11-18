@@ -280,8 +280,7 @@ impl Browser {
     /// guess is checked at a time, each wrong one for a second, and the
     /// check runs in a task of its own, which keeps the turn to its end, so
     /// a request dropped midway frees no turn early. A guess made while
-    /// another is being checked is refused at once, rather than queued, so a
-    /// peer's guesses cannot delay the owner's sign-in.
+    /// another is being checked is refused at once, not queued.
     pub(crate) async fn sign_in(&self, password: String) -> Result<String, InterfaceError> {
         const WRONG: &str = "That is not the web chat's password.";
         let Ok(turn) = Arc::clone(&self.guessing).try_lock_owned() else {

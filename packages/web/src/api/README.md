@@ -77,7 +77,7 @@ A `FileLink` is `{ name, size, type, url }`. `type` is `image/png`, `image/jpeg`
 
 Every request but the sign-in and a file link carries `Authorization: bearer(token)`. A JSON body goes with `Content-Type: application/json`, and the provider answers 415 to one without it.
 
-The provider checks one sign-in at a time. A sign-in sent while another is checked is answered 429 at once and is not checked. The same password, sent again a moment later, is checked then. A sign-in that has not arrived and been checked 10 s after its headers is answered 408.
+The provider checks one sign-in at a time, and a wrong password keeps the check a second longer. A sign-in sent while another is checked is answered 429 at once and is not checked. One sent again is checked only if the check is free when it arrives, and is answered 429 again otherwise. A sign-in that has not arrived and been checked 10 s after its headers is answered 408.
 
 - `mintEventId()` names a message before its first attempt. Every retry sends the same ID, and core takes a repeat as the first message, so a retry never makes a second turn. A 2xx is the message's receipt, and the page does not read its body.
 - `mintAudienceId()` names a new conversation.

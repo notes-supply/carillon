@@ -102,9 +102,9 @@ loopback, so the provider trusts nothing a browser attaches on its own.
 - The provider checks one password at a time, and a wrong one holds the
   check for a second more, so guesses come at about one a second, all
   browsers together. A guess sent while another is checked is answered 429
-  at once, unchecked, and can be sent again a moment later. A guess keeps
-  the check when its request is dropped. A guess not sent whole and
-  checked 10 s after its headers is answered 408.
+  at once, unchecked. Sent again, it is checked only if the check is free
+  then. A guess keeps the check when its request is dropped. A guess not
+  sent whole and checked 10 s after its headers is answered 408.
 - Every `/api` request carries `Authorization: Bearer <token>`. No cookie
   carries authority.
 - `Host` must be the address the provider listens on or one in
