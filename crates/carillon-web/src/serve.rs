@@ -151,6 +151,12 @@ const DRAIN: Duration = Duration::from_secs(2);
 /// person opens.
 const MAX_CONNECTIONS: usize = 512;
 
+/// How much of a connection hyper buffers. A request's line and headers must
+/// fit in it, and a body is read in frames that fit in what the buffer grows
+/// to, under twice this, which bounds how far the provider reads past a
+/// multipart window.
+const READ_BUFFER: usize = 64 * 1024;
+
 /// How long a connection has to send a request's line and headers before it
 /// is closed, so a peer that opens one and sends nothing, or sends it a byte
 /// at a time, does not hold it open.
@@ -218,7 +224,8 @@ pub(crate) async fn until_stopped(
         let mut builder = http1::Builder::new();
         builder
             .timer(TokioTimer::new())
-            .header_read_timeout(HEADER_READ_TIMEOUT);
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .max_buf_size(READ_BUFFER);
         let connection = builder.serve_connection(
             TokioIo::new(stream),
             service_fn(move |request: hyper::Request<Incoming>| {

@@ -112,6 +112,7 @@ loopback, so the provider trusts nothing a browser attaches on its own.
   another name and is refused.
 - An `Origin` other than one of those addresses is 403, a preflight's
   included. No answer has a CORS header.
+- A request's line and headers must fit in 64 KiB, or the answer is 431.
 - The page runs under a content security policy that allows only its own
   scripts, styles, images and fonts.
 - The token and every file link are HMACs of the hash's text. A new

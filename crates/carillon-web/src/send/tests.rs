@@ -749,12 +749,13 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
         body.extend_from_slice(&rest);
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
+        // Frames of up to 128 KiB, as large as hyper reads them.
         let read = Arc::new(AtomicUsize::new(0));
-        let (mut browser, provider) = tokio::io::duplex(64 * 1024);
+        let (mut browser, provider) = tokio::io::duplex(128 * 1024);
         let upload = tokio::spawn(async move { browser.write_all(&body).await });
         let counted = {
             let read = Arc::clone(&read);
-            ReaderStream::new(provider).inspect_ok(move |chunk| {
+            ReaderStream::with_capacity(provider, 128 * 1024).inspect_ok(move |chunk| {
                 read.fetch_add(chunk.len(), Relaxed);
             })
         };
@@ -772,11 +773,11 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
             json!({"error": "A message's parts are `text` and `file`."}),
             "{said}"
         );
-        // Besides the drain, the provider may have read the first part's whole
-        // 64 KiB window before it refused the message, and one 4 KiB read it
-        // has not fed the parser.
+        // Besides the drain, the provider may have fed the parser the first
+        // part's whole 64 KiB window before it refused the message, and read
+        // one frame it has not fed.
         assert!(
-            read.load(Relaxed) <= 2 * MIB + 64 * 1024 + 4096,
+            read.load(Relaxed) <= 2 * MIB + 64 * 1024 + 128 * 1024,
             "{said}: the provider read {} bytes of a refused message",
             read.load(Relaxed)
         );

@@ -15,6 +15,15 @@
 //! refusal, so the rest of a refused message is read within one budget,
 //! boundaries and headers included. A window a peer overruns ends the request
 //! with [`BodyError::Overrun`], which the handler answers 413.
+//!
+//! A window counts bytes fed to the parser, and the parser reads ahead: it
+//! takes all the body has ready and keeps what it has not parsed. While a
+//! part's data streams, that is the rest of the frame a window cut and one
+//! more frame. So the first part's boundary and headers are read within
+//! [`BETWEEN_PARTS`], and a later part's within twice that and two frames. The
+//! body reads at most one frame past any window. A frame is what hyper read
+//! from the connection at once, which `serve`'s read buffer keeps under
+//! 128 KiB.
 
 use std::sync::{
     Arc,
@@ -25,12 +34,12 @@ use axum::body::Body;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _, stream};
 
-/// The most a peer may send between two parts: the preamble before the first
+/// The most the parser is fed between two parts: the preamble before the first
 /// boundary, a boundary line, and a part's headers. A real boundary and
 /// headers are far smaller; this is room, not a target.
 pub(crate) const BETWEEN_PARTS: usize = 64 * 1024;
 
-/// The most the provider reads of a message after refusing it, so a browser
+/// The most the parser is fed of a message after it is refused, so a browser
 /// still reads the refusal where it can, without a peer draining the provider
 /// with a refused upload. A refused message is normally small; only an
 /// oversized text or file leaves more than this, and that is the message

@@ -126,8 +126,9 @@ async fn stage_file(
 /// past a limit refuses the message, and no later part is kept.
 ///
 /// The parts of a refused message are read to their end, up to
-/// [`bound::REFUSED_DRAIN`] in all, so a browser that has not finished its
-/// upload when it is answered reads the answer and not a broken connection.
+/// [`bound::REFUSED_DRAIN`] past the refusal, so a browser that has not
+/// finished its upload when it is answered reads the answer and not a broken
+/// connection.
 /// A form that cannot be read, a file that cannot be staged, or a part that
 /// outruns [`bound::BETWEEN_PARTS`] is answered at once.
 async fn stage(

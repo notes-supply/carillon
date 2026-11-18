@@ -913,3 +913,51 @@ async fn a_connection_that_never_sends_its_request_is_closed_after_the_header_ti
     serving.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_request_s_line_and_headers_may_fill_64_kib_and_no_more() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+
+    let line = format!("GET /health HTTP/1.1\r\nHost: {AUTHORITY}\r\nConnection: close\r\nX-Pad: ");
+    let padded = |end: &str| {
+        let mut head = line.as_bytes().to_vec();
+        head.resize(64 * 1024 - end.len(), b'p');
+        head.extend_from_slice(end.as_bytes());
+        head
+    };
+    // Both heads are 64 KiB: one ends there and is served, and one has not
+    // ended there and is refused. Sent no further, the refused one is read
+    // whole, so the provider closes without a reset that would lose its answer.
+    for (head, answered) in [
+        (padded("\r\n\r\n"), "HTTP/1.1 200 OK\r\n"),
+        (
+            padded("p"),
+            "HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        ),
+    ] {
+        let mut browser = TcpStream::connect(address).await?;
+        browser.write_all(&head).await?;
+        let mut answer = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), browser.read_to_end(&mut answer))
+            .await
+            .with_context(|| format!("a {} byte head was not answered", head.len()))??;
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(answer.starts_with(answered), "{answer}");
+    }
+
+    stop.notify_one();
+    serving.await??;
+    Ok(())
+}
