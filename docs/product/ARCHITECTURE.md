@@ -70,10 +70,9 @@ There is no event ID and no replay: a reader that loses the stream opens
 another and starts from its first snapshot. Core authenticates the caller
 before it reads the view, and composes the first snapshot before it
 answers, so a view it does not accept is refused with 400 and one whose
-snapshot is over 16 MiB with 413. It stops reading a window once the text of
-its turns alone is over 16 MiB. A window whose text fits but whose JSON does
-not, such as one full of characters JSON escapes, is still read whole before
-it is refused.
+snapshot is over 16 MiB with 413. Core counts each conversation and turn as
+the snapshot will write it, files and reports included, while it reads them.
+It stops reading at the turn that takes that count over 16 MiB.
 
 A snapshot is composed in a fixed order. Core reads which turns of the open
 window run, asks their runtimes what they are doing outside any

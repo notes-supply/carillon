@@ -3,7 +3,9 @@
 //! all of it, so every part of a snapshot is of the same moment. Nothing
 //! here writes.
 
-use anyhow::{bail, ensure};
+use std::io;
+
+use anyhow::bail;
 use carillon_protocol::{
     conversations::TurnSource,
     model::{TurnActivity, TurnState},
@@ -14,6 +16,7 @@ use carillon_protocol::{
     turns::Silence,
 };
 use rusqlite::{Connection, Row};
+use serde::Serialize;
 
 use super::{
     CapturedFile, Database, OptionalExtension, RUNTIME_EVENT_PREFIX, Result, answer_files,
@@ -25,6 +28,47 @@ use super::{
     "this view's snapshot takes at least {0} bytes, over the {SNAPSHOT_LIMIT} a snapshot may take: ask for fewer turns"
 )]
 pub(crate) struct TooLarge(pub(crate) usize);
+
+/// A snapshot's JSON, written part after part into `W`, which
+/// [`io::Sink`] only counts. A write that takes it over [`SNAPSHOT_LIMIT`]
+/// fails.
+pub(crate) struct Bounded<W> {
+    written: usize,
+    into: W,
+}
+
+impl<W: io::Write> Bounded<W> {
+    pub(crate) const fn new(into: W) -> Self {
+        Self { written: 0, into }
+    }
+
+    /// Writes `part` after what was written before, or refuses it with
+    /// [`TooLarge`] once the whole is over the limit.
+    pub(crate) fn add(&mut self, part: &impl Serialize) -> Result<()> {
+        serde_json::to_writer(&mut *self, part).map_err(|error| {
+            if error.is_io() {
+                TooLarge(self.written).into()
+            } else {
+                error.into()
+            }
+        })
+    }
+}
+
+impl<W: io::Write> io::Write for Bounded<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.written += bytes.len();
+        if self.written > SNAPSHOT_LIMIT {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        self.into.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.into.flush()
+    }
+}
 
 /// A running turn and the runtime that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,10 +123,13 @@ impl Database {
     }
 
     /// Everything `view` shows the interface. A running turn is listed
-    /// without activity: that is its runtime's to say.
+    /// without activity: that is its runtime's to say. Each part is counted
+    /// as the snapshot writes it, so the read stops at the part that takes
+    /// the snapshot over [`SNAPSHOT_LIMIT`].
     pub(crate) fn observed(&self, interface_id: &str, view: &View) -> Result<Snapshot> {
         let mut connection = self.read()?;
         let transaction = connection.transaction()?;
+        let mut written = Bounded::new(io::sink());
         let limit = view.conversations.get();
         let mut conversations = transaction
             .prepare(&format!(
@@ -93,10 +140,11 @@ impl Database {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let more = conversations.len() > usize::from(limit);
         conversations.truncate(limit.into());
+        written.add(&conversations)?;
         let open = view
             .open
             .as_ref()
-            .map(|open| opened(&transaction, interface_id, open))
+            .map(|open| opened(&transaction, interface_id, open, &mut written))
             .transpose()?;
         Ok(Snapshot {
             conversations,
@@ -186,9 +234,13 @@ fn progress(
 }
 
 /// The interface's conversation `open` names, with the newest turns it
-/// asks for. Its turns' text is in the serialized snapshot at least once,
-/// so the read stops as soon as that text alone is over [`SNAPSHOT_LIMIT`].
-fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Result<Opened> {
+/// asks for, each with its files, counted into `written` as it is read.
+fn opened(
+    connection: &Connection,
+    interface_id: &str,
+    open: &OpenView,
+    written: &mut Bounded<io::Sink>,
+) -> Result<Opened> {
     let key = &open.conversation;
     let Some(conversation) = connection
         .query_row(
@@ -203,6 +255,7 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
     else {
         return Ok(Opened::Unrecorded { key: key.clone() });
     };
+    written.add(&conversation)?;
     let limit = open.turns.get();
     let mut newest = connection.prepare(&format!(
         "SELECT t.id, t.event_id, t.input,
@@ -217,20 +270,17 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
         key.audience_id(),
         u32::from(limit) + 1
     ])?;
-    let (mut turns, mut earlier, mut text) = (Vec::new(), false, 0);
+    let (mut turns, mut earlier) = (Vec::new(), false);
     while let Some(row) = rows.next()? {
         if turns.len() == usize::from(limit) {
             earlier = true;
             break;
         }
         let turn_id: String = row.get(0)?;
-        let input: String = row.get(2)?;
         let delivered = match row.get::<_, Option<String>>(8)? {
             Some(content) => Some((content, optional_state_column(row, 9)?)),
             None => None,
         };
-        text += input.len() + delivered.as_ref().map_or(0, |(content, _)| content.len());
-        ensure!(text <= SNAPSHOT_LIMIT, TooLarge(text));
         let report = optional_json_column(row, 7)?;
         let progress = progress(
             &turn_id,
@@ -239,15 +289,12 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
             delivered,
             report,
         )?;
-        turns.push(ObservedTurn {
+        let mut turn = ObservedTurn {
             turn_id,
-            source: source(row.get(1)?, input, row.get(3)?),
+            source: source(row.get(1)?, row.get(2)?, row.get(3)?),
             accepted_at: row.get(5)?,
             progress,
-        });
-    }
-    turns.reverse();
-    for turn in &mut turns {
+        };
         if let TurnSource::Message { files, .. } = &mut turn.source {
             *files = captured_files(connection, Some(&turn.turn_id))?
                 .iter()
@@ -261,7 +308,10 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
         {
             *files = answer_files(connection, &turn.turn_id)?;
         }
+        written.add(&turn)?;
+        turns.push(turn);
     }
+    turns.reverse();
     Ok(Opened::Recorded {
         conversation,
         turns,
