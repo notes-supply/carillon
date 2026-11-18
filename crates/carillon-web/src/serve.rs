@@ -225,7 +225,8 @@ pub(crate) async fn until_stopped(
         builder
             .timer(TokioTimer::new())
             .header_read_timeout(HEADER_READ_TIMEOUT)
-            .max_buf_size(READ_BUFFER);
+            .max_buf_size(READ_BUFFER)
+            .max_header_size(READ_BUFFER);
         let connection = builder.serve_connection(
             TokioIo::new(stream),
             service_fn(move |request: hyper::Request<Incoming>| {
