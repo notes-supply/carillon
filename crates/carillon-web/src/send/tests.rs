@@ -19,7 +19,7 @@ use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
 
-use super::REFUSED_DRAIN;
+use super::bound::REFUSED_DRAIN;
 use crate::{
     api::AWAY,
     fixture::{Answer, Fixture, bearer},
@@ -712,19 +712,18 @@ async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()>
     // whose headers each stay within the between-parts bound. The provider
     // stops reading within the budget either way, rather than let a peer make
     // it read an endless upload.
-    let drain = usize::try_from(REFUSED_DRAIN).unwrap_or(usize::MAX);
     let mut large = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"big.bin\"\r\n\r\n"
     )
     .into_bytes();
-    large.resize(large.len() + drain * 4, b'r');
+    large.resize(large.len() + REFUSED_DRAIN * 4, b'r');
     large.extend_from_slice(b"\r\n");
     let empty = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\nX-Pad: {}\r\n\r\n\r\n",
         "p".repeat(8000)
     );
-    let empties = empty.repeat(drain * 4 / empty.len()).into_bytes();
+    let empties = empty.repeat(REFUSED_DRAIN * 4 / empty.len()).into_bytes();
     for (rest, said) in [(large, "one large part"), (empties, "many empty parts")] {
         let mut body = format!(
             "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\nhi\r\n"
@@ -764,7 +763,7 @@ async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()>
             "{said}"
         );
         assert!(
-            written.load(Relaxed) < drain * 2,
+            written.load(Relaxed) < REFUSED_DRAIN * 2,
             "{said}: the provider read {} bytes of a refused message past its drain budget",
             written.load(Relaxed)
         );

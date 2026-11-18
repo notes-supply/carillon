@@ -43,13 +43,6 @@ pub(crate) struct Sent {
     duplicate: bool,
 }
 
-/// The most the provider reads of a message it has already refused, so a
-/// browser still reads the refusal where it can, without a peer draining the
-/// provider with a refused upload. A refused message is normally small; only
-/// an oversized text or file leaves more than this, and that is the message
-/// being refused.
-const REFUSED_DRAIN: u64 = 2 * MIB;
-
 fn malformed(error: &multer::Error) -> InterfaceError {
     if let multer::Error::StreamReadFailed(source) = error
         && let Some(BodyError::Overrun) = source.downcast_ref()
@@ -127,31 +120,16 @@ async fn stage_file(
     }))
 }
 
-/// Reads to the end of `part`, up to `budget` bytes, and says how many it
-/// read. A refused message is read this far so a browser still reaching the
-/// end of its upload reads the refusal and not a broken connection. A stream
-/// error ends the reading: the message is already refused.
-async fn drain(part: &mut Field<'static>, budget: u64) -> u64 {
-    let mut read = 0_u64;
-    while read < budget {
-        match part.chunk().await {
-            Ok(Some(chunk)) => read += chunk.len() as u64,
-            _ => break,
-        }
-    }
-    read
-}
-
 /// Reads the request's parts: at most one `text`, and `file`s within core's
 /// limits, in any order. A message `refused` before its parts were read
 /// keeps none of them. Otherwise the first part that is something else or
 /// past a limit refuses the message, and no later part is kept.
 ///
 /// The parts of a refused message are read to their end, up to
-/// [`REFUSED_DRAIN`] in all, so a browser answered while it uploads reports a
-/// broken connection and not the answer. A form that cannot be read, a file
-/// that cannot be staged, or a part that outruns [`bound::BETWEEN_PARTS`] is
-/// answered at once.
+/// [`bound::REFUSED_DRAIN`] in all, so a browser that has not finished its
+/// upload when it is answered reads the answer and not a broken connection.
+/// A form that cannot be read, a file that cannot be staged, or a part that
+/// outruns [`bound::BETWEEN_PARTS`] is answered at once.
 async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
@@ -160,15 +138,19 @@ async fn stage(
     mut refused: Option<InterfaceError>,
 ) -> Result<(String, Vec<StagedFile>), InterfaceError> {
     let (mut text, mut files) = (None, Vec::new());
-    let (mut total, mut drained) = (0_u64, 0_u64);
+    let mut total = 0_u64;
+    if refused.is_some() {
+        meter.refuse();
+    }
     loop {
         meter.parts();
-        let Some(mut part) = parts
-            .next_field()
-            .await
-            .map_err(|error| malformed(&error))?
-        else {
-            break;
+        let mut part = match parts.next_field().await {
+            Ok(Some(part)) => part,
+            Ok(None) => break,
+            // A refused message is answered with its refusal, however its
+            // drain ends.
+            Err(_) if refused.is_some() => break,
+            Err(error) => return Err(malformed(&error)),
         };
         meter.data();
         if refused.is_none() {
@@ -213,12 +195,10 @@ async fn stage(
         }
         // Consume whatever remains of this part, so the next boundary is read
         // within its window. For a part read whole this takes nothing; for a
-        // refused one it reads the rest, up to the message's drain budget.
+        // refused one it reads the rest, as far as the drain allows.
         if refused.is_some() {
-            drained += drain(&mut part, REFUSED_DRAIN.saturating_sub(drained)).await;
-            if drained >= REFUSED_DRAIN {
-                break;
-            }
+            meter.refuse();
+            while let Ok(Some(_)) = part.chunk().await {}
         }
     }
     match refused {
