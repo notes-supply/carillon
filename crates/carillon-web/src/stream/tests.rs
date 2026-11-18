@@ -1,7 +1,12 @@
 //! The page's stream, read as a page reads it, over a fake of core that
 //! streams as core does.
 
-use std::{fs::OpenOptions, path::PathBuf, time::Duration};
+use std::{
+    fs::{OpenOptions, Permissions},
+    os::unix::fs::{PermissionsExt as _, mkfifo},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result};
 use axum::http::StatusCode;
@@ -455,10 +460,9 @@ impl Making {
         let store = fixture.directory.path().join("state/attachments/piped");
         std::fs::create_dir_all(&store)?;
         let [reached, held] = ["0", "1"].map(|name| store.join(name));
-        let piped = std::process::Command::new("mkfifo")
-            .args([&reached, &held])
-            .status()?;
-        assert!(piped.success());
+        for fifo in [&reached, &held] {
+            mkfifo(fifo, Permissions::from_mode(0o600))?;
+        }
         let files = ["piped/0", "piped/1"].map(|path| TurnAttachment {
             path: path.to_owned(),
             name: "notes.txt".to_owned(),

@@ -1,0 +1,20 @@
+id: rust-mkfifo
+language: rust
+severity: error
+message: A FIFO made by running mkfifo or by mknodat is what std::os::unix::fs::mkfifo makes.
+note: Write mkfifo(&path, Permissions::from_mode(0o600)).
+rule:
+  any:
+    - all:
+        - pattern: $COMMAND::new("mkfifo")
+        - has: { field: function, regex: (^|::)Command::new$ }
+    - all:
+        - kind: call_expression
+        - has: { field: function, regex: (^|::)mknodat$ }
+        - has: { field: arguments, has: { regex: (^|::)FileType::Fifo$ } }
+    # A macro's arguments are tokens, not expressions, so the patterns above
+    # never reach inside assert! or ensure!.
+    - all:
+        - kind: token_tree
+        - regex: Command::new\(\s*"mkfifo"\s*\)
+        - not: { has: { kind: token_tree, regex: Command::new\(\s*"mkfifo"\s*\), stopBy: end } }

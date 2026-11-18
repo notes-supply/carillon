@@ -2,7 +2,7 @@
 //! commands. Core's `carillon web …` forwards here with the resolved
 //! `CARILLON_HOME`; the service itself is started with explicit files.
 #![feature(must_not_suspend)]
-#![cfg_attr(test, feature(nonpoison_mutex, sync_nonpoison))]
+#![cfg_attr(test, feature(nonpoison_mutex, sync_nonpoison, unix_mkfifo))]
 
 mod api;
 mod browser;

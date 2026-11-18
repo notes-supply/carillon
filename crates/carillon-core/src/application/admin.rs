@@ -538,7 +538,7 @@ mod tests {
     use std::{
         fs,
         io::Cursor,
-        os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{FileExt, MetadataExt, PermissionsExt, mkfifo, symlink},
         path::{Path, PathBuf},
     };
 
@@ -731,13 +731,7 @@ mod tests {
             let listener = if socket {
                 Some(std::os::unix::net::UnixListener::bind(&special)?)
             } else {
-                rustix::fs::mknodat(
-                    rustix::fs::CWD,
-                    &special,
-                    rustix::fs::FileType::Fifo,
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                    0,
-                )?;
+                mkfifo(&special, fs::Permissions::from_mode(0o600))?;
                 None
             };
             let failure = backup(&config, &destination)
