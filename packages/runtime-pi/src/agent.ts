@@ -4,7 +4,7 @@
  * submitted to its conversation's inbox, and a delivery task settles the turn
  * with core.
  */
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {

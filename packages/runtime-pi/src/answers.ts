@@ -5,7 +5,7 @@
  * it, so a restart before or after keeps them; core then keeps a copy of
  * each with the answer. A run that ends without an answer drops them.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   defineTool,
   LiveDoc,

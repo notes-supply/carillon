@@ -4,7 +4,7 @@
  * the Discord skill's guidance. That is context management, not a security
  * boundary: the agent already has the installing user's authority.
  */
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   defineExtension,
   defineTool,

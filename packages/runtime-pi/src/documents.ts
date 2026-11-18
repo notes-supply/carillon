@@ -1,6 +1,6 @@
 /** Carillon's own state in an agent's pi-durable storage. */
 import { createHash } from "node:crypto";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import {
   defineDoc,
   defineDocFamily,
