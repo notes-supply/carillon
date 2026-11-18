@@ -222,18 +222,26 @@ function reply(response: ServerResponse, status: number, body?: unknown): void {
 }
 
 /**
- * The first of `count` consecutive loopback ports, all free when probed.
+ * The first of `count` consecutive loopback ports, all free when probed and
+ * all ones an unprivileged process may bind.
  * The probe releases them before the caller's programs bind them, so they
  * lie below the kernel's ephemeral range, where no socket is given a port in
  * between, and below the 128 ports under it that the installer and
  * persistence tests take, which may run at the same time.
  */
 export async function availablePorts(count: number): Promise<number> {
-  const range = (await readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8")).trim();
-  const last = Number(range.split(/\s+/u)[0]) - 128 - count;
-  if (!(last >= 1024)) throw new Error(`no ${String(count)} free ports below ${range}`);
+  const [range, unprivileged] = await Promise.all([
+    readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8"),
+    readFile("/proc/sys/net/ipv4/ip_unprivileged_port_start", "utf8"),
+  ]);
+  // Containers often set the floor to 0, and port 0 would ask for an ephemeral port.
+  const first = Math.max(1024, Number(unprivileged));
+  const last = Number(range.trim().split(/\s+/u)[0]) - 128 - count;
+  if (!(last >= first)) {
+    throw new Error(`no ${String(count)} free ports from ${String(first)} below ${range.trim()}`);
+  }
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const port = 1024 + Math.floor(Math.random() * (last - 1024 + 1));
+    const port = first + Math.floor(Math.random() * (last - first + 1));
     const listeners: Server[] = [];
     try {
       for (let offset = 0; offset < count; offset += 1) {
