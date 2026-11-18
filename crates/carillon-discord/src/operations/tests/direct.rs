@@ -269,7 +269,7 @@ async fn an_edited_or_deleted_direct_message_is_quoted_as_the_person_sees_it() -
         "mention_roles": [], "mentions": [], "pinned": false, "tts": false, "type": 0,
         "timestamp": "2026-11-05T14:03:00.000000+00:00"});
     edited["edited_timestamp"] = json!("2026-11-05T14:04:00.000000+00:00");
-    server.pending.lock().extend([
+    server.exchange.lock().pending.extend([
         get("/api/v10/channels/900", dm.clone()),
         Step {
             method: Method::PATCH,
@@ -291,7 +291,7 @@ async fn an_edited_or_deleted_direct_message_is_quoted_as_the_person_sees_it() -
          merge it",
         "an edit is quoted as edited"
     );
-    server.pending.lock().extend([
+    server.exchange.lock().pending.extend([
         get("/api/v10/channels/900", dm),
         Step {
             method: Method::DELETE,

@@ -20,10 +20,14 @@ struct Step {
     status: StatusCode,
     body: Value,
 }
+struct Exchange {
+    pending: VecDeque<Step>,
+    bodies: Vec<Value>,
+    unexpected: Vec<String>,
+}
 struct Mock {
     http: Client,
-    pending: Arc<Mutex<VecDeque<Step>>>,
-    seen: Arc<Mutex<Vec<Value>>>,
+    exchange: Arc<Mutex<Exchange>>,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
     participation: Participation,
     _state: tempfile::TempDir,
@@ -35,11 +39,12 @@ impl Drop for Mock {
 }
 impl Mock {
     async fn new(steps: Vec<Step>) -> anyhow::Result<Self> {
-        let pending = Arc::new(Mutex::new(VecDeque::from(steps)));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let router = Router::new()
-            .fallback(handler)
-            .with_state((pending.clone(), seen.clone()));
+        let exchange = Arc::new(Mutex::new(Exchange {
+            pending: VecDeque::from(steps),
+            bodies: Vec::new(),
+            unexpected: Vec::new(),
+        }));
+        let router = Router::new().fallback(handler).with_state(exchange.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -50,8 +55,7 @@ impl Mock {
         let state = tempfile::tempdir()?;
         Ok(Self {
             http,
-            pending,
-            seen,
+            exchange,
             server,
             participation: Participation::load(state.path().join("participation.json"))?,
             _state: state,
@@ -70,26 +74,33 @@ impl Mock {
             .await)
     }
     fn bodies(&self) -> Vec<Value> {
-        self.seen.lock().clone()
+        self.exchange.lock().bodies.clone()
     }
     fn finished(&self) {
-        assert!(self.pending.lock().is_empty());
+        let exchange = self.exchange.lock();
+        assert_eq!(exchange.unexpected, Vec::<String>::new());
+        assert!(
+            exchange.pending.is_empty(),
+            "an expected request was never made"
+        );
     }
 }
-type MockState = (Arc<Mutex<VecDeque<Step>>>, Arc<Mutex<Vec<Value>>>);
 async fn handler(
-    State((pending, seen)): State<MockState>,
+    State(exchange): State<Arc<Mutex<Exchange>>>,
     method: Method,
     uri: Uri,
     body: Bytes,
 ) -> axum::response::Response {
-    let mut pending = pending.lock();
-    let Some(step) = pending.pop_front() else {
+    let mut exchange = exchange.lock();
+    let Some(step) = exchange
+        .pending
+        .pop_front_if(|step| step.method == method && uri == step.path)
+    else {
+        exchange.unexpected.push(format!("{method} {uri}"));
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    assert_eq!(method, step.method);
-    assert_eq!(uri.to_string(), step.path);
-    seen.lock()
+    exchange
+        .bodies
         .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
     (step.status, axum::Json(step.body)).into_response()
 }
@@ -349,10 +360,11 @@ async fn project_channel_role_thread_and_member_workflow() -> anyhow::Result<()>
             .await?
             .with_context(|| format!("operation {operation}"))?;
     }
-    let bodies = server.seen.lock();
+    let bodies = server.bodies();
     assert_eq!(bodies[2], json!({"topic":"Work"}));
     assert_eq!(bodies[5], json!({"color":42}));
     assert_eq!(bodies[12], json!({"archived":true}));
+    server.finished();
     Ok(())
 }
 
