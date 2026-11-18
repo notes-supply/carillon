@@ -230,10 +230,10 @@ function reply(response: ServerResponse, status: number, body?: unknown): void {
  */
 export async function availablePorts(count: number): Promise<number> {
   const range = (await readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8")).trim();
-  const ceiling = Number(range.split(/\s+/u)[0]) - 128 - count;
-  if (!(ceiling > 1024)) throw new Error(`no ${String(count)} free ports below ${range}`);
+  const last = Number(range.split(/\s+/u)[0]) - 128 - count;
+  if (!(last >= 1024)) throw new Error(`no ${String(count)} free ports below ${range}`);
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const port = 1024 + Math.floor(Math.random() * (ceiling - 1024));
+    const port = 1024 + Math.floor(Math.random() * (last - 1024 + 1));
     const listeners: Server[] = [];
     try {
       for (let offset = 0; offset < count; offset += 1) {
