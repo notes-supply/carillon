@@ -3,14 +3,13 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "smol-toml";
 import { afterEach, expect, it } from "vitest";
 import { DEFAULT_RESTART_LIMIT } from "@earendil-works/pi-durable";
 import { TurnActivitySchema, TurnOutcomeSchema } from "@carillon/protocol";
-import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
+import { availablePorts, startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { Parse } from "typebox/value";
 import { WebSocketServer } from "ws";
 
@@ -55,21 +54,11 @@ async function run(args: readonly string[]) {
   return { status: started.child.exitCode, ...started.output() };
 }
 
-async function freePort(): Promise<number> {
-  const listener = createServer();
-  listener.listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const address = listener.address();
-  if (address === null || typeof address === "string") throw new Error("no TCP address");
-  await new Promise<void>((done) => listener.close(() => done()));
-  return address.port;
-}
-
 /** An installation of one Pi runtime whose agents' resources are these directories. */
 async function installation(resources: Record<string, string>, core = "127.0.0.1:1") {
   const home = await mkdtemp(join(tmpdir(), "carillon-pi-cli-"));
   cleanups.push(() => rm(home, { recursive: true, force: true }));
-  const port = await freePort();
+  const port = await availablePorts(1);
   const config = join(home, "carillon.toml");
   const credential = join(home, "runtime.token");
   await writeFile(credential, token);
