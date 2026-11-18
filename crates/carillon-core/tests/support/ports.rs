@@ -5,7 +5,7 @@ use std::{
     net::{Ipv4Addr, TcpListener},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use carillon_installation::bundled::Bundled;
 
 /// A loopback port with the ports of every bundled program above it, all
@@ -42,14 +42,18 @@ pub(crate) fn available_base_port() -> Result<u16> {
                 range.trim()
             )
         })?;
-    for _ in 0..10 {
+    let probe = || -> Result<u16> {
         let base = first + u16::try_from(RandomState::new().hash_one(()) % u64::from(span))?;
-        let probed = (base..=base + above)
+        (base..=base + above)
             .map(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)))
-            .collect::<std::io::Result<Vec<_>>>();
-        if probed.is_ok() {
+            .collect::<std::io::Result<Vec<_>>>()?;
+        Ok(base)
+    };
+    for _ in 1..10 {
+        if let Ok(base) = probe() {
             return Ok(base);
         }
     }
-    bail!("could not find a free run of loopback ports below {ephemeral}")
+    probe()
+        .with_context(|| format!("could not find a free run of loopback ports below {ephemeral}"))
 }
