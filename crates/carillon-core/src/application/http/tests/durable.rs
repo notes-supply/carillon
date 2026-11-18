@@ -46,8 +46,8 @@ async fn post_event(state: &AppState, body: String) -> Result<Response> {
         .await?)
 }
 
-/// A durable runtime that keeps every turn core hands it, reading as much of
-/// one as runtimes do, answering each hand-over with the next scripted answer
+/// A durable runtime that keeps every turn core hands it, reading at most a
+/// limit of one, answering each hand-over with the next scripted answer
 /// (202 once they run out), and each control with `control`.
 #[derive(Clone)]
 pub(super) struct DurableRuntime {
@@ -59,7 +59,12 @@ pub(super) struct DurableRuntime {
 }
 
 impl DurableRuntime {
+    /// One that reads as much of a turn as runtimes do.
     pub(super) async fn start() -> Result<Self> {
+        Self::reading(request_limit()?).await
+    }
+
+    async fn reading(limit: usize) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let runtime = Self {
             url: format!("http://{}", listener.local_addr()?),
@@ -81,7 +86,7 @@ impl DurableRuntime {
                         .unwrap_or_else(|| (StatusCode::ACCEPTED, json!({})));
                     async move { (answer.0, Json(answer.1)) }
                 })
-                .layer(DefaultBodyLimit::max(request_limit()?)),
+                .layer(DefaultBodyLimit::max(limit)),
             )
             .route(
                 "/v1/turns/{id}/control",
@@ -501,15 +506,13 @@ async fn an_event_over_its_limit_as_core_writes_it_is_refused_before_any_runtime
 async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_over() -> Result<()>
 {
     let directory = tempdir()?;
-    let runtime = DurableRuntime::start().await?;
-    let (fixture, state) = durable(directory.path(), &runtime)?;
-    let oversized = ok(submit(&state, "oversized", "conversation").await)?;
-    // Core admits no event this large; one an earlier core kept is handed
-    // over all the same.
-    rusqlite::Connection::open(fixture.config.value.data_dir.join("carillon.sqlite3"))?.execute(
-        "UPDATE turns SET input = ?1 WHERE id = ?2",
-        ("x".repeat(request_limit()?), &oversized.turn_id),
-    )?;
+    let runtime = DurableRuntime::reading(4096).await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let oversized = ExternalEvent {
+        content: "x".repeat(8192),
+        ..event("oversized", "conversation")
+    };
+    let oversized = ok(submit_event(&state, oversized).await)?;
     let next = ok(submit(&state, "next", "elsewhere").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(
