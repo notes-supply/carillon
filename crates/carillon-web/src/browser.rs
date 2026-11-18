@@ -24,9 +24,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use argon2::{
     Argon2,
-    password_hash::{
-        PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString, rand_core::OsRng,
-    },
+    password_hash::{PasswordHasher as _, PasswordVerifier as _, phc::PasswordHash},
 };
 use axum::http::{
     HeaderMap, StatusCode,
@@ -37,7 +35,7 @@ use carillon_installation::{
     filesystem::atomic_write,
 };
 use carillon_interface::InterfaceError;
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::sync::Mutex;
@@ -133,9 +131,8 @@ pub(crate) fn set_password(file: &Path, password: &str) -> Result<()> {
     if password.chars().count() < 12 {
         bail!("a password needs 12 characters or more, so the web chat's password is as it was");
     }
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+    let hash: PasswordHash = Argon2::default()
+        .hash_password(password.as_bytes())
         .map_err(|error| anyhow!("hash the password: {error}"))?;
     if let Some(directory) = file.parent() {
         DirBuilder::new()
