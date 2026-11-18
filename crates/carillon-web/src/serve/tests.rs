@@ -736,16 +736,15 @@ async fn a_connection_that_never_sends_its_request_is_closed_after_the_header_ti
     slow.write_all(b"GET /health HT").await?;
     tokio::task::yield_now().await;
 
-    // Once the header timeout passes, the provider closes both, so a read of
-    // each reaches the end rather than waiting forever.
+    // Once the header timeout passes, the provider closes both without an
+    // answer, so a read of each reaches the end rather than waiting forever.
     tokio::time::advance(HEADER_READ_TIMEOUT + Duration::from_secs(1)).await;
     for mut peer in [silent, slow] {
-        let mut rest = Vec::new();
-        let read = tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut rest)).await;
-        assert!(
-            read.is_ok(),
-            "a connection was still open a header timeout after it stalled"
-        );
+        let mut answer = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut answer))
+            .await
+            .context("a connection was still open a header timeout after it stalled")??;
+        assert_eq!(String::from_utf8_lossy(&answer), "");
     }
 
     stop.notify_one();
