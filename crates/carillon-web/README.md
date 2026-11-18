@@ -38,7 +38,8 @@ carillon web password        # choose the password, which signs every browser ou
 
 `password` asks twice at a terminal. Otherwise it reads one line from
 standard input, so a script or a password manager can pipe it in. Space at
-either end is not part of the password, and it needs 12 characters or more.
+either end is not part of the password, and it needs 12 characters or more
+and 4,096 bytes or fewer.
 It writes the hash and sends the provider no request, so it works whether or
 not the provider runs. Running it again, even with the same password, signs
 every browser out and voids every file link. Both commands take

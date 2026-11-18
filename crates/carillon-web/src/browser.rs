@@ -125,12 +125,21 @@ pub(crate) fn password_file(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("password.hash")
 }
 
+/// The longest password the web chat takes, in bytes. A sign-in's body is
+/// read only as far as this password's JSON could reach.
+pub(crate) const MAX_PASSWORD: usize = 4096;
+
 /// Makes `password` the web chat's, which voids every token and file link
 /// made before. The provider's directory is made when it has not started yet.
 pub(crate) fn set_password(file: &Path, password: &str) -> Result<()> {
     let password = password.trim();
     if password.chars().count() < 12 {
         bail!("a password needs 12 characters or more, so the web chat's password is as it was");
+    }
+    if password.len() > MAX_PASSWORD {
+        bail!(
+            "a password is {MAX_PASSWORD} bytes or fewer, so the web chat's password is as it was"
+        );
     }
     let hash: PasswordHash = Argon2::default()
         .hash_password(password.as_bytes())

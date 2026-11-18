@@ -45,7 +45,7 @@ use tracing::{info, warn};
 
 use crate::{
     api,
-    browser::{self, Browser, Key, refusal},
+    browser::{self, Browser, Key, MAX_PASSWORD, refusal},
     files,
     site::{self, Site},
 };
@@ -175,6 +175,10 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// password holds a connection. A guess is a few bytes and its check a second.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The most of a sign-in's body the provider reads: the longest password's
+/// JSON with every byte escaped in six, as a control character is.
+const SIGN_IN_BODY: usize = r#"{"password":""}"#.len() + 6 * MAX_PASSWORD;
+
 /// How long a connection may wait to write before it is closed, so a peer
 /// that stops reading an answer does not hold it open. It bounds each wait,
 /// not the whole answer. The kernel wakes a waiting writer only once much of
@@ -290,7 +294,7 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .route(
             "/api/sign-in",
             post(api::sign_in).layer((
-                DefaultBodyLimit::max(4096),
+                DefaultBodyLimit::max(SIGN_IN_BODY),
                 TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, SIGN_IN_TIMEOUT),
             )),
         )
