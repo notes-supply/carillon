@@ -94,7 +94,8 @@ test("a status says whether to go on, wait, sign in or show a refusal", () => {
   expect(reading(0)).toBe("away");
   expect(reading(503)).toBe("away");
   expect(reading(401)).toBe("signed_out");
-  for (const status of [400, 404, 409, 413, 422, 500, 507]) expect(reading(status)).toBe("refused");
+  for (const status of [400, 404, 409, 413, 422, 429, 500, 507])
+    expect(reading(status)).toBe("refused");
 });
 
 test("a refusal shows the provider's words, or a sentence for its status", () => {
@@ -104,6 +105,12 @@ test("a refusal shows the provider's words, or a sentence for its status", () =>
   expect(refusalWords(401, '{"error":"That is not the web chat\'s password."}')).toBe(
     "That is not the web chat's password.",
   );
+  expect(
+    refusalWords(
+      429,
+      '{"error":"Another sign-in is being checked. Wait a moment, then try again."}',
+    ),
+  ).toBe("Another sign-in is being checked. Wait a moment, then try again.");
   expect(refusalWords(401, "")).toBe(SIGNED_OUT);
   expect(refusalWords(400, "a conversation is a lowercase UUID")).toBe(
     "Carillon refused the request with status 400.",

@@ -26,7 +26,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::until_stopped;
+use super::{HEADER_READ_TIMEOUT, until_stopped};
 use crate::{
     browser::{Address, addresses, password_file, set_password},
     fixture::{
@@ -288,27 +288,40 @@ async fn the_password_alone_signs_a_browser_in() -> Result<()> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn guesses_wait_their_turn_and_a_wrong_one_holds_it_a_second() -> Result<()> {
+async fn a_wrong_guess_holds_the_slot_a_second_and_a_guess_meanwhile_is_refused() -> Result<()> {
     let fixture = Arc::new(Fixture::new().await?);
-    let sent = |password: &'static str| {
+    let start = Instant::now();
+    // A wrong guess takes the one slot and holds it through its one-second
+    // cooldown, serializing the Argon2 check.
+    let wrong = {
         let fixture = Arc::clone(&fixture);
         tokio::spawn(async move {
-            let answer = fixture.send(guess(password)?).await?;
+            let answer = fixture.send(guess("not the password at all")?).await?;
             anyhow::Ok((answer.status, Instant::now()))
         })
     };
-    let start = Instant::now();
-    let wrong = sent("not the password at all");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let right = sent(PASSWORD);
-    let (wrong, wrong_at) = wrong.await??;
-    let (right, right_at) = right.await??;
-    assert_eq!((wrong, right), (StatusCode::UNAUTHORIZED, StatusCode::OK));
-    assert!(wrong_at - start >= Duration::from_secs(1));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The owner's guess, arriving while the slot is held, is refused at once
+    // rather than queued behind the cooldown.
+    let refused = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(
-        right_at >= wrong_at,
-        "a guess finished during a wrong one's second"
+        refused.json()?["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Another sign-in"),
+        "{}",
+        refused.text()
     );
+    let (wrong, wrong_at) = wrong.await??;
+    assert_eq!(wrong, StatusCode::UNAUTHORIZED);
+    assert!(
+        wrong_at - start >= Duration::from_secs(1),
+        "the cooldown was dropped"
+    );
+    // Once the slot is free, a guess is checked again.
+    let right = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(right.status, StatusCode::OK);
     Ok(())
 }
 
@@ -323,26 +336,34 @@ async fn a_guess_is_small() -> Result<()> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_guess_whose_request_is_dropped_keeps_its_turn() -> Result<()> {
+async fn a_dropped_guess_keeps_the_slot_until_its_check_ends() -> Result<()> {
     let fixture = Arc::new(Fixture::new().await?);
-    // Dropped while the password is checked, then during the wrong guess's second.
-    for dropped_after in [Duration::ZERO, Duration::from_millis(500)] {
-        let start = Instant::now();
-        let dropped = {
-            let fixture = Arc::clone(&fixture);
-            tokio::spawn(async move { fixture.send(guess("not the password at all")?).await })
-        };
-        tokio::task::yield_now().await;
-        tokio::time::sleep(dropped_after).await;
-        dropped.abort();
-        let right = fixture.send(guess(PASSWORD)?).await?;
-        assert_eq!(right.status, StatusCode::OK);
-        assert!(
-            start.elapsed() >= Duration::from_secs(1),
-            "a guess went in {:?} after one dropped {dropped_after:?} in",
-            start.elapsed()
-        );
-    }
+    let start = Instant::now();
+    // A wrong guess whose request is dropped still runs to the end of its
+    // cooldown in its own task, keeping the slot.
+    let dropped = {
+        let fixture = Arc::clone(&fixture);
+        tokio::spawn(async move { fixture.send(guess("not the password at all")?).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    dropped.abort();
+    // While that check runs on, a guess is refused rather than let in early.
+    let refused = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    // Once the dropped guess's cooldown is over, the slot frees and a guess is
+    // checked again.
+    let right = loop {
+        let answer = fixture.send(guess(PASSWORD)?).await?;
+        if answer.status != StatusCode::TOO_MANY_REQUESTS {
+            break answer;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(right.status, StatusCode::OK);
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "the slot freed before the dropped guess's cooldown ended"
+    );
     Ok(())
 }
 
@@ -688,5 +709,46 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_o
     serving.await??;
     // A timer is a millisecond coarse.
     assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_that_never_sends_its_request_is_closed_after_the_header_timeout() -> Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+
+    // One peer that opens a connection and sends nothing, and one that sends
+    // part of a request line and no more.
+    let silent = TcpStream::connect(address).await?;
+    let mut slow = TcpStream::connect(address).await?;
+    slow.write_all(b"GET /health HT").await?;
+    tokio::task::yield_now().await;
+
+    // Once the header timeout passes, the provider closes both, so a read of
+    // each reaches the end rather than waiting forever.
+    tokio::time::advance(HEADER_READ_TIMEOUT + Duration::from_secs(1)).await;
+    for mut peer in [silent, slow] {
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), peer.read_to_end(&mut rest)).await;
+        assert!(
+            read.is_ok(),
+            "a connection was still open a header timeout after it stalled"
+        );
+    }
+
+    stop.notify_one();
+    serving.await??;
     Ok(())
 }

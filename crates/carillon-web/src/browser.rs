@@ -50,8 +50,9 @@ pub(crate) struct Browser {
     /// The addresses besides `listen` the chat is opened at, from the
     /// provider's settings.
     addresses: Vec<Address>,
-    /// Held across each guess at the password, and for a second more after
-    /// a wrong one, so guesses are made one at a time.
+    /// Held across one guess at the password, and for a second more after a
+    /// wrong one. A guess made while it is held is refused, so a peer's
+    /// guesses never queue ahead of the owner's.
     guessing: Arc<Mutex<()>>,
 }
 
@@ -275,12 +276,20 @@ impl Browser {
         Ok(())
     }
 
-    /// The browser's token for `password`, when it is the web chat's. The
-    /// guess runs in a task of its own, which keeps the turn to its end, so
-    /// a request dropped midway frees no turn early.
+    /// The browser's token for `password`, when it is the web chat's. One
+    /// guess is checked at a time, each wrong one for a second, and the
+    /// check runs in a task of its own, which keeps the turn to its end, so
+    /// a request dropped midway frees no turn early. A guess made while
+    /// another is being checked is refused at once, rather than queued, so a
+    /// peer's guesses cannot delay the owner's sign-in.
     pub(crate) async fn sign_in(&self, password: String) -> Result<String, InterfaceError> {
         const WRONG: &str = "That is not the web chat's password.";
-        let turn = Arc::clone(&self.guessing).lock_owned().await;
+        let Ok(turn) = Arc::clone(&self.guessing).try_lock_owned() else {
+            return Err(refusal(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Another sign-in is being checked. Wait a moment, then try again.",
+            ));
+        };
         let file = self.password_file.clone();
         let guess = tokio::spawn(async move {
             let _turn = turn;

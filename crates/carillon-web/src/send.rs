@@ -5,16 +5,16 @@
 //! nothing is submitted twice. Files stream into a staging batch of this
 //! request's own, which goes when core has answered.
 
+mod bound;
+
 use std::{path::Path as FilePath, sync::Arc};
 
 use anyhow::Context as _;
 use axum::{
     Json,
-    extract::{
-        Multipart, Path, State,
-        multipart::{Field, MultipartError, MultipartRejection},
-    },
-    http::StatusCode,
+    body::Body,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
 };
 use carillon_installation::config::{AttachmentLimits, MIB};
 use carillon_interface::{Batch, InterfaceError, submit_event_with_retry};
@@ -22,6 +22,7 @@ use carillon_protocol::model::{
     EVENT_BODY_LIMIT, ExternalEvent, INTENT_COMMAND, NATIVE_INTENT, RuntimeCommand,
     StagedAttachments, StagedFile,
 };
+use multer::{Field, Multipart};
 use serde::Serialize;
 use serde_json::json;
 use tokio::{fs::File, io::AsyncWriteExt as _};
@@ -31,6 +32,7 @@ use crate::{
     api::{AWAY, from_core},
     browser::refusal,
     identity::{ConversationId, ConversationKey, EventId},
+    send::bound::{Meter, Metered, PartHeaderTooLarge},
     serve::Web,
 };
 
@@ -41,11 +43,25 @@ pub(crate) struct Sent {
     duplicate: bool,
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "as `map_err` passes it")]
-fn malformed(error: MultipartError) -> InterfaceError {
+/// The most the provider reads of a message it has already refused, so a
+/// browser still reads the refusal where it can, without a peer draining the
+/// provider with a refused upload. A refused message is normally small; only
+/// an oversized text or file leaves more than this, and that is the message
+/// being refused.
+const REFUSED_DRAIN: u64 = 2 * MIB;
+
+fn malformed(error: &multer::Error) -> InterfaceError {
+    if let multer::Error::StreamReadFailed(source) = error
+        && source.downcast_ref::<PartHeaderTooLarge>().is_some()
+    {
+        return refusal(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "A message's parts are larger than the web chat reads.",
+        );
+    }
     refusal(
-        error.status(),
-        &format!("The message did not arrive whole: {}", error.body_text()),
+        StatusCode::BAD_REQUEST,
+        &format!("The message did not arrive whole: {error}"),
     )
 }
 
@@ -70,9 +86,9 @@ fn event_too_large() -> InterfaceError {
 
 /// A `text` part, or `None` for one longer than any event core reads. A
 /// leading byte-order mark is not part of what the person wrote.
-async fn read_text(part: &mut Field<'_>) -> Result<Option<String>, InterfaceError> {
+async fn read_text(part: &mut Field<'static>) -> Result<Option<String>, InterfaceError> {
     let mut text = Vec::new();
-    while let Some(chunk) = part.chunk().await.map_err(malformed)? {
+    while let Some(chunk) = part.chunk().await.map_err(|error| malformed(&error))? {
         if text.len() + chunk.len() > EVENT_BODY_LIMIT {
             return Ok(None);
         }
@@ -85,7 +101,7 @@ async fn read_text(part: &mut Field<'_>) -> Result<Option<String>, InterfaceErro
 /// Stages a `file` part at `path`, or `None` for one of more than
 /// `max_bytes`.
 async fn stage_file(
-    part: &mut Field<'_>,
+    part: &mut Field<'static>,
     max_bytes: u64,
     path: &FilePath,
 ) -> Result<Option<StagedFile>, InterfaceError> {
@@ -93,10 +109,10 @@ async fn stage_file(
         Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
         _ => "file".to_owned(),
     };
-    let content_type = part.content_type().map(str::to_owned);
+    let content_type = part.content_type().map(|mime| mime.as_ref().to_owned());
     let mut file = File::create(path).await.context("stage a file")?;
     let mut size = 0_u64;
-    while let Some(chunk) = part.chunk().await.map_err(malformed)? {
+    while let Some(chunk) = part.chunk().await.map_err(|error| malformed(&error))? {
         size += chunk.len() as u64;
         if size > max_bytes {
             return Ok(None);
@@ -111,64 +127,99 @@ async fn stage_file(
     }))
 }
 
-/// Reads the request's parts: at most one `text`, and `file`s within
-/// core's limits, in any order. A message `refused` before its parts were
-/// read keeps none of them. Otherwise the first part that is something
-/// else or past a limit refuses the message, and no later part is kept.
-/// The later parts are still read before the refusal is given: a browser
-/// that is answered while it uploads reports a broken connection and not
-/// the answer. A form that cannot be read, or a file that cannot be
-/// staged, is answered at once.
+/// Reads to the end of `part`, up to `budget` bytes, and says how many it
+/// read. A refused message is read this far so a browser still reaching the
+/// end of its upload reads the refusal and not a broken connection. A stream
+/// error ends the reading: the message is already refused.
+async fn drain(part: &mut Field<'static>, budget: u64) -> u64 {
+    let mut read = 0_u64;
+    while read < budget {
+        match part.chunk().await {
+            Ok(Some(chunk)) => read += chunk.len() as u64,
+            _ => break,
+        }
+    }
+    read
+}
+
+/// Reads the request's parts: at most one `text`, and `file`s within core's
+/// limits, in any order. A message `refused` before its parts were read
+/// keeps none of them. Otherwise the first part that is something else or
+/// past a limit refuses the message, and no later part is kept.
+///
+/// The parts of a refused message are read to their end, up to
+/// [`REFUSED_DRAIN`] in all, so a browser answered while it uploads reports a
+/// broken connection and not the answer. A form that cannot be read, a file
+/// that cannot be staged, or a part that outruns [`bound::BETWEEN_PARTS`] is
+/// answered at once.
 async fn stage(
     limits: &AttachmentLimits,
     batch: &Batch,
-    mut parts: Multipart,
+    mut parts: Multipart<'static>,
+    meter: &Meter,
     mut refused: Option<InterfaceError>,
 ) -> Result<(String, Vec<StagedFile>), InterfaceError> {
     let (mut text, mut files) = (None, Vec::new());
-    let mut total = 0_u64;
-    while let Some(mut part) = parts.next_field().await.map_err(malformed)? {
-        if refused.is_some() {
-            continue;
-        }
-        refused = match part.name() {
-            Some("text") if text.is_none() => {
-                text = read_text(&mut part).await?;
-                text.is_none().then(event_too_large)
-            }
-            Some("text") => Some(refusal(
-                StatusCode::BAD_REQUEST,
-                "A message has one `text` part.",
-            )),
-            Some("file") if files.len() >= limits.max_files as usize => Some(refusal(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                &format!("A message carries at most {} files.", limits.max_files),
-            )),
-            Some("file") => {
-                let max_bytes = limits
-                    .max_file_bytes()
-                    .min(limits.max_event_bytes() - total);
-                match stage_file(&mut part, max_bytes, &batch.file(files.len())).await? {
-                    Some(file) => {
-                        total += file.size;
-                        files.push(file);
-                        None
-                    }
-                    None => Some(refusal(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        &format!(
-                            "A file may have at most {} MiB, and a message's files {} MiB \
-                             together.",
-                            limits.max_file_mib, limits.max_event_mib
-                        ),
-                    )),
-                }
-            }
-            _ => Some(refusal(
-                StatusCode::BAD_REQUEST,
-                "A message's parts are `text` and `file`.",
-            )),
+    let (mut total, mut drained) = (0_u64, 0_u64);
+    loop {
+        meter.parts();
+        let Some(mut part) = parts
+            .next_field()
+            .await
+            .map_err(|error| malformed(&error))?
+        else {
+            break;
         };
+        meter.data();
+        if refused.is_none() {
+            refused = match part.name() {
+                Some("text") if text.is_none() => {
+                    text = read_text(&mut part).await?;
+                    text.is_none().then(event_too_large)
+                }
+                Some("text") => Some(refusal(
+                    StatusCode::BAD_REQUEST,
+                    "A message has one `text` part.",
+                )),
+                Some("file") if files.len() >= limits.max_files as usize => Some(refusal(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("A message carries at most {} files.", limits.max_files),
+                )),
+                Some("file") => {
+                    let max_bytes = limits
+                        .max_file_bytes()
+                        .min(limits.max_event_bytes() - total);
+                    match stage_file(&mut part, max_bytes, &batch.file(files.len())).await? {
+                        Some(file) => {
+                            total += file.size;
+                            files.push(file);
+                            None
+                        }
+                        None => Some(refusal(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            &format!(
+                                "A file may have at most {} MiB, and a message's files {} MiB \
+                                 together.",
+                                limits.max_file_mib, limits.max_event_mib
+                            ),
+                        )),
+                    }
+                }
+                _ => Some(refusal(
+                    StatusCode::BAD_REQUEST,
+                    "A message's parts are `text` and `file`.",
+                )),
+            };
+        }
+        // Consume whatever remains of this part, so the next boundary is read
+        // within its window. For a part read whole this takes nothing; for a
+        // refused one it reads the rest, up to the message's drain budget.
+        if refused.is_some() {
+            drained += drain(&mut part, REFUSED_DRAIN.saturating_sub(drained)).await;
+            if drained >= REFUSED_DRAIN {
+                break;
+            }
+        }
     }
     match refused {
         Some(refused) => Err(refused),
@@ -212,21 +263,28 @@ async fn is_command(web: &Web, key: &ConversationKey, text: &str) -> bool {
 pub(crate) async fn send(
     State(web): State<Arc<Web>>,
     Path((agent_id, audience_id, event_id)): Path<(String, ConversationId, EventId)>,
-    parts: Result<Multipart, MultipartRejection>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Json<Sent>, InterfaceError> {
-    let parts = parts.map_err(|rejection| {
-        refusal(
-            rejection.status(),
-            "A message is sent as multipart form data.",
-        )
-    })?;
+    let boundary = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|content_type| multer::parse_boundary(content_type).ok())
+        .ok_or_else(|| {
+            refusal(
+                StatusCode::BAD_REQUEST,
+                "A message is sent as multipart form data.",
+            )
+        })?;
+    let meter = Meter::new();
+    let parts = Multipart::new(Metered::new(body, Arc::clone(&meter)), boundary);
     let key = ConversationKey {
         agent_id,
         audience_id,
     };
     let batch = web.staging.batch().context("stage a message's files")?;
     let limits = &web.registry.value.core.attachments;
-    let (text, files) = stage(limits, &batch, parts, key.configured(&web).err()).await?;
+    let (text, files) = stage(limits, &batch, parts, &meter, key.configured(&web).err()).await?;
     if text.trim().is_empty() && files.is_empty() {
         return Err(refusal(
             StatusCode::BAD_REQUEST,

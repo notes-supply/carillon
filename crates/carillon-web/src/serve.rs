@@ -2,6 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    pin::pin,
     sync::Arc,
     time::Duration,
 };
@@ -9,6 +10,7 @@ use std::{
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Request, State},
     http::{
         HeaderName, HeaderValue, StatusCode,
@@ -25,11 +27,18 @@ use carillon_interface::{
     CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
 };
 use carillon_protocol::{model::Health, settings::Page};
+use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    server::graceful::GracefulShutdown,
+};
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
+    sync::Semaphore,
 };
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
 use tracing::{info, warn};
 
 use crate::{
@@ -135,28 +144,75 @@ pub(crate) async fn serve(
 /// is told to stop.
 const DRAIN: Duration = Duration::from_secs(2);
 
+/// The most connections the provider serves at once. A peer cannot take
+/// every descriptor and shut the owner out, and the provider keeps
+/// descriptors free for core and for staged files. This is far more than a
+/// person opens.
+const MAX_CONNECTIONS: usize = 512;
+
+/// How long a connection has to send a request's line and headers before it
+/// is closed, so a peer that opens one and sends nothing, or sends it a byte
+/// at a time, does not hold it open.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Serves `web` on `listener` until `asked_to_stop` completes, then lets
 /// the requests in flight be answered for at most [`DRAIN`]. Every stream
 /// ends as soon as its page reads again.
+///
+/// A connection is served only while one of [`MAX_CONNECTIONS`] permits is
+/// free. The provider speaks HTTP/1.1, which is what `tailscale serve`
+/// forwards to it, and the timer makes hyper's header-read timeout apply from
+/// the first poll, so a peer that opens a connection and sends no request, or
+/// sends one slowly, loses it rather than holding it open.
 pub(crate) async fn until_stopped(
     listener: TcpListener,
     web: Arc<Web>,
     asked_to_stop: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let stopping = web.stopping.clone();
-    let stopped = stopping.clone();
-    let graceful = axum::serve(listener, router(web)).with_graceful_shutdown(async move {
-        asked_to_stop.await;
-        stopping.cancel();
-    });
+    let service = router(web);
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let graceful = GracefulShutdown::new();
+    let mut asked_to_stop = pin!(asked_to_stop);
+    loop {
+        let Ok(permit) = Arc::clone(&connections).acquire_owned().await else {
+            break;
+        };
+        let (stream, _) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(error) => {
+                    warn!(%error, "accepting a connection failed");
+                    continue;
+                }
+            },
+            () = &mut asked_to_stop => break,
+        };
+        let service = service.clone();
+        let mut builder = http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT);
+        let connection = builder.serve_connection(
+            TokioIo::new(stream),
+            service_fn(move |request: hyper::Request<Incoming>| {
+                service.clone().oneshot(request.map(Body::new))
+            }),
+        );
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _permit = permit;
+            // A browser that stops reading, or stops sending, holds its
+            // connection open until the graceful shutdown's bound or a
+            // timeout. A message it was sending is not lost: the page sends
+            // it again under the same event ID.
+            let _ = connection.await;
+        });
+    }
+    stopping.cancel();
     tokio::select! {
-        served = graceful => served,
-        // A browser that stops reading, or stops sending, holds its
-        // connection open, and with it the graceful shutdown, for as long
-        // as it likes. Past the bound it is left to the end of the process.
-        // A message it was sending is not lost: the page sends it again
-        // under the same event ID.
-        () = async { stopped.cancelled().await; tokio::time::sleep(DRAIN).await } => {
+        () = graceful.shutdown() => Ok(()),
+        () = tokio::time::sleep(DRAIN) => {
             warn!("connections were still open {DRAIN:?} after the provider was told to stop");
             Ok(())
         }

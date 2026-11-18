@@ -2,7 +2,10 @@
 //! page is told when a message cannot be taken.
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 
@@ -16,6 +19,7 @@ use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
 
+use super::REFUSED_DRAIN;
 use crate::{
     api::AWAY,
     fixture::{Answer, Fixture, bearer},
@@ -660,5 +664,100 @@ async fn a_refused_message_is_read_to_its_end_before_it_is_answered() -> Result<
         assert_eq!(staged(&fixture)?, 0, "{said}");
     }
     assert!(!submitted(&fixture), "a refused message reached core");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_part_header_past_the_bound_is_refused_without_holding_it_whole() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // A part header that never ends: a file name far longer than the between-
+    // parts bound, with no closing quote or blank line. Nothing but that bound
+    // stops the parser buffering all of it while it looks for the header's end.
+    let mut body =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"")
+            .into_bytes();
+    body.resize(body.len() + 256 * 1024, b'A');
+    let (mut browser, provider) = tokio::io::duplex(64 * 1024);
+    let upload = tokio::spawn(async move { browser.write_all(&body).await });
+    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from_stream(ReaderStream::new(provider)))?;
+    let answer = fixture.send(request).await?;
+    upload.abort();
+    assert_eq!(
+        answer.status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{}",
+        answer.text()
+    );
+    assert_eq!(
+        answer.json()?,
+        json!({"error": "A message's parts are larger than the web chat reads."})
+    );
+    assert_eq!(staged(&fixture)?, 0);
+    assert!(fixture.core().asked.is_empty(), "core was asked");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // An unknown first part refuses the message. A second part then carries far
+    // more than the drain budget; the provider must stop reading within it,
+    // rather than let a peer make it read an endless upload.
+    let drain = usize::try_from(REFUSED_DRAIN).unwrap_or(usize::MAX);
+    let payload = drain * 4;
+    let mut body =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\nhi\r\n")
+            .into_bytes();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"big.bin\"\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.resize(body.len() + payload, b'r');
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let written = Arc::new(AtomicUsize::new(0));
+    let (mut browser, provider) = tokio::io::duplex(64 * 1024);
+    let upload = {
+        let written = Arc::clone(&written);
+        tokio::spawn(async move {
+            let mut at = 0;
+            while at < body.len() {
+                let end = (at + 64 * 1024).min(body.len());
+                if browser.write_all(&body[at..end]).await.is_err() {
+                    break;
+                }
+                at = end;
+                written.store(at, Relaxed);
+            }
+        })
+    };
+    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from_stream(ReaderStream::new(provider)))?;
+    let answer = fixture.send(request).await?;
+    let _ = upload.await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.text());
+    assert!(
+        written.load(Relaxed) < drain * 2,
+        "the provider read {} bytes of a refused message past its drain budget",
+        written.load(Relaxed)
+    );
+    assert!(
+        fixture.core().events.is_empty(),
+        "a refused message reached core"
+    );
     Ok(())
 }
