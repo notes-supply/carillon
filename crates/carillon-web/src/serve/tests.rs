@@ -680,7 +680,7 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
 }
 
 #[tokio::test]
-async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_of_a_paused_clock()
+async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_and_no_other_joins()
 -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
@@ -702,6 +702,12 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_o
     tokio::time::pause();
     let told = Instant::now();
     stop.notify_one();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let refused = TcpStream::connect(address)
+        .await
+        .err()
+        .context("a connection was taken a second into the stop")?;
+    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
     serving.await??;
     // A timer is a millisecond coarse.
     assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
