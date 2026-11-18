@@ -138,10 +138,14 @@ an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 seconds meanwhile. Any other answer interrupts the turn; nothing ran, so its
 notice is the runtime's explanation alone. Core accepts an event of up to
 2 MiB of JSON, as it was sent and as core writes it again, which can be
-longer: core writes `1e3` as `1000.0`. It refuses a larger one with 413
+longer: core writes `1e3` as `1000.0`. Each identifier an event carries,
+its own and its agent's, user's, audience's, channel's and two targets',
+is 1 to 512 bytes. Core refuses a larger event or identifier with 413
 before it copies any file. A runtime reads a turn of up to 2 MiB and 64 KiB
 (`TURN_REQUEST_LIMIT`), which holds any event core accepts and what core
-adds to it. It refuses a larger turn with 413, which interrupts that turn,
+adds to it: the channel recorded with the conversation's first message, the
+turn's directories, and each file's path and digest. It refuses a larger
+turn with 413, which interrupts that turn,
 so the turns behind it are still handed over. The runtime later settles the turn with
 its own credential: answered, failed with an explanation it judged safe to
 show, steered into an answer that another message carries, on Pi the newest

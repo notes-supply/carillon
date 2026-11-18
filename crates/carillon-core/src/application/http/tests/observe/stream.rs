@@ -15,7 +15,7 @@ use axum::{
     http::Request,
 };
 use carillon_protocol::{
-    model::JOB_READ_LIMIT,
+    model::{IDENTIFIER_LIMIT, JOB_READ_LIMIT},
     observation::{Ending, Opened, Progress, Snapshot},
 };
 use futures_util::StreamExt as _;
@@ -318,7 +318,7 @@ async fn a_conversation_is_shown_however_long_the_audience_admission_accepted() 
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     let state = configured(&fixture);
-    let long = "a".repeat(4096);
+    let long = "a".repeat(IDENTIFIER_LIMIT);
     accept(&fixture, "in the long one", &long).await?;
     accept(&fixture, "in another", "conversation").await?;
 

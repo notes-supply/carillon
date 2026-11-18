@@ -14,8 +14,8 @@ use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
-    EVENT_BODY_LIMIT, EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job,
-    NATIVE_CONTEXT, RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity,
+    EVENT_BODY_LIMIT, EventReceipt, EventStatus, ExternalEvent, IDENTIFIER_LIMIT, JOB_READ_LIMIT,
+    Job, NATIVE_CONTEXT, RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity,
     TurnInspection, TurnSummary,
 };
 use carillon_protocol::observation::ConversationKey;
@@ -650,14 +650,22 @@ impl Core {
     }
 
     fn admit(&self, event: &ExternalEvent) -> Result<(), CoreError> {
+        let identifiers = [
+            ("event_id", &event.event_id),
+            ("agent_id", &event.agent_id),
+            ("user_id", &event.user_id),
+            ("audience_id", &event.audience_id),
+            ("channel_id", &event.channel_id),
+            ("delivery_target_id", &event.delivery_target_id),
+            ("feedback_target_id", &event.feedback_target_id),
+        ];
         // An observation shows a conversation under the key its agent and
         // its audience make, so the key decides which of them are accepted.
         let named = ConversationKey::new(event.agent_id.clone(), event.audience_id.clone());
         if named.is_err()
-            || event.event_id.is_empty()
-            || event.user_id.is_empty()
-            || event.delivery_target_id.is_empty()
-            || event.feedback_target_id.is_empty()
+            || identifiers
+                .iter()
+                .any(|(_, identifier)| identifier.is_empty())
             || (event.content.trim().is_empty()
                 && event.attachments.is_none()
                 && event.native[NATIVE_CONTEXT]
@@ -668,6 +676,16 @@ impl Core {
                 "event identity, agent, audience, targets, user, and content, context or attachments are required"
                     .to_owned(),
             ));
+        }
+        if let Some((field, identifier)) = identifiers
+            .iter()
+            .find(|(_, identifier)| identifier.len() > IDENTIFIER_LIMIT)
+        {
+            return Err(CoreError::TooLarge(format!(
+                "this event's {field} takes {} bytes, over the {IDENTIFIER_LIMIT} an \
+                 identifier may take",
+                identifier.len()
+            )));
         }
         if event.event_id.starts_with(crate::db::RUNTIME_EVENT_PREFIX) {
             return Err(CoreError::InvalidInput(format!(

@@ -124,6 +124,11 @@ pub struct Health {
 /// person wrote within it.
 pub const EVENT_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
+/// The most bytes of each identifier an event carries: its own, its agent's,
+/// user's, audience's and channel's, and its two targets'. An identifier
+/// names something and holds nothing a person wrote.
+pub const IDENTIFIER_LIMIT: usize = 512;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalEvent {
     pub event_id: String,
