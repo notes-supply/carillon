@@ -11,11 +11,11 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
 use carillon_protocol::model::{ExternalEvent, StagedAttachments, StagedFile};
-use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use futures_util::{StreamExt as _, stream};
 use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
@@ -798,22 +798,34 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
         "p".repeat(8000)
     );
     let empties = empty.repeat(REFUSED_DRAIN * 4 / empty.len()).into_bytes();
+    let refused =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\n");
     for (rest, said) in [(large, "one large part"), (empties, "many empty parts")] {
-        let mut body = format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\nhi\r\n"
-        )
-        .into_bytes();
+        let mut body = b"hi\r\n".to_vec();
         body.extend_from_slice(&rest);
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
-        // Frames of up to 128 KiB, as large as hyper reads them.
+        // The first frame ends with the refused part's headers, and the rest
+        // comes a kibibyte at a time once the parser has parsed them, so the
+        // drain counts from the refusal and every frame read is small.
+        let body = Bytes::from(body);
+        let frames = std::iter::once(Bytes::from(refused.clone())).chain(
+            (0..body.len())
+                .step_by(1024)
+                .map(move |at| body.slice(at..body.len().min(at + 1024))),
+        );
         let read = Arc::new(AtomicUsize::new(0));
-        let (mut browser, provider) = tokio::io::duplex(128 * 1024);
-        let upload = tokio::spawn(async move { browser.write_all(&body).await });
         let counted = {
             let read = Arc::clone(&read);
-            ReaderStream::with_capacity(provider, 128 * 1024).inspect_ok(move |chunk| {
-                read.fetch_add(chunk.len(), Relaxed);
+            stream::iter(frames.enumerate()).then(move |(index, frame)| {
+                let read = Arc::clone(&read);
+                async move {
+                    if index == 1 {
+                        tokio::task::yield_now().await;
+                    }
+                    read.fetch_add(frame.len(), Relaxed);
+                    Ok::<_, std::io::Error>(frame)
+                }
             })
         };
         let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
@@ -823,20 +835,17 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
             )
             .body(Body::from_stream(counted))?;
         let answer = fixture.send(request).await?;
-        let _ = upload.await;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{said}");
         assert_eq!(
             answer.json()?,
             json!({"error": "A message's parts are `text` and `file`."}),
             "{said}"
         );
-        // Besides the drain, the provider may have fed the parser the first
-        // part's whole 64 KiB window before it refused the message, and read
-        // one frame it has not fed.
+        // The body reads one frame past the drain, to see whether it ended.
+        let drained = read.load(Relaxed) - refused.len();
         assert!(
-            read.load(Relaxed) <= 2 * MIB + 64 * 1024 + 128 * 1024,
-            "{said}: the provider read {} bytes of a refused message",
-            read.load(Relaxed)
+            drained <= 2 * MIB + 1024,
+            "{said}: the provider read {drained} bytes past a refusal"
         );
     }
     assert!(
