@@ -707,54 +707,68 @@ async fn a_part_header_past_the_bound_is_refused_without_holding_it_whole() -> R
 async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // An unknown first part refuses the message. A second part then carries far
-    // more than the drain budget; the provider must stop reading within it,
-    // rather than let a peer make it read an endless upload.
+    // An unknown first part refuses the message. The rest then carries far
+    // more than the drain budget, in one large part or in many empty parts
+    // whose headers each stay within the between-parts bound. The provider
+    // stops reading within the budget either way, rather than let a peer make
+    // it read an endless upload.
     let drain = usize::try_from(REFUSED_DRAIN).unwrap_or(usize::MAX);
-    let payload = drain * 4;
-    let mut body =
-        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\nhi\r\n")
-            .into_bytes();
-    body.extend_from_slice(
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
-             filename=\"big.bin\"\r\n\r\n"
-        )
-        .as_bytes(),
+    let mut large = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"big.bin\"\r\n\r\n"
+    )
+    .into_bytes();
+    large.resize(large.len() + drain * 4, b'r');
+    large.extend_from_slice(b"\r\n");
+    let empty = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\nX-Pad: {}\r\n\r\n\r\n",
+        "p".repeat(8000)
     );
-    body.resize(body.len() + payload, b'r');
-    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let empties = empty.repeat(drain * 4 / empty.len()).into_bytes();
+    for (rest, said) in [(large, "one large part"), (empties, "many empty parts")] {
+        let mut body = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\nhi\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&rest);
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
-    let written = Arc::new(AtomicUsize::new(0));
-    let (mut browser, provider) = tokio::io::duplex(64 * 1024);
-    let upload = {
-        let written = Arc::clone(&written);
-        tokio::spawn(async move {
-            let mut at = 0;
-            while at < body.len() {
-                let end = (at + 64 * 1024).min(body.len());
-                if browser.write_all(&body[at..end]).await.is_err() {
-                    break;
+        let written = Arc::new(AtomicUsize::new(0));
+        let (mut browser, provider) = tokio::io::duplex(64 * 1024);
+        let upload = {
+            let written = Arc::clone(&written);
+            tokio::spawn(async move {
+                let mut at = 0;
+                while at < body.len() {
+                    let end = (at + 64 * 1024).min(body.len());
+                    if browser.write_all(&body[at..end]).await.is_err() {
+                        break;
+                    }
+                    at = end;
+                    written.store(at, Relaxed);
                 }
-                at = end;
-                written.store(at, Relaxed);
-            }
-        })
-    };
-    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
-        .header(
-            CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .body(Body::from_stream(ReaderStream::new(provider)))?;
-    let answer = fixture.send(request).await?;
-    let _ = upload.await;
-    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.text());
-    assert!(
-        written.load(Relaxed) < drain * 2,
-        "the provider read {} bytes of a refused message past its drain budget",
-        written.load(Relaxed)
-    );
+            })
+        };
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(ReaderStream::new(provider)))?;
+        let answer = fixture.send(request).await?;
+        let _ = upload.await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{said}");
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message's parts are `text` and `file`."}),
+            "{said}"
+        );
+        assert!(
+            written.load(Relaxed) < drain * 2,
+            "{said}: the provider read {} bytes of a refused message past its drain budget",
+            written.load(Relaxed)
+        );
+    }
     assert!(
         fixture.core().events.is_empty(),
         "a refused message reached core"
