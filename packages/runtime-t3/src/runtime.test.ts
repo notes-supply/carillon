@@ -305,7 +305,7 @@ it("waits for the run T3 starts after background work however late it comes, and
   );
   expect(thread().runs.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
   expect(dispatches()).toHaveLength(1);
-}, 10_000);
+});
 
 it("fails closed when the native session ends before it reports finished background work", async () => {
   const result = execute(turn("turn-1", "work"));
@@ -1092,7 +1092,7 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
   await slow.close();
-}, 10_000);
+});
 
 it.each([false, true])(
   "closes promptly while the first snapshot never arrives, existing thread %s",
@@ -1300,7 +1300,7 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
     /was not confirmed stopped/u,
   );
   await slow.close();
-}, 10_000);
+});
 
 it("cancels or closes promptly while T3's discovery or upgrade stalls before any dispatch", async () => {
   fake.holdDiscovery = true;

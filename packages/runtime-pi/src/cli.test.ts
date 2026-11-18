@@ -199,7 +199,7 @@ it("sets an agent's model, which it then lists with the models Pi offers", async
   expect(refused.status).toBe(1);
   expect(refused.stderr).toContain("local/gone is not a model offered here.");
   expect(await models("default")).toMatchObject({ value: "local/reasoner" });
-}, 30_000);
+});
 
 async function configure(args: readonly string[]) {
   const configured = await run([
@@ -296,7 +296,7 @@ it("gives up a message whose answer keeps killing the runtime, and answers the o
   const [answered, ...more] = await outcomes(core, "turn-2");
   expect(more).toEqual([]);
   expect(answered?.body).toMatchObject({ outcome: "answered" });
-}, 90_000);
+});
 
 it("finishes a turn cut off by SIGKILL once it runs again, and settles it once", async () => {
   const core: FakeCore = await startFakeCore();
@@ -322,7 +322,7 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
   expect(settled.outcome === "answered" && settled.output).toMatch(
     /^Local provider response 1: hold /u,
   );
-}, 30_000);
+});
 
 /**
  * ChatGPT's Codex Responses socket, which Pi keeps open between a
@@ -422,14 +422,14 @@ it("exits on SIGTERM once a Codex model answered, and answers a message the stop
   await holding.ready;
   await inbox(url, home, "hello again", "turn-2");
   expect(await answering(url, core, "turn-2")).toBe("model");
-  await expect.poll(() => codex.requests, { timeout: 10_000 }).toBe(2);
+  await expect.poll(() => codex.requests).toBe(2);
   expect(await stopped(holding.child)).toBe(0);
   codex.holding = false;
   await start(live).ready;
   const [outcome, ...more] = await outcomes(core, "turn-2");
   expect(more).toEqual([]);
   expect(outcome?.body).toMatchObject({ outcome: "answered", output: "Codex answer." });
-}, 60_000);
+});
 
 it("exits on SIGTERM though a user extension left a request that never answers", async () => {
   let asked = 0;
@@ -468,4 +468,4 @@ it("exits on SIGTERM though a user extension left a request that never answers",
   expect((await outcomes(core)).map(({ body }) => body)).toMatchObject([{ outcome: "answered" }]);
   await expect.poll(() => asked).toBe(1);
   expect(await stopped(serving.child)).toBe(0);
-}, 30_000);
+});
