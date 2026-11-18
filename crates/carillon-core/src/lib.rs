@@ -7,7 +7,7 @@
     rename_noreplace,
     sync_nonpoison
 )]
-#![cfg_attr(test, feature(unix_mkfifo))]
+#![cfg_attr(test, feature(default_field_values, unix_mkfifo))]
 mod answers;
 pub mod application;
 mod attachments;

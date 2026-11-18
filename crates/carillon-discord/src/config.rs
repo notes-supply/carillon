@@ -228,33 +228,20 @@ fn validate_activity_marker(value: &str) -> Result<()> {
 /// What the provider downloads from Discord for an admitted message before
 /// core captures it. Sizes are MiB. Downloads wait for staging room; core
 /// applies its own limits again. Changes apply when the provider restarts.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct AttachmentPolicy {
     /// Without it, a message carrying files is refused with an explanation
     /// rather than accepted without them.
-    pub enabled: bool,
+    pub enabled: bool = true,
     /// Discord allows at most 10 files on one message.
-    pub max_files: u32,
-    pub max_file_mib: u64,
-    pub max_message_mib: u64,
+    pub max_files: u32 = 10,
+    pub max_file_mib: u64 = 1024,
+    pub max_message_mib: u64 = 2048,
     /// Messages downloading files at once, across conversations.
-    pub concurrent_messages: u32,
+    pub concurrent_messages: u32 = 2,
     /// Bytes reserved for downloaded files until core has captured them.
-    pub staging_mib: u64,
-}
-
-impl Default for AttachmentPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_files: 10,
-            max_file_mib: 1024,
-            max_message_mib: 2048,
-            concurrent_messages: 2,
-            staging_mib: 2048,
-        }
-    }
+    pub staging_mib: u64 = 2048,
 }
 
 impl AttachmentPolicy {

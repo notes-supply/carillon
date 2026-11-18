@@ -303,7 +303,7 @@ async fn limits_and_storage_budget_refuse_before_copying_and_release_reservation
             storage_mib: 1024 * 1024,
             max_event_mib: 1024,
             free_space_mib: 1024 * 1024,
-            ..AttachmentLimits::default()
+            ..
         },
     )?;
     let refusal = submit(&state, event("over", "", over.clone()))
@@ -320,7 +320,7 @@ async fn limits_and_storage_budget_refuse_before_copying_and_release_reservation
         &mut state,
         AttachmentLimits {
             free_space_mib: 0,
-            ..AttachmentLimits::default()
+            ..
         },
     )?;
     submit(&state, event("over", "", over))
@@ -397,7 +397,7 @@ async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_set
         AttachmentLimits {
             concurrent_captures: 1,
             free_space_mib: 0,
-            ..AttachmentLimits::default()
+            ..
         },
     )?;
     let slow = stage(&state, "slow", &[("slow.bin", &[7; 64])])?;

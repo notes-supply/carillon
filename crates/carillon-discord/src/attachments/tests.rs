@@ -383,7 +383,7 @@ async fn policy_refuses_before_any_request() -> Result<()> {
         max_file_mib: 1,
         max_message_mib: 1,
         staging_mib: 1,
-        ..AttachmentPolicy::default()
+        ..
     };
     let downloads = downloads(staging.path(), port, policy)?;
     let mib = 1024 * 1024;
@@ -424,10 +424,7 @@ async fn policy_refuses_before_any_request() -> Result<()> {
     }
     let disabled = Downloads::open(
         staging.path().join("other"),
-        AttachmentPolicy {
-            enabled: false,
-            ..AttachmentPolicy::default()
-        },
+        AttachmentPolicy { enabled: false, .. },
     )?;
     let refusal = disabled
         .admit(&[attachment(port, "601", "a", 1)])

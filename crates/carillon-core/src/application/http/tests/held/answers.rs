@@ -144,7 +144,7 @@ async fn files_core_cannot_keep_are_named_in_the_answer_and_the_rest_sent() -> R
         max_files: 4,
         max_file_mib: 1,
         free_space_mib: 0,
-        ..AttachmentLimits::default()
+        ..
     };
     let state = configured(&fixture);
     let made = directory.path().join("made");
