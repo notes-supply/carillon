@@ -65,7 +65,7 @@ installs the tools and runs the tasks:
 mise install
 mise run check            # format, lint, types and tests; or check:lint / check:rust / check:ts
 mise run test:integration # the services together
-mise run test:browser     # the web chat's page, built, in a headless browser
+mise run test:browser     # the web chat's page, built, in headless Chromium and WebKit
 mise run test:install     # build the release archive and test installing it
 ```
 

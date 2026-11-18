@@ -17,6 +17,7 @@ A test of one module is beside that module, so the lint that says where the page
 
 ## The browser checks
 
+- Each check runs in Chromium and in WebKit, which every browser on iOS uses. A failed check names its engine, as `[webkit]`. WebKit runs only on the systems Playwright supports, so elsewhere `mise run test:browser -- --project=chromium` runs Chromium alone.
 - `browser/fixtures.ts` starts one fake provider for each Playwright worker, on a port of its own, serving `dist/`. The page and the API then share an origin, as with the real provider.
 - A check begins with `fake.play(scenario)`, which starts that scenario over on the manual clock. It then acts as a person does: it types the password, clicks, types a message.
 - `fake.step(label)` plays the scenario's next step and fails if that step is not the one named. A check never waits for time to pass. It steps the fake and waits for what the page shows.
@@ -73,7 +74,7 @@ A listener, Svelte's `on`, a subscription, an observer, a timer, a media query a
 
 ## What the tools do not tell you
 
-- The message field grows by the stylesheet's `field-sizing: content`. The browser checks prove it in Chromium only. A browser without it keeps a field of one line that scrolls.
+- The message field grows by the stylesheet's `field-sizing: content`. The browser checks prove it in Chromium and WebKit. A browser without it keeps a field of one line that scrolls.
 - A snapshot replaces every turn's object, so everything derived from a turn runs again for all of them. That is cheap except for `when()`, which costs about 40 µs a call. `time/Moment.svelte` therefore reads its prop through a `$derived` of the number alone, and reads `clock.today` in place of `clock.now`. Draw every time on the page with `Moment`.
 - The effect in `followView` tracks only what it reads before the first `await`. `follow` and `watch` must read no state there.
 - `hear` in `session/session.svelte.ts` is the one place a snapshot is taken in. It also calls `see` and `settle`, because both remember something the next snapshot no longer says. `readAddress` calls `see` too, so that a conversation opened and left before its snapshot arrived still counts as seen.

@@ -322,8 +322,8 @@ jobs:
           key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-
       - run: mise run install
-      - name: Install headless Chromium and the system libraries it needs
-        # The task fetches the browser too, but only apt can add its libraries.
+      - name: Install headless Chromium and WebKit and the system libraries they need
+        # The task fetches the browsers too, but only apt can add their libraries.
         run: mise exec -- pnpm --dir packages/web run install:browser --with-deps
       - run: mise run test:browser
       - name: Keep the trace of each failed check
