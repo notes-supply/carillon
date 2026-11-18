@@ -176,7 +176,7 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// password holds a connection. A guess is a few bytes and its check a second.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The most of a sign-in's body the provider reads: the longest password's
+/// The most of a sign-in's body the provider accepts: the longest password's
 /// JSON with every byte escaped in six, as a control character is.
 const SIGN_IN_BODY: usize = r#"{"password":""}"#.len() + 6 * MAX_PASSWORD;
 

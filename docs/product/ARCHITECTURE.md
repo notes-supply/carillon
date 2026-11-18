@@ -288,8 +288,9 @@ that expire. The provider's only durable file is the password's Argon2id
 hash, which it reads again for every request that presents a credential.
 `carillon web password` writes it and sends the provider no request. A
 browser trades the password for a bearer token made from the hash, one guess
-at a time. A wrong guess holds the check for a second more, and a guess sent
-meanwhile is refused with 429 rather than queued. A new password
+at a time. A wrong guess holds the check for a second more. A guess is
+answered 429 at once, unchecked, if another is being checked when its whole
+body has arrived; it is not queued. A new password
 voids every token and file link. Every request must name one of the chat's
 addresses in `Host` and come from one of them. A failure of core reaches the page as one
 retryable status, or as its stream's last message, and what core said is logged.
