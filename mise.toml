@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.99.1", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
+rust = { version = "nightly-2026-11-18", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
 node = "26.13.1"
 bun = "1.4.4"
 pnpm = "12.19.0"
