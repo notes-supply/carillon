@@ -6,7 +6,7 @@ use anyhow::ensure;
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::Notify,
 };
 
@@ -201,6 +201,85 @@ async fn an_upload_that_sends_nothing_for_30_seconds_of_a_paused_clock_loses_its
     assert!(
         answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
         "{answer}"
+    );
+
+    stop.notify_one();
+    serving.await??;
+    Ok(())
+}
+
+/// A browser that asks for the page's script and reads none of the answer.
+/// Its receive buffer is small, so the provider soon has to wait to write.
+async fn an_unread_download(address: SocketAddr) -> Result<TcpStream> {
+    let socket = TcpSocket::new_v4()?;
+    socket.set_recv_buffer_size(4096)?;
+    let mut browser = socket.connect(address).await?;
+    browser
+        .write_all(
+            format!(
+                "GET /index-Bq3nR7xK.js HTTP/1.1\r\nHost: {AUTHORITY}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    Ok(browser)
+}
+
+/// The length of the body after the head of `answer`, which must be 200.
+fn body_length(answer: &[u8]) -> Result<usize> {
+    ensure!(
+        answer.starts_with(b"HTTP/1.1 200 OK\r\n"),
+        "{}",
+        String::from_utf8_lossy(&answer[..answer.len().min(200)])
+    );
+    let head = answer
+        .windows(4)
+        .position(|end| end == b"\r\n\r\n")
+        .context("the answer's head never ended")?;
+    Ok(answer.len() - head - 4)
+}
+
+#[tokio::test]
+async fn a_download_unread_for_60_seconds_of_a_paused_clock_is_cut_off_and_one_unread_for_59_is_not()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    // Far more than a connection's buffers hold.
+    let script = 16 * 1024 * 1024;
+    std::fs::File::options()
+        .write(true)
+        .open(fixture.web.site.release.join("index-Bq3nR7xK.js"))?
+        .set_len(script)?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+    let mut paused = an_unread_download(address).await?;
+    let mut stalled = an_unread_download(address).await?;
+
+    tokio::time::pause();
+    tokio::time::sleep(Duration::from_secs(59)).await;
+    let mut answer = Vec::new();
+    paused.read_to_end(&mut answer).await?;
+    assert_eq!(
+        body_length(&answer)?,
+        usize::try_from(script)?,
+        "a download unread for 59 seconds was cut off"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut answer = Vec::new();
+    stalled.read_to_end(&mut answer).await?;
+    let sent = body_length(&answer)?;
+    assert!(
+        sent < usize::try_from(script)?,
+        "a download unread for 61 seconds was sent whole"
     );
 
     stop.notify_one();
