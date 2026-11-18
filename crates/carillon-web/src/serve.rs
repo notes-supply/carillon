@@ -246,7 +246,8 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .layer(from_fn_with_state(Arc::clone(&web), operator_only));
     Router::new()
         .route("/health", get(health))
-        // A guess waits its turn holding its body, so a body is kept small.
+        // Anyone who can reach the provider can send a guess, and a guess is
+        // read whole before it is checked, so its body is kept small.
         .route(
             "/api/sign-in",
             post(api::sign_in).layer(DefaultBodyLimit::max(4096)),
