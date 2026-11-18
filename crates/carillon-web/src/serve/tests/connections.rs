@@ -265,30 +265,49 @@ async fn a_request_s_line_and_headers_may_fill_64_kib_and_no_more() -> Result<()
     ));
 
     let line = format!("GET /health HTTP/1.1\r\nHost: {AUTHORITY}\r\nConnection: close\r\nX-Pad: ");
-    let padded = |end: &str| {
+    let padded = |length: usize, end: &str| {
         let mut head = line.as_bytes().to_vec();
-        head.resize(64 * 1024 - end.len(), b'p');
+        head.resize(length - end.len(), b'p');
         head.extend_from_slice(end.as_bytes());
         head
     };
-    // Both heads are 64 KiB: one ends there and is served, and one has not
-    // ended there and is refused. Sent no further, the refused one is read
-    // whole, so the provider closes without a reset that would lose its answer.
+    let too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\n";
+    // A head that ends at 64 KiB is served, and one that ends a byte later,
+    // or has not ended by then, is refused. Sent no further, a refused head
+    // is read whole, so the provider closes without a reset that would lose
+    // its answer. Each is sent on a new connection and on one that has
+    // served a request.
     for (head, answered) in [
-        (padded("\r\n\r\n"), "HTTP/1.1 200 OK\r\n"),
-        (
-            padded("p"),
-            "HTTP/1.1 431 Request Header Fields Too Large\r\n",
-        ),
+        (padded(64 * 1024, "\r\n\r\n"), "HTTP/1.1 200 OK\r\n"),
+        (padded(64 * 1024 + 1, "\r\n\r\n"), too_large),
+        (padded(64 * 1024, "p"), too_large),
     ] {
-        let mut browser = TcpStream::connect(address).await?;
-        browser.write_all(&head).await?;
-        let mut answer = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), browser.read_to_end(&mut answer))
-            .await
-            .with_context(|| format!("a {} byte head was not answered", head.len()))??;
-        let answer = String::from_utf8_lossy(&answer);
-        assert!(answer.starts_with(answered), "{answer}");
+        for served in [false, true] {
+            let mut browser = TcpStream::connect(address).await?;
+            if served {
+                browser
+                    .write_all(
+                        format!("HEAD /health HTTP/1.1\r\nHost: {AUTHORITY}\r\n\r\n").as_bytes(),
+                    )
+                    .await?;
+                let mut first = Vec::new();
+                while !first.ends_with(b"\r\n\r\n") {
+                    first.push(browser.read_u8().await?);
+                }
+                assert!(first.starts_with(b"HTTP/1.1 200 OK\r\n"));
+            }
+            browser.write_all(&head).await?;
+            let mut answer = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), browser.read_to_end(&mut answer))
+                .await
+                .with_context(|| format!("a {} byte head was not answered", head.len()))??;
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.starts_with(answered),
+                "a {} byte head, served before {served}: {answer}",
+                head.len()
+            );
+        }
     }
 
     stop.notify_one();
