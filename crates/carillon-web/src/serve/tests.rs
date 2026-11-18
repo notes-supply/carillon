@@ -2,6 +2,7 @@
 //! page would drive them.
 
 use std::{
+    net::SocketAddr,
     os::unix::fs::{PermissionsExt as _, mkfifo, symlink},
     sync::Arc,
     time::Duration,
@@ -690,8 +691,20 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_o
         asked_to_stop,
     ));
 
-    // A message whose upload never comes: the provider says it is ready
-    // for the body, and the browser sends none of it.
+    let _browser = hold_an_upload(address, &token).await?;
+
+    tokio::time::pause();
+    let told = Instant::now();
+    stop.notify_one();
+    serving.await??;
+    // A timer is a millisecond coarse.
+    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
+    Ok(())
+}
+
+/// A connection holding a message whose upload never comes: the provider
+/// says it is ready for the body, and the browser sends none of it.
+async fn hold_an_upload(address: SocketAddr, token: &str) -> Result<TcpStream> {
     let mut browser = TcpStream::connect(address).await?;
     let upload = format!(
         "PUT /api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/\
@@ -703,19 +716,10 @@ async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_o
     let mut ready = [0; 25];
     browser.read_exact(&mut ready).await?;
     assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
-
-    tokio::time::pause();
-    let told = Instant::now();
-    stop.notify_one();
-    serving.await??;
-    // A timer is a millisecond coarse.
-    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
-    Ok(())
+    Ok(browser)
 }
 
-#[tokio::test]
-async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_of_a_paused_clock()
--> Result<()> {
+async fn hold_every_connection(address: SocketAddr, token: &str) -> Result<Vec<TcpStream>> {
     // The cap's connections and the test's own ends of them pass the soft
     // descriptor limit a service manager gives a process by default.
     let descriptors = getrlimit(Resource::Nofile);
@@ -726,6 +730,16 @@ async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_
             ..descriptors
         },
     )?;
+    let mut browsers = Vec::with_capacity(MAX_CONNECTIONS);
+    for _ in 0..MAX_CONNECTIONS {
+        browsers.push(hold_an_upload(address, token).await?);
+    }
+    Ok(browsers)
+}
+
+#[tokio::test]
+async fn a_connection_past_the_cap_is_unanswered_for_a_second_until_a_held_one_closes() -> Result<()>
+{
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -740,24 +754,53 @@ async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_
         Arc::clone(&fixture.web),
         asked_to_stop,
     ));
+    let mut browsers = hold_every_connection(address, &token).await?;
 
-    // Every connection the provider serves holds a message whose upload
-    // never comes, so none of them ends and the provider waits for one to.
-    let upload = format!(
-        "PUT /api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/\
-         m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b HTTP/1.1\r\nHost: {AUTHORITY}\r\n\
-         Authorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary=b\r\n\
-         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n"
-    );
-    let mut browsers = Vec::with_capacity(MAX_CONNECTIONS);
-    for _ in 0..MAX_CONNECTIONS {
-        let mut browser = TcpStream::connect(address).await?;
-        browser.write_all(upload.as_bytes()).await?;
-        let mut ready = [0; 25];
-        browser.read_exact(&mut ready).await?;
-        assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
-        browsers.push(browser);
-    }
+    let mut past = TcpStream::connect(address).await?;
+    past.write_all(
+        format!("GET /health HTTP/1.1\r\nHost: {AUTHORITY}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .await?;
+    // Only a wait shows that nothing comes. Without the cap, the provider
+    // answers within milliseconds.
+    tokio::time::timeout(Duration::from_secs(1), past.read(&mut [0; 1]))
+        .await
+        .err()
+        .context("a connection past the cap was answered while every connection was held")?;
+
+    drop(browsers.pop());
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), past.read_to_end(&mut answer))
+        .await
+        .context("a connection past the cap was not answered once a held one closed")??;
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+
+    drop(browsers);
+    stop.notify_one();
+    serving.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_of_a_paused_clock()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+    let browsers = hold_every_connection(address, &token).await?;
 
     tokio::time::pause();
     let told = Instant::now();
