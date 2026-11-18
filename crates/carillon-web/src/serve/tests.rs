@@ -17,6 +17,7 @@ use axum::{
     },
 };
 use carillon_installation::config::LoadedConfig;
+use futures_util::FutureExt as _;
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use serde_json::json;
@@ -291,37 +292,26 @@ async fn the_password_alone_signs_a_browser_in() -> Result<()> {
 
 #[tokio::test(start_paused = true)]
 async fn a_wrong_guess_holds_the_slot_a_second_and_a_guess_meanwhile_is_refused() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
+    let fixture = Fixture::new().await?;
     let start = Instant::now();
-    // A wrong guess takes the one slot and holds it through its one-second
-    // cooldown, serializing the Argon2 check.
-    let wrong = {
-        let fixture = Arc::clone(&fixture);
-        tokio::spawn(async move {
-            let answer = fixture.send(guess("not the password at all")?).await?;
-            anyhow::Ok((answer.status, Instant::now()))
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // The owner's guess, arriving while the slot is held, is refused at once
-    // rather than queued behind the cooldown.
+    let mut wrong = Box::pin(fixture.send(guess("not the password at all")?));
+    // A guess takes the slot on its first poll, and its check runs on in a
+    // task of its own.
+    assert!(
+        (&mut wrong).now_or_never().is_none(),
+        "a wrong guess was answered before its check"
+    );
     let refused = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
-    assert!(
-        refused.json()?["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Another sign-in"),
-        "{}",
-        refused.text()
+    assert_eq!(
+        refused.json()?["error"],
+        "Another sign-in is being checked. Wait a moment, then try again."
     );
-    let (wrong, wrong_at) = wrong.await??;
-    assert_eq!(wrong, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong.await?.status, StatusCode::UNAUTHORIZED);
     assert!(
-        wrong_at - start >= Duration::from_secs(1),
+        start.elapsed() >= Duration::from_secs(1),
         "the cooldown was dropped"
     );
-    // Once the slot is free, a guess is checked again.
     let right = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(right.status, StatusCode::OK);
     Ok(())
@@ -338,34 +328,26 @@ async fn a_guess_is_small() -> Result<()> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_dropped_guess_keeps_the_slot_until_its_check_ends() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
+async fn a_dropped_guess_keeps_the_slot_through_its_one_second_cooldown() -> Result<()> {
+    let fixture = Fixture::new().await?;
     let start = Instant::now();
-    // A wrong guess whose request is dropped still runs to the end of its
-    // cooldown in its own task, keeping the slot.
-    let dropped = {
-        let fixture = Arc::clone(&fixture);
-        tokio::spawn(async move { fixture.send(guess("not the password at all")?).await })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    dropped.abort();
-    // While that check runs on, a guess is refused rather than let in early.
+    let mut dropped = Box::pin(fixture.send(guess("not the password at all")?));
+    assert!(
+        (&mut dropped).now_or_never().is_none(),
+        "a wrong guess was answered before its check"
+    );
+    drop(dropped);
     let refused = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
-    // Once the dropped guess's cooldown is over, the slot frees and a guess is
-    // checked again.
-    let right = loop {
-        let answer = fixture.send(guess(PASSWORD)?).await?;
-        if answer.status != StatusCode::TOO_MANY_REQUESTS {
-            break answer;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    // Only time marks the end of a dropped guess's check. The paused clock
+    // stands still while a blocking task hashes the password, so the
+    // cooldown ends one second after `start`.
+    tokio::time::sleep_until(start + Duration::from_millis(999)).await;
+    let late = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(late.status, StatusCode::TOO_MANY_REQUESTS);
+    tokio::time::sleep_until(start + Duration::from_millis(1001)).await;
+    let right = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(right.status, StatusCode::OK);
-    assert!(
-        start.elapsed() >= Duration::from_secs(1),
-        "the slot freed before the dropped guess's cooldown ended"
-    );
     Ok(())
 }
 
