@@ -512,6 +512,15 @@ it("names two servers' tools apart, as names without _ keep them", async () => {
   ]);
 });
 
+it("names a tool as Pi does, so a character beyond the Basic Multilingual Plane takes two places of 64", async () => {
+  const server = served(fakeServer({ tool: `${"x".repeat(55)}😀` }), "s");
+  server.use();
+  await until(() => (server.extension().tools ?? []).length > 0);
+  expect(server.extension().tools?.map((tool) => tool.name)).toEqual([
+    `mcp__s__${"x".repeat(47)}_37b7006c`,
+  ]);
+});
+
 it("keeps a due schedule while a server the resources select is gone, until they load", async () => {
   const clock = fakeClock("2026-10-24T08:00:00Z");
   const mcp = served(fakeServer());
