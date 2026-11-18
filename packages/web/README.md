@@ -17,7 +17,7 @@ A test of one module is beside that module, so the lint that says where the page
 
 ## The browser checks
 
-- Each check runs in Chromium and in WebKit, which every browser on iOS uses. A failed check names its engine, as `[webkit]`. WebKit runs only on the systems Playwright supports, so elsewhere `mise run test:browser -- --project=chromium` runs Chromium alone.
+- Each check runs in Chromium and in WebKit, which every browser on iOS uses. A failed check names its engine, as `[webkit]`. WebKit runs only on the systems Playwright supports. Elsewhere, `mise run build:web`, then `pnpm --dir packages/web exec playwright install --only-shell chromium` and `pnpm --dir packages/web run test:browser --project=chromium`, run Chromium alone without installing WebKit.
 - `browser/fixtures.ts` starts one fake provider for each Playwright worker, on a port of its own, serving `dist/`. The page and the API then share an origin, as with the real provider.
 - A check begins with `fake.play(scenario)`, which starts that scenario over on the manual clock. It then acts as a person does: it types the password, clicks, types a message.
 - `fake.step(label)` plays the scenario's next step and fails if that step is not the one named. A check never waits for time to pass. It steps the fake and waits for what the page shows.
