@@ -3,22 +3,76 @@
 //! all of it, so every part of a snapshot is of the same moment. Nothing
 //! here writes.
 
+use std::io;
+
 use anyhow::bail;
 use carillon_protocol::{
     conversations::TurnSource,
     model::{TurnActivity, TurnState},
     observation::{
-        Conversation, ConversationKey, Ending, ObservedTurn, OpenView, Opened, Progress, Snapshot,
-        View,
+        Conversation, ConversationKey, Ending, Limit, ObservedTurn, OpenView, Opened, Progress,
+        SNAPSHOT_LIMIT, Snapshot, View,
     },
     turns::Silence,
 };
 use rusqlite::{Connection, Row};
+use serde::Serialize;
 
 use super::{
     CapturedFile, Database, OptionalExtension, RUNTIME_EVENT_PREFIX, Result, answer_files,
     captured_files, optional_json_column, optional_state_column, params, state_column,
 };
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "this view's snapshot takes at least {0} bytes, over the {SNAPSHOT_LIMIT} a snapshot may take: ask for fewer turns"
+)]
+pub(crate) struct TooLarge(pub(crate) usize);
+
+/// A snapshot's JSON, written part after part into `W`, which
+/// [`io::Sink`] only counts. A write that takes it over [`SNAPSHOT_LIMIT`]
+/// fails.
+pub(crate) struct Bounded<W> {
+    written: usize,
+    into: W,
+}
+
+impl<W: io::Write> Bounded<W> {
+    pub(crate) const fn new(into: W) -> Self {
+        Self { written: 0, into }
+    }
+
+    /// Writes `part` after what was written before, or refuses it with
+    /// [`TooLarge`] once the whole is over the limit.
+    pub(crate) fn add(&mut self, part: &impl Serialize) -> Result<()> {
+        serde_json::to_writer(&mut *self, part).map_err(|error| {
+            if error.is_io() {
+                TooLarge(self.written).into()
+            } else {
+                error.into()
+            }
+        })
+    }
+
+    pub(crate) fn into_inner(self) -> W {
+        self.into
+    }
+}
+
+impl<W: io::Write> io::Write for Bounded<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.written += bytes.len();
+        if self.written > SNAPSHOT_LIMIT {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        self.into.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.into.flush()
+    }
+}
 
 /// A running turn and the runtime that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,24 +127,19 @@ impl Database {
     }
 
     /// Everything `view` shows the interface. A running turn is listed
-    /// without activity: that is its runtime's to say.
+    /// without activity: that is its runtime's to say. Each part is counted
+    /// as the snapshot writes it, so the read stops at the part that takes
+    /// the snapshot over [`SNAPSHOT_LIMIT`].
     pub(crate) fn observed(&self, interface_id: &str, view: &View) -> Result<Snapshot> {
         let mut connection = self.read()?;
         let transaction = connection.transaction()?;
-        let limit = view.conversations.get();
-        let mut conversations = transaction
-            .prepare(&format!(
-                "SELECT {CONVERSATION_COLUMNS} FROM conversations c
-                 WHERE interface_id = ?1 ORDER BY activity DESC LIMIT ?2"
-            ))?
-            .query_map(params![interface_id, u32::from(limit) + 1], conversation)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let more = conversations.len() > usize::from(limit);
-        conversations.truncate(limit.into());
+        let mut written = Bounded::new(io::sink());
+        let (conversations, more) =
+            listed(&transaction, interface_id, view.conversations, &mut written)?;
         let open = view
             .open
             .as_ref()
-            .map(|open| opened(&transaction, interface_id, open))
+            .map(|open| opened(&transaction, interface_id, open, &mut written))
             .transpose()?;
         Ok(Snapshot {
             conversations,
@@ -98,6 +147,32 @@ impl Database {
             open,
         })
     }
+}
+
+/// The interface's latest active conversations, at most `limit`, and
+/// whether it has more, each counted into `written` before the next is read.
+fn listed(
+    connection: &Connection,
+    interface_id: &str,
+    limit: Limit,
+    written: &mut Bounded<io::Sink>,
+) -> Result<(Vec<Conversation>, bool)> {
+    let limit = limit.get();
+    let mut statement = connection.prepare(&format!(
+        "SELECT {CONVERSATION_COLUMNS} FROM conversations c
+         WHERE interface_id = ?1 ORDER BY activity DESC LIMIT ?2"
+    ))?;
+    let mut rows = statement.query(params![interface_id, u32::from(limit) + 1])?;
+    let mut conversations = Vec::new();
+    while let Some(row) = rows.next()? {
+        if conversations.len() == usize::from(limit) {
+            return Ok((conversations, true));
+        }
+        let shown = conversation(row)?;
+        written.add(&shown)?;
+        conversations.push(shown);
+    }
+    Ok((conversations, false))
 }
 
 fn conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
@@ -180,8 +255,13 @@ fn progress(
 }
 
 /// The interface's conversation `open` names, with the newest turns it
-/// asks for.
-fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Result<Opened> {
+/// asks for, each with its files, counted into `written` as it is read.
+fn opened(
+    connection: &Connection,
+    interface_id: &str,
+    open: &OpenView,
+    written: &mut Bounded<io::Sink>,
+) -> Result<Opened> {
     let key = &open.conversation;
     let Some(conversation) = connection
         .query_row(
@@ -196,6 +276,7 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
     else {
         return Ok(Opened::Unrecorded { key: key.clone() });
     };
+    written.add(&conversation)?;
     let limit = open.turns.get();
     let mut newest = connection.prepare(&format!(
         "SELECT t.id, t.event_id, t.input,
@@ -229,15 +310,12 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
             delivered,
             report,
         )?;
-        turns.push(ObservedTurn {
+        let mut turn = ObservedTurn {
             turn_id,
             source: source(row.get(1)?, row.get(2)?, row.get(3)?),
             accepted_at: row.get(5)?,
             progress,
-        });
-    }
-    turns.reverse();
-    for turn in &mut turns {
+        };
         if let TurnSource::Message { files, .. } = &mut turn.source {
             *files = captured_files(connection, Some(&turn.turn_id))?
                 .iter()
@@ -251,7 +329,10 @@ fn opened(connection: &Connection, interface_id: &str, open: &OpenView) -> Resul
         {
             *files = answer_files(connection, &turn.turn_id)?;
         }
+        written.add(&turn)?;
+        turns.push(turn);
     }
+    turns.reverse();
     Ok(Opened::Recorded {
         conversation,
         turns,
