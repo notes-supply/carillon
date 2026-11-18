@@ -696,7 +696,9 @@ async fn hold_an_upload(address: SocketAddr, token: &str) -> Result<TcpStream> {
     );
     browser.write_all(upload.as_bytes()).await?;
     let mut ready = [0; 25];
-    browser.read_exact(&mut ready).await?;
+    tokio::time::timeout(Duration::from_secs(10), browser.read_exact(&mut ready))
+        .await
+        .context("the provider did not ask for an upload's body within ten seconds")??;
     assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
     Ok(browser)
 }
