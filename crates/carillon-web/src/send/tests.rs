@@ -859,7 +859,7 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
 async fn an_upload_that_pauses_29_seconds_between_pieces_is_taken_whole() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    let file = vec![b'f'; 8192];
+    let file: Vec<u8> = (0..=u8::MAX).cycle().take(8192).collect();
     let body = form(&[Part::Text("slow"), Part::File("slow.bin", None, &file)]);
     let pieces: Vec<_> = body
         .chunks(body.len().div_ceil(3))
@@ -880,15 +880,10 @@ async fn an_upload_that_pauses_29_seconds_between_pieces_is_taken_whole() -> Res
     assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
     assert_eq!(start.elapsed(), Duration::from_secs(3 * 29));
     let core = fixture.core();
-    let [(event, _)] = core.events.as_slice() else {
+    let [(event, staged)] = core.events.as_slice() else {
         anyhow::bail!("expected one event, not {}", core.events.len());
     };
-    let sizes: Vec<_> = event
-        .attachments
-        .iter()
-        .flat_map(|attached| &attached.files)
-        .map(|file| file.size)
-        .collect();
-    assert_eq!(sizes, [8192]);
+    assert_eq!(event.content, "slow");
+    assert_eq!(staged, &[file]);
     Ok(())
 }
