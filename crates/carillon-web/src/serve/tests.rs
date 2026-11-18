@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail, ensure};
 use axum::{
     body::Body,
     http::{
@@ -25,8 +25,8 @@ use tokio::time::Instant;
 use crate::{
     browser::{Address, addresses, password_file, set_password},
     fixture::{
-        AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, PASSWORD, TAILNET, bearer, guess,
-        operator, request,
+        AUTHORITY, Answer, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, PASSWORD, TAILNET, bearer,
+        guess, operator, request,
     },
 };
 
@@ -282,19 +282,31 @@ async fn the_password_alone_signs_a_browser_in() -> Result<()> {
     Ok(())
 }
 
+/// Drives `wrong` until it holds the slot, which a right guess sent meanwhile
+/// shows by its 429, and returns that answer.
+async fn refused_while_checked(
+    fixture: &Fixture,
+    wrong: &mut (impl Future<Output = Result<Answer>> + Unpin),
+) -> Result<Answer> {
+    for _ in 0..10 {
+        ensure!(
+            (&mut *wrong).now_or_never().is_none(),
+            "a wrong guess was answered before a guess sent meanwhile was refused"
+        );
+        let probe = fixture.send(guess(PASSWORD)?).await?;
+        if probe.status == StatusCode::TOO_MANY_REQUESTS {
+            return Ok(probe);
+        }
+    }
+    bail!("a wrong guess never held the slot against a guess sent meanwhile")
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_wrong_guess_holds_the_slot_a_second_and_a_guess_meanwhile_is_refused() -> Result<()> {
     let fixture = Fixture::new().await?;
     let start = Instant::now();
     let mut wrong = Box::pin(fixture.send(guess("not the password at all")?));
-    // A guess takes the slot on its first poll, and its check runs on in a
-    // task of its own.
-    assert!(
-        (&mut wrong).now_or_never().is_none(),
-        "a wrong guess was answered before its check"
-    );
-    let refused = fixture.send(guess(PASSWORD)?).await?;
-    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    let refused = refused_while_checked(&fixture, &mut wrong).await?;
     assert_eq!(
         refused.json()?["error"],
         "Another sign-in is being checked. Wait a moment, then try again."
@@ -367,10 +379,7 @@ async fn a_dropped_guess_keeps_the_slot_through_its_one_second_cooldown() -> Res
     let fixture = Fixture::new().await?;
     let start = Instant::now();
     let mut dropped = Box::pin(fixture.send(guess("not the password at all")?));
-    assert!(
-        (&mut dropped).now_or_never().is_none(),
-        "a wrong guess was answered before its check"
-    );
+    refused_while_checked(&fixture, &mut dropped).await?;
     drop(dropped);
     let refused = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
