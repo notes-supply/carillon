@@ -190,13 +190,22 @@ async fn an_upload_that_sends_nothing_for_30_seconds_of_a_paused_clock_loses_its
     let mut browser = hold_an_upload(address, &token).await?;
 
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(30)).await;
-    // The paused clock runs on while the read waits, so a wait as long as a
-    // second timeout would let that pass too.
+    let start = Instant::now();
+    tokio::time::advance(Duration::from_secs(29)).await;
+    // Only a wait shows that nothing comes, and the paused clock runs on
+    // while the read waits.
+    let early = tokio::time::timeout(Duration::from_millis(500), browser.read(&mut [0; 1])).await;
+    ensure!(
+        early.is_err(),
+        "an upload was answered 29 seconds into a pause"
+    );
+    browser.write_all(b"--b\r\n").await?;
     let mut answer = Vec::new();
-    tokio::time::timeout(Duration::from_millis(500), browser.read_to_end(&mut answer))
+    tokio::time::timeout(Duration::from_secs(60), browser.read_to_end(&mut answer))
         .await
         .context("an upload that sent nothing for 30 seconds kept its connection")??;
+    // The piece came 29.5 seconds in, and a timer is a millisecond coarse.
+    assert_eq!(start.elapsed().as_secs(), 59, "{:?}", start.elapsed());
     let answer = String::from_utf8_lossy(&answer);
     assert!(
         answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
