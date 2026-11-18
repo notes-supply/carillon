@@ -50,18 +50,14 @@ export function detectImage(header: Uint8Array): DetectedImage | undefined {
 
 /** Up to `length` bytes from the start of the file; undefined when it cannot be opened. */
 export async function readPrefix(path: string, length: number): Promise<Uint8Array | undefined> {
-  const file = await open(path, "r").catch(() => undefined);
+  await using file = await open(path, "r").catch(() => undefined);
   if (file === undefined) return undefined;
-  try {
-    const buffer = new Uint8Array(length);
-    let filled = 0;
-    while (filled < length) {
-      const { bytesRead } = await file.read(buffer, filled, length - filled, filled);
-      if (bytesRead === 0) break;
-      filled += bytesRead;
-    }
-    return buffer.subarray(0, filled);
-  } finally {
-    await file.close();
+  const buffer = new Uint8Array(length);
+  let filled = 0;
+  while (filled < length) {
+    const { bytesRead } = await file.read(buffer, filled, length - filled, filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
   }
+  return buffer.subarray(0, filled);
 }

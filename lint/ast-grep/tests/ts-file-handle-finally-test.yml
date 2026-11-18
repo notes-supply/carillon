@@ -1,0 +1,35 @@
+id: ts-file-handle-finally
+valid:
+  - |
+    async function read(path) {
+      await using file = await open(path, "r");
+      return await file.readFile("utf8");
+    }
+  - |
+    async function serve(runtime) {
+      try {
+        await runtime.serve();
+      } finally {
+        await runtime.close();
+      }
+    }
+invalid:
+  - |
+    async function read(path) {
+      const file = await open(path, "r");
+      try {
+        return await file.readFile("utf8");
+      } finally {
+        await file.close();
+      }
+    }
+  - |
+    async function read(path) {
+      const file = await open(path, "r").catch(() => undefined);
+      if (file === undefined) return undefined;
+      try {
+        return await file.stat();
+      } finally {
+        await file.close();
+      }
+    }

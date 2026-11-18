@@ -35,12 +35,8 @@ export async function publish(path: string, text: string, mode = 0o600): Promise
     throw failure;
   }
   try {
-    const directory = await open(dirname(path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await using directory = await open(dirname(path), "r");
+    await directory.sync();
   } catch (failure) {
     const reason = failure instanceof Error ? failure.message : String(failure);
     throw new Unsynced(`${path}: changed, but not confirmed durable: ${reason}`);

@@ -1,0 +1,18 @@
+id: ts-file-handle-finally
+language: typescript
+severity: error
+message: Declare the file handle with `await using`, which closes it however the block ends.
+note: "`await using file = await open(path)` replaces the try and its finally. An open that may fail can map the failure to undefined with .catch(), which `await using` skips."
+rule:
+  kind: try_statement
+  has:
+    field: finalizer
+    has:
+      stopBy: end
+      pattern: await $FILE.close()
+  follows:
+    stopBy: end
+    any:
+      - pattern: const $FILE = await open($$$)
+      - pattern: const $FILE = await open($$$).catch($$$)
+      - pattern: let $FILE = await open($$$)

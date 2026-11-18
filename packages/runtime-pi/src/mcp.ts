@@ -7,7 +7,7 @@
  * so it lives in the runtime's state directory, readable only by its owner,
  * never in an agent's resources.
  */
-import { open, type FileHandle } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import {
   defineExtension,
   defineTool,
@@ -68,27 +68,20 @@ export type McpServerConfig = Static<typeof StdioSchema> | Static<typeof HttpSch
 
 /** The servers `mcp.json` configures, by name; none without the file. */
 export async function loadMcpConfig(path: string): Promise<Map<string, McpServerConfig>> {
-  let handle: FileHandle;
-  try {
-    handle = await open(path, "r");
-  } catch (failure) {
+  await using handle = await open(path, "r").catch((failure: unknown) => {
     if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
-      return new Map();
+      return undefined;
     throw failure;
-  }
-  let text: string;
-  try {
-    // As ssh does with a private key: others may neither read its
-    // credentials nor change the programs it runs.
-    const mode = (await handle.stat()).mode & 0o777;
-    if ((mode & 0o077) !== 0)
-      throw new Error(
-        `${path} is open to other users (mode ${mode.toString(8).padStart(4, "0")}); it holds credentials, so make it readable only by you: chmod 600 ${path}`,
-      );
-    text = await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
+  });
+  if (handle === undefined) return new Map();
+  // As ssh does with a private key: others may neither read its
+  // credentials nor change the programs it runs.
+  const mode = (await handle.stat()).mode & 0o777;
+  if ((mode & 0o077) !== 0)
+    throw new Error(
+      `${path} is open to other users (mode ${mode.toString(8).padStart(4, "0")}); it holds credentials, so make it readable only by you: chmod 600 ${path}`,
+    );
+  const text = await handle.readFile("utf8");
   let file: unknown;
   try {
     file = JSON.parse(text);

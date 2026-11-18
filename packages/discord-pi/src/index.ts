@@ -120,25 +120,21 @@ async function readAttachments(paths: unknown[]): Promise<{ filename: string; da
   const attachments = [];
   for (const path of paths) {
     if (typeof path !== "string") throw new Error("Attachment paths must be strings.");
-    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    try {
-      if (!(await file.stat()).isFile()) throw new Error("Attachments must be regular files.");
-      const buffer = Buffer.alloc(remaining + 1);
-      let size = 0;
-      while (size < buffer.length) {
-        const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
-        if (bytesRead === 0) break;
-        size += bytesRead;
-      }
-      if (size > remaining) throw new Error("Attachments exceed the 4 MiB per-message limit.");
-      remaining -= size;
-      attachments.push({
-        filename: basename(path),
-        data: buffer.subarray(0, size).toString("base64"),
-      });
-    } finally {
-      await file.close();
+    await using file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!(await file.stat()).isFile()) throw new Error("Attachments must be regular files.");
+    const buffer = Buffer.alloc(remaining + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
     }
+    if (size > remaining) throw new Error("Attachments exceed the 4 MiB per-message limit.");
+    remaining -= size;
+    attachments.push({
+      filename: basename(path),
+      data: buffer.subarray(0, size).toString("base64"),
+    });
   }
   return attachments;
 }
