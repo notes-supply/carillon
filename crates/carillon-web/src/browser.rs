@@ -126,7 +126,7 @@ pub(crate) fn password_file(data_dir: &Path, provider_id: &str) -> PathBuf {
 }
 
 /// The longest password the web chat takes, in bytes. A sign-in's body is
-/// read only as far as this password's JSON could reach.
+/// accepted only as far as this password's JSON could reach.
 pub(crate) const MAX_PASSWORD: usize = 4096;
 
 /// Makes `password` the web chat's, which voids every token and file link
