@@ -1,0 +1,15 @@
+id: rust-manual-trim
+language: rust
+severity: error
+message: Falling back to the untrimmed string by hand is what str::trim_prefix and trim_suffix do.
+note: Write text.trim_prefix(prefix) or text.trim_suffix(suffix).
+rule:
+  any:
+    - pattern: $TEXT.strip_prefix($AFFIX).unwrap_or($TEXT)
+    - pattern: $TEXT.strip_prefix($AFFIX).unwrap_or(&$TEXT)
+    - pattern: $TEXT.strip_suffix($AFFIX).unwrap_or($TEXT)
+    - pattern: $TEXT.strip_suffix($AFFIX).unwrap_or(&$TEXT)
+    # A macro's arguments are tokens, not expressions, so the patterns above
+    # never reach inside format! or bail!.
+    - pattern: $MACRO!($FORMAT, $TEXT.strip_prefix($AFFIX).unwrap_or($TEXT))
+    - pattern: $MACRO!($FORMAT, $TEXT.strip_suffix($AFFIX).unwrap_or($TEXT))

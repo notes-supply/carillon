@@ -912,7 +912,7 @@ fn output(mut command: Command, secret: &str) -> Result<String> {
     }
     let error = String::from_utf8_lossy(&output.stderr);
     let error = error.trim();
-    bail!("{}", error.strip_prefix("error: ").unwrap_or(error))
+    bail!("{}", error.trim_prefix("error: "))
 }
 
 #[cfg(test)]

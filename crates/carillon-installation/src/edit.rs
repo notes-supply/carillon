@@ -214,7 +214,7 @@ fn prepend(table: &mut toml_edit::Table, section: &str) {
             .prefix()
             .and_then(RawString::as_str)
             .unwrap_or("\n");
-        let prefix = format!("{section}{}", own.strip_prefix('\n').unwrap_or(own));
+        let prefix = format!("{section}{}", own.trim_prefix('\n'));
         table.decor_mut().set_prefix(prefix);
     }
 }

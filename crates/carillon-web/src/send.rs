@@ -79,9 +79,7 @@ async fn read_text(part: &mut Field<'_>) -> Result<Option<String>, InterfaceErro
         text.extend_from_slice(&chunk);
     }
     let text = String::from_utf8_lossy(&text);
-    Ok(Some(
-        text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
-    ))
+    Ok(Some(text.trim_prefix('\u{feff}').to_owned()))
 }
 
 /// Stages a `file` part at `path`, or `None` for one of more than
