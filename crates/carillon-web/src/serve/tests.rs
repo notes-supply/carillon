@@ -346,9 +346,10 @@ async fn the_longest_password_signs_in_with_every_byte_escaped_and_a_longer_gues
     let signed_in = fixture.send(signing_in(Body::from(body))?).await?;
     assert_eq!(signed_in.status, StatusCode::OK, "{}", signed_in.text());
     let hash = std::fs::read_to_string(&file)?;
-    let refused = set_password(&file, &"\u{1}".repeat(4097))
+    // Two bytes a character, so a bound on characters would take it.
+    let refused = set_password(&file, &"é".repeat(2049))
         .err()
-        .context("a password of 4097 bytes was set")?;
+        .context("a password of 4098 bytes was set")?;
     assert!(refused.to_string().contains("4096 bytes"), "{refused}");
     assert_eq!(std::fs::read_to_string(&file)?, hash);
     Ok(())
