@@ -748,6 +748,38 @@ async fn a_first_part_s_headers_may_end_64_kib_into_the_body_and_not_a_byte_late
 }
 
 #[tokio::test]
+async fn a_body_that_ends_with_the_window_partway_through_a_part_s_headers_did_not_arrive_whole()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let mut window =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\nX-Pad: ")
+            .into_bytes();
+    window.resize(64 * 1024, b'p');
+    // The window fills the first frame, so a byte past it comes in a second.
+    for (frames, status) in [
+        (vec![window.clone()], StatusCode::BAD_REQUEST),
+        (
+            vec![window.clone(), b"p".to_vec()],
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+    ] {
+        let sent = frames.len();
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(stream::iter(
+                frames.into_iter().map(Ok::<_, std::io::Error>),
+            )))?;
+        let answer = fixture.send(request).await?;
+        assert_eq!(answer.status, status, "{sent} frames: {}", answer.text());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
