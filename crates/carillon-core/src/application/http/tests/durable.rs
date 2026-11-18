@@ -411,6 +411,39 @@ async fn the_largest_message_core_accepts_reaches_its_runtime() -> Result<()> {
 }
 
 #[tokio::test]
+async fn an_event_over_its_limit_as_core_writes_it_is_refused_before_any_runtime_sees_it()
+-> Result<()> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    // Core writes each `1e3` it is sent as `1000.0`.
+    let numbers = vec!["1e3"; 400_000].join(",");
+    let body = serde_json::to_string(&event("numbers", "conversation"))?.replace(
+        r#""native":null"#,
+        &format!(r#""native":{{"numbers":[{numbers}]}}"#),
+    );
+    assert!(body.len() <= EVENT_BODY_LIMIT);
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::AUTHORIZATION, "Bearer test-only")
+                .header(PROVIDER_HEADER, "test-interface")
+                .body(Body::from(body))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert!(runtime.handed().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_over() -> Result<()>
 {
     let directory = tempdir()?;
