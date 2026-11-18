@@ -19,6 +19,7 @@ import {
   TurnActivitySchema,
   TurnOpeningSchema,
   TurnOutcomeSchema,
+  TURN_REQUEST_LIMIT,
 } from "./index.ts";
 
 it("preserves the shared Rust/TypeScript settings wire fixtures", () => {
@@ -67,6 +68,7 @@ it("preserves the shared Rust/TypeScript activity wire fixtures", () => {
 });
 
 it("preserves the shared Rust/TypeScript runtime turn fixtures", () => {
+  expect(TURN_REQUEST_LIMIT).toBe(turns.request_limit);
   for (const value of turns.requests) expect(Parse(RuntimeTurnRequestSchema, value)).toEqual(value);
   for (const value of turns.invalid_requests)
     expect(Check(RuntimeTurnRequestSchema, value)).toBe(false);

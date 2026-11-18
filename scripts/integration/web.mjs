@@ -437,6 +437,26 @@ async function testOpenedTurn(token, chat) {
   );
 }
 
+/** A pasted log over 1 MiB is answered, and so is the next message its runtime is handed. */
+async function testLargeMessage(token) {
+  const [pasted, next, end] = [randomUUID(), randomUUID(), randomUUID()];
+  let log = "";
+  for (let line = 0; log.length < 1_100_000; line += 1)
+    log += `2026-11-18T09:10:00Z INFO worker ${String(line)} finished a request\n`;
+  log += `end of log ${end}\n`;
+  for (const [chat, text] of [
+    [pasted, log],
+    [next, "after the log"],
+  ]) {
+    const sent = await send(token, chat, `m-${randomUUID()}`, text);
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  }
+  assert.equal((await settled(token, next))[0].progress.ending.kind, "answered");
+  const [answered] = await settled(token, pasted);
+  assert.equal(answered.progress.ending.kind, "answered");
+  assert.ok(answered.progress.ending.html.includes(end), "the pasted log arrived whole");
+}
+
 try {
   await install();
   services("start", "runtime", "core", "web");
@@ -454,6 +474,7 @@ try {
   const { chat, link } = await testFiles(token);
   await testControls(token);
   await testOpenedTurn(token, chat);
+  await testLargeMessage(token);
 
   for (const listing of [carillon("settings"), carillon("settings", "--interface", "web")])
     assert.match(listing, /^web\n {2}no channels with settings of their own$/mu);
@@ -510,9 +531,9 @@ try {
   services("start", "web");
   await healthy("web");
   assert.equal((await api(later, stream)).status, 401);
-  assert.equal((await snapshot(await signIn(), { conversations: "50" })).conversations.length, 2);
+  assert.equal((await snapshot(await signIn(), { conversations: "50" })).conversations.length, 4);
   process.stdout.write(
-    "web passed: password sign-in, an address the owner named, a snapshot stream of each view, files both ways, a duplicate and an unknown agent, controls, an opened turn, provider restart, drained restart, streams and a send across a core stop, a new password with a stream open and with the provider stopped\n",
+    "web passed: password sign-in, an address the owner named, a snapshot stream of each view, files both ways, a duplicate and an unknown agent, controls, an opened turn, a pasted log over 1 MiB, provider restart, drained restart, streams and a send across a core stop, a new password with a stream open and with the provider stopped\n",
   );
 } catch (error) {
   for (const log of ["core", "runtime-pi", "web"])

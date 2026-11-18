@@ -136,8 +136,20 @@ takes a turn it already holds as the same one. So does an answer that shows
 an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 2xx), which core logs as an error. The dispatcher backs off from 1 to 60
 seconds meanwhile. Any other answer interrupts the turn; nothing ran, so its
-notice is the runtime's explanation alone. The runtime later settles the turn with
-its own credential: answered, failed with an explanation it judged safe to
+notice is the runtime's explanation alone. Core accepts an event of up to
+2 MiB of JSON, as it was sent and as core writes it again, which can be
+longer: core writes `1e3` as `1000.0`. Each identifier an event carries,
+its own and its agent's, user's, audience's, channel's and two targets',
+is 1 to 512 bytes. Core refuses a larger event or identifier with 413
+before it copies any file. A runtime reads a turn of up to 2 MiB and 64 KiB
+(`TURN_REQUEST_LIMIT`), which holds any event core accepts and what core
+adds to it: the channel recorded with the conversation's first message, the
+turn's directories, and each file's path and digest, unless an earlier core
+recorded a channel longer than 512 bytes. It refuses a larger turn with 413.
+Core then interrupts that turn, which the runtime never held,
+so the turns behind it are still handed over. The runtime later settles each
+turn it took with its own credential: answered, failed with an explanation it
+judged safe to
 show, steered into an answer that another message carries, on Pi the newest
 of those that joined it, or stopped. Steered and
 stopped deliver a silence the interface shows on the message instead of a

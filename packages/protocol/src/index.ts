@@ -226,6 +226,14 @@ export const TurnAttachmentSchema = Type.Object({
 });
 export type TurnAttachment = Static<typeof TurnAttachmentSchema>;
 
+/**
+ * The most bytes a runtime reads of a turn core hands it, as JSON: any event
+ * core accepts (2 MiB), with room for what core adds to it, such as the
+ * conversation's channel of at most 512 bytes, unless an earlier core recorded
+ * a longer one. A runtime refuses a larger turn with 413.
+ */
+export const TURN_REQUEST_LIMIT = 2 * 1024 * 1024 + 64 * 1024;
+
 /** A turn core hands a runtime to hold and run. */
 export const RuntimeTurnRequestSchema = Type.Object({
   correlation_id: Type.String(),

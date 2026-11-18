@@ -148,6 +148,7 @@ impl From<CoreError> for ApiError {
             CoreError::InsufficientStorage(message) => {
                 Self::new(StatusCode::INSUFFICIENT_STORAGE, message)
             }
+            CoreError::TooLarge(message) => Self::new(StatusCode::PAYLOAD_TOO_LARGE, message),
             CoreError::Storage(error) => error.into(),
         }
     }

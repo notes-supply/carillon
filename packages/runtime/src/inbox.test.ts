@@ -1,5 +1,6 @@
-import type { ControlAction } from "@carillon/protocol";
+import { TURN_REQUEST_LIMIT, type ControlAction } from "@carillon/protocol";
 import { once } from "node:events";
+import { request } from "node:http";
 import { expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
@@ -42,7 +43,7 @@ async function serve(turns: InboxTurns) {
   const close = async () => {
     await new Promise((done) => server.close(done));
   };
-  return { call, close };
+  return { call, close, url: `http://127.0.0.1:${String(address.port)}` };
 }
 
 const turn = (input: string): TurnRequest => ({
@@ -97,6 +98,53 @@ it("answers 202 once a turn is kept, and passes a refusal through", async () => 
       body: { error: "invalid runtime turn request" },
     });
     expect((await call("/v1/inbox", turn("hello"), "wrong")).status).toBe(403);
+  } finally {
+    await close();
+  }
+});
+
+it("takes a turn as large as core hands over and refuses a larger one with 413", async () => {
+  let kept = 0;
+  const { call, close } = await serve({
+    submit: () => {
+      kept += 1;
+      return Promise.resolve();
+    },
+    control: () => Promise.resolve(),
+  });
+  const sized = (bytes: number) =>
+    turn("x".repeat(bytes - Buffer.byteLength(JSON.stringify(turn("")))));
+  try {
+    expect(await call("/v1/inbox", sized(TURN_REQUEST_LIMIT))).toEqual({ status: 202, body: {} });
+    expect(await call("/v1/inbox", sized(TURN_REQUEST_LIMIT + 1))).toEqual({
+      status: 413,
+      body: {
+        error: "That message is too large for this agent's runtime, which takes about 2 MiB.",
+      },
+    });
+    expect(kept).toBe(1);
+  } finally {
+    await close();
+  }
+});
+
+it("answers a control or settings request past 1 MiB before the rest of it arrives", async () => {
+  const { url, close } = await serve({
+    submit: () => Promise.resolve(),
+    control: () => Promise.resolve(),
+  });
+  try {
+    for (const path of ["/v1/turns/turn-1/control", "/v1/settings"]) {
+      const sent = request(`${url}${path}`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-only", "content-type": "application/json" },
+      });
+      sent.on("error", () => undefined);
+      sent.write(Buffer.alloc(1_048_577, " "));
+      const answered: unknown[] = await once(sent, "response");
+      expect(answered[0]).toMatchObject({ statusCode: 400 });
+      sent.destroy();
+    }
   } finally {
     await close();
   }

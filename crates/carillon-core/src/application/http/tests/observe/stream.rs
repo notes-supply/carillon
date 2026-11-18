@@ -15,7 +15,7 @@ use axum::{
     http::Request,
 };
 use carillon_protocol::{
-    model::JOB_READ_LIMIT,
+    model::{IDENTIFIER_LIMIT, JOB_READ_LIMIT},
     observation::{Ending, Opened, Progress, Snapshot},
 };
 use futures_util::StreamExt as _;
@@ -318,7 +318,7 @@ async fn a_conversation_is_shown_however_long_the_audience_admission_accepted() 
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     let state = configured(&fixture);
-    let long = "a".repeat(4096);
+    let long = "a".repeat(IDENTIFIER_LIMIT);
     accept(&fixture, "in the long one", &long).await?;
     accept(&fixture, "in another", "conversation").await?;
 
@@ -582,16 +582,24 @@ async fn a_snapshot_of_16_mib_is_sent_and_one_a_byte_over_is_refused_and_ends_it
     for audience in ["exact", "above"] {
         said(audience, 1, "x".to_owned()).await?;
     }
-    // A reader of the conversation with `audience`, once a second turn has
+    // A reader of the conversation with `audience`, once more turns have
     // brought its snapshot to `over` bytes more than the limit.
     let grown = async |audience: &str, over: usize| -> Result<Reader> {
         let mut reader = open(&state, &of(audience)).await?;
-        let short = reader.snapshot().await?;
-        // A second turn takes what the first takes but for its text, the
-        // comma between them in place of the first's one byte of it.
-        let turn = serde_json::to_string(&recorded(&short)?.1[0])?.len();
-        let text = "x".repeat(limit + over - size(&short)? - turn);
-        said(audience, 2, text).await?;
+        reader.snapshot().await?;
+        // An event takes at most 2 MiB, so turns of 1 MiB bring the
+        // snapshot near the limit, and one more makes up the rest.
+        let megabyte = 1 << 20;
+        for turn in 2..=16 {
+            said(audience, turn, "x".repeat(megabyte)).await?;
+        }
+        let near = open(&state, &of(audience)).await?.snapshot().await?;
+        // The last turn takes what the one before it takes but for its
+        // text, and a comma.
+        let before = recorded(&near)?.1.last().context("no turn")?;
+        let rest = serde_json::to_string(before)?.len() - megabyte + 1;
+        let text = "x".repeat(limit + over - size(&near)? - rest);
+        said(audience, 17, text).await?;
         Ok(reader)
     };
 

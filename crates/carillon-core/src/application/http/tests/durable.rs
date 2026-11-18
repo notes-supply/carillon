@@ -5,19 +5,50 @@
 use std::{collections::VecDeque, fs, path::Path, sync::Mutex};
 
 use anyhow::Context as _;
+use axum::{body::Body, http::Request};
 use carillon_protocol::turns::{Silence, TurnOpening};
 use tempfile::tempdir;
+use tower::ServiceExt as _;
 
 use super::{
     Fixture, configured, installation,
     live::{event, lock, ok, operator, submit, submit_event},
 };
 use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
-use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest};
+use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest, StagedAttachments, StagedFile};
 
-/// A durable runtime that keeps every turn core hands it, answering each
-/// hand-over with the next scripted answer (202 once they run out), and
-/// each control with `control`.
+/// The most bytes a runtime reads of a turn, as the wire fixtures both
+/// languages share hold it.
+fn request_limit() -> Result<usize> {
+    #[derive(serde::Deserialize)]
+    struct Turns {
+        request_limit: usize,
+    }
+    let turns: Turns = serde_json::from_str(include_str!(
+        "../../../../../../packages/protocol/fixtures/turns.json"
+    ))?;
+    Ok(turns.request_limit)
+}
+
+/// Posts `body` to core's event route as the test interface, through the
+/// route's own limit on what it reads.
+async fn post_event(state: &AppState, body: String) -> Result<Response> {
+    Ok(router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::AUTHORIZATION, "Bearer test-only")
+                .header(PROVIDER_HEADER, "test-interface")
+                .body(Body::from(body))?,
+        )
+        .await?)
+}
+
+/// A durable runtime that keeps every turn core hands it, reading at most a
+/// limit of one, answering each hand-over with the next scripted answer
+/// (202 once they run out), and each control with `control`.
 #[derive(Clone)]
 pub(super) struct DurableRuntime {
     pub(super) url: String,
@@ -28,7 +59,12 @@ pub(super) struct DurableRuntime {
 }
 
 impl DurableRuntime {
+    /// One that reads as much of a turn as runtimes do.
     pub(super) async fn start() -> Result<Self> {
+        Self::reading(request_limit()?).await
+    }
+
+    async fn reading(limit: usize) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let runtime = Self {
             url: format!("http://{}", listener.local_addr()?),
@@ -49,7 +85,8 @@ impl DurableRuntime {
                         .pop_front()
                         .unwrap_or_else(|| (StatusCode::ACCEPTED, json!({})));
                     async move { (answer.0, Json(answer.1)) }
-                }),
+                })
+                .layer(DefaultBodyLimit::max(limit)),
             )
             .route(
                 "/v1/turns/{id}/control",
@@ -353,6 +390,138 @@ async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Resu
             .collect::<Vec<_>>(),
         ["The agent's runtime refused that message without saying why."]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_event_with_an_identifier_over_512_bytes_is_refused_before_any_runtime_sees_it()
+-> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let identifiers: [fn(&mut ExternalEvent) -> &mut String; 7] = [
+        |event| &mut event.event_id,
+        |event| &mut event.agent_id,
+        |event| &mut event.user_id,
+        |event| &mut event.audience_id,
+        |event| &mut event.channel_id,
+        |event| &mut event.delivery_target_id,
+        |event| &mut event.feedback_target_id,
+    ];
+    for identifier in identifiers {
+        let mut long = event("long", "conversation");
+        *identifier(&mut long) = "i".repeat(513);
+        let refused = submit_event(&state, long)
+            .await
+            .err()
+            .context("an identifier over 512 bytes was accepted")?;
+        assert_eq!(
+            refused.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            refused.message
+        );
+    }
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert!(runtime.handed().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_largest_message_core_accepts_reaches_its_runtime_in_the_longest_channel_it_records()
+-> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (mut fixture, _) = durable(directory.path(), &runtime)?;
+    fixture.config.value.core.attachments.max_files = 100;
+    fixture.core = Core::open(core_options(&fixture.config))?;
+    let state = configured(&fixture);
+    // A conversation keeps its first message's channel, here as long as JSON
+    // makes 512 bytes: a control character takes six.
+    let mut first = event("first", "conversation");
+    first.channel_id = "\u{1}".repeat(512);
+    ok(submit_event(&state, first.clone()).await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    // Core adds each file's captured path and digest to the turn.
+    let batch = fixture
+        .config
+        .value
+        .data_dir
+        .join("components/test-interface/incoming/batch");
+    fs::create_dir_all(&batch)?;
+    let mut files = Vec::new();
+    for ordinal in 0..100 {
+        fs::write(batch.join(ordinal.to_string()), "x")?;
+        files.push(StagedFile {
+            name: ordinal.to_string(),
+            size: 1,
+            content_type: None,
+        });
+    }
+    let mut largest = event("largest", "conversation");
+    largest.content.clear();
+    largest.attachments = Some(StagedAttachments {
+        batch: "batch".to_owned(),
+        files,
+    });
+    let text = EVENT_BODY_LIMIT - serde_json::to_vec(&largest)?.len();
+    largest.content = "x".repeat(text + 1);
+    let refused = post_event(&state, serde_json::to_string(&largest)?).await?;
+    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    largest.content.pop();
+    let accepted = post_event(&state, serde_json::to_string(&largest)?).await?;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted: EventReceipt =
+        serde_json::from_slice(&axum::body::to_bytes(accepted.into_body(), usize::MAX).await?)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &accepted.turn_id)?, TurnState::Running);
+    let request = runtime.request(1)?;
+    assert_eq!(request.channel_id, first.channel_id);
+    assert_eq!(request.input.len(), text);
+    assert_eq!(request.attachments.len(), 100);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_event_over_its_limit_as_core_writes_it_is_refused_before_any_runtime_sees_it()
+-> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    // Core writes each `1e3` it is sent as `1000.0`.
+    let numbers = vec!["1e3"; 400_000].join(",");
+    let body = serde_json::to_string(&event("numbers", "conversation"))?.replace(
+        r#""native":null"#,
+        &format!(r#""native":{{"numbers":[{numbers}]}}"#),
+    );
+    assert!(body.len() <= EVENT_BODY_LIMIT);
+    let response = post_event(&state, body).await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert!(runtime.handed().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_over() -> Result<()>
+{
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::reading(4096).await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let oversized = ExternalEvent {
+        content: "x".repeat(8192),
+        ..event("oversized", "conversation")
+    };
+    let oversized = ok(submit_event(&state, oversized).await)?;
+    let next = ok(submit(&state, "next", "elsewhere").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(
+        state_of(&state, &oversized.turn_id)?,
+        TurnState::Interrupted
+    );
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &next.turn_id)?, TurnState::Running);
+    assert_eq!(runtime.handed(), ["next"]);
     Ok(())
 }
 
