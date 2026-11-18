@@ -310,12 +310,31 @@ async fn a_wrong_guess_holds_the_slot_a_second_and_a_guess_meanwhile_is_refused(
 }
 
 #[tokio::test]
-async fn a_guess_is_small() -> Result<()> {
+async fn the_longest_password_signs_in_with_every_byte_escaped_and_a_longer_guess_is_not_read()
+-> Result<()> {
     let fixture = Fixture::new().await?;
-    let long = fixture.send(guess(&"x".repeat(5000))?).await?;
-    assert_eq!(long.status, StatusCode::PAYLOAD_TOO_LARGE);
-    let right = fixture.send(guess(PASSWORD)?).await?;
-    assert_eq!(right.status, StatusCode::OK);
+    let file = fixture.password_file();
+    let signing_in = |body: String| {
+        request(Method::POST, "/api/sign-in")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+    };
+    // JSON writes a control character as `\u0001`, six bytes for one.
+    let longest = "\u{1}".repeat(4096);
+    set_password(&file, &longest)?;
+    let body = json!({ "password": longest }).to_string();
+    assert_eq!(body.len(), 24_591);
+
+    let longer = fixture.send(signing_in(format!("{body} "))?).await?;
+    assert_eq!(longer.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let signed_in = fixture.send(signing_in(body)?).await?;
+    assert_eq!(signed_in.status, StatusCode::OK, "{}", signed_in.text());
+    let hash = std::fs::read_to_string(&file)?;
+    let refused = set_password(&file, &"\u{1}".repeat(4097))
+        .err()
+        .context("a password of 4097 bytes was set")?;
+    assert!(refused.to_string().contains("4096 bytes"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&file)?, hash);
     Ok(())
 }
 
