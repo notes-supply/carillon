@@ -15,6 +15,7 @@ use axum::{
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
 use carillon_protocol::model::{ExternalEvent, StagedAttachments, StagedFile};
+use futures_util::TryStreamExt as _;
 use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
@@ -704,14 +705,12 @@ async fn a_part_header_past_the_bound_is_refused_without_holding_it_whole() -> R
 }
 
 #[tokio::test]
-async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()> {
+async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
     let fixture = Fixture::new().await?;
     let token = fixture.sign_in().await?;
-    // An unknown first part refuses the message. The rest then carries far
-    // more than the drain budget, in one large part or in many empty parts
-    // whose headers each stay within the between-parts bound. The provider
-    // stops reading within the budget either way, rather than let a peer make
-    // it read an endless upload.
+    // An unknown first part refuses the message. The rest carries four drains'
+    // worth, in one large part or in many empty parts whose headers each stay
+    // within the between-parts bound.
     let mut large = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"big.bin\"\r\n\r\n"
@@ -732,20 +731,13 @@ async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()>
         body.extend_from_slice(&rest);
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
-        let written = Arc::new(AtomicUsize::new(0));
+        let read = Arc::new(AtomicUsize::new(0));
         let (mut browser, provider) = tokio::io::duplex(64 * 1024);
-        let upload = {
-            let written = Arc::clone(&written);
-            tokio::spawn(async move {
-                let mut at = 0;
-                while at < body.len() {
-                    let end = (at + 64 * 1024).min(body.len());
-                    if browser.write_all(&body[at..end]).await.is_err() {
-                        break;
-                    }
-                    at = end;
-                    written.store(at, Relaxed);
-                }
+        let upload = tokio::spawn(async move { browser.write_all(&body).await });
+        let counted = {
+            let read = Arc::clone(&read);
+            ReaderStream::new(provider).inspect_ok(move |chunk| {
+                read.fetch_add(chunk.len(), Relaxed);
             })
         };
         let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
@@ -753,7 +745,7 @@ async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()>
                 CONTENT_TYPE,
                 format!("multipart/form-data; boundary={BOUNDARY}"),
             )
-            .body(Body::from_stream(ReaderStream::new(provider)))?;
+            .body(Body::from_stream(counted))?;
         let answer = fixture.send(request).await?;
         let _ = upload.await;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{said}");
@@ -762,10 +754,13 @@ async fn a_refused_message_is_drained_no_further_than_its_budget() -> Result<()>
             json!({"error": "A message's parts are `text` and `file`."}),
             "{said}"
         );
+        // Besides the drain, the provider may have read the first part's whole
+        // 64 KiB window before it refused the message, and one 4 KiB read it
+        // has not fed the parser.
         assert!(
-            written.load(Relaxed) < REFUSED_DRAIN * 2,
-            "{said}: the provider read {} bytes of a refused message past its drain budget",
-            written.load(Relaxed)
+            read.load(Relaxed) <= 2 * MIB + 64 * 1024 + 4096,
+            "{said}: the provider read {} bytes of a refused message",
+            read.load(Relaxed)
         );
     }
     assert!(
