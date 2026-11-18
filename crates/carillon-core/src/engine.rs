@@ -14,8 +14,9 @@ use anyhow::{Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ACTIVITY_REPORT_LIMIT, ConversationQuery, Delivery, DeliveryAck, DeliveryReconciliation,
-    EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, NATIVE_CONTEXT,
-    RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
+    EVENT_BODY_LIMIT, EventReceipt, EventStatus, ExternalEvent, JOB_READ_LIMIT, Job,
+    NATIVE_CONTEXT, RuntimeTurnRequest, SelectedProvider, StateCounts, TurnActivity,
+    TurnInspection, TurnSummary,
 };
 use carillon_protocol::observation::ConversationKey;
 pub use dispatch::{InboxFailure, Stalled};
@@ -85,6 +86,9 @@ pub enum CoreError {
     /// The attachment storage budget or free space would be exceeded.
     #[error("{0}")]
     InsufficientStorage(String),
+    /// Larger than core keeps of one event.
+    #[error("{0}")]
+    TooLarge(String),
     #[error(transparent)]
     Storage(#[from] anyhow::Error),
 }
@@ -97,6 +101,7 @@ impl CoreError {
             Self::Conflict(message) => Self::Conflict(message.clone()),
             Self::Unavailable(message) => Self::Unavailable(message.clone()),
             Self::InsufficientStorage(message) => Self::InsufficientStorage(message.clone()),
+            Self::TooLarge(message) => Self::TooLarge(message.clone()),
             Self::Storage(error) => Self::Storage(anyhow!("{error:#}")),
         }
     }
@@ -672,6 +677,17 @@ impl Core {
         }
         if let Some(staged) = &event.attachments {
             crate::intake::admit(&self.options.attachments, staged)?;
+        }
+        // Runtimes read the event as core writes it, which can be longer
+        // than it was sent: core writes `1e3` as `1000.0`.
+        let written = serde_json::to_vec(event)
+            .map_err(anyhow::Error::from)?
+            .len();
+        if written > EVENT_BODY_LIMIT {
+            return Err(CoreError::TooLarge(format!(
+                "this event takes {written} bytes as core writes it, over the \
+                 {EVENT_BODY_LIMIT} an event may take"
+            )));
         }
         Ok(())
     }

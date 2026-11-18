@@ -395,12 +395,19 @@ async fn the_largest_message_core_accepts_reaches_its_runtime() -> Result<()> {
         });
     }
     let mut largest = event("largest", "conversation");
+    largest.content.clear();
     largest.attachments = Some(StagedAttachments {
         batch: "batch".to_owned(),
         files,
     });
     let text = EVENT_BODY_LIMIT - serde_json::to_vec(&largest)?.len();
-    largest.content = "x".repeat(text);
+    largest.content = "x".repeat(text + 1);
+    let refused = submit_event(&state, largest.clone())
+        .await
+        .err()
+        .context("an event a byte over its limit was accepted")?;
+    assert_eq!(refused.status, StatusCode::PAYLOAD_TOO_LARGE);
+    largest.content.pop();
     let accepted = ok(submit_event(&state, largest).await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &accepted.turn_id)?, TurnState::Running);
@@ -448,12 +455,14 @@ async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_
 {
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
-    let (_fixture, state) = durable(directory.path(), &runtime)?;
-    // Core's intake reads no event this large; a turn queued under other
-    // limits is handed over all the same.
-    let mut oversized = event("oversized", "conversation");
-    oversized.content = "x".repeat(request_limit()?);
-    let oversized = ok(submit_event(&state, oversized).await)?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
+    let oversized = ok(submit(&state, "oversized", "conversation").await)?;
+    // Core admits no event this large; one an earlier core kept is handed
+    // over all the same.
+    rusqlite::Connection::open(fixture.config.value.data_dir.join("carillon.sqlite3"))?.execute(
+        "UPDATE turns SET input = ?1 WHERE id = ?2",
+        ("x".repeat(request_limit()?), &oversized.turn_id),
+    )?;
     let next = ok(submit(&state, "next", "elsewhere").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(

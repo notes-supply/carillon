@@ -119,8 +119,9 @@ pub struct Health {
     pub status: String,
 }
 
-/// The most bytes core reads of one submitted event, as the JSON it is
-/// sent as. An interface keeps what a person wrote within it.
+/// The most bytes of one submitted event as JSON: as it is sent, and as
+/// core writes it again, which can be longer. An interface keeps what a
+/// person wrote within it.
 pub const EVENT_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
