@@ -13,9 +13,20 @@ use super::{
     live::{event, lock, ok, operator, submit, submit_event},
 };
 use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
-use carillon_protocol::model::{
-    NATIVE_CONTEXT, RuntimeTurnRequest, StagedAttachments, StagedFile, TURN_REQUEST_LIMIT,
-};
+use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest, StagedAttachments, StagedFile};
+
+/// The most bytes a runtime reads of a turn, as the wire fixtures both
+/// languages share hold it.
+fn request_limit() -> Result<usize> {
+    #[derive(serde::Deserialize)]
+    struct Turns {
+        request_limit: usize,
+    }
+    let turns: Turns = serde_json::from_str(include_str!(
+        "../../../../../../packages/protocol/fixtures/turns.json"
+    ))?;
+    Ok(turns.request_limit)
+}
 
 /// A durable runtime that keeps every turn core hands it, reading as much of
 /// one as runtimes do, answering each hand-over with the next scripted answer
@@ -52,7 +63,7 @@ impl DurableRuntime {
                         .unwrap_or_else(|| (StatusCode::ACCEPTED, json!({})));
                     async move { (answer.0, Json(answer.1)) }
                 })
-                .layer(DefaultBodyLimit::max(TURN_REQUEST_LIMIT)),
+                .layer(DefaultBodyLimit::max(request_limit()?)),
             )
             .route(
                 "/v1/turns/{id}/control",
@@ -408,7 +419,7 @@ async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_
     // Core's intake reads no event this large; a turn queued under other
     // limits is handed over all the same.
     let mut oversized = event("oversized", "conversation");
-    oversized.content = "x".repeat(TURN_REQUEST_LIMIT);
+    oversized.content = "x".repeat(request_limit()?);
     let oversized = ok(submit_event(&state, oversized).await)?;
     let next = ok(submit(&state, "next", "elsewhere").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
