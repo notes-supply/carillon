@@ -1,5 +1,6 @@
 import { TURN_REQUEST_LIMIT, type ControlAction } from "@carillon/protocol";
 import { once } from "node:events";
+import { request } from "node:http";
 import { expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
@@ -42,7 +43,7 @@ async function serve(turns: InboxTurns) {
   const close = async () => {
     await new Promise((done) => server.close(done));
   };
-  return { call, close };
+  return { call, close, url: `http://127.0.0.1:${String(address.port)}` };
 }
 
 const turn = (input: string): TurnRequest => ({
@@ -122,6 +123,28 @@ it("takes a turn as large as core hands over and refuses a larger one with 413",
       },
     });
     expect(kept).toBe(1);
+  } finally {
+    await close();
+  }
+});
+
+it("answers a control or settings request past 1 MiB before the rest of it arrives", async () => {
+  const { url, close } = await serve({
+    submit: () => Promise.resolve(),
+    control: () => Promise.resolve(),
+  });
+  try {
+    for (const path of ["/v1/turns/turn-1/control", "/v1/settings"]) {
+      const sent = request(`${url}${path}`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-only", "content-type": "application/json" },
+      });
+      sent.on("error", () => undefined);
+      sent.write(Buffer.alloc(1_048_577, " "));
+      const answered: unknown[] = await once(sent, "response");
+      expect(answered[0]).toMatchObject({ statusCode: 400 });
+      sent.destroy();
+    }
   } finally {
     await close();
   }

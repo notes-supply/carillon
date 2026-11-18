@@ -15,8 +15,9 @@ depend on it; it imports neither. Import modules by path
   operations (`/health`, `POST /v1/inbox`, answering 202 once kept, `POST
   /v1/turns/{id}/control`, `GET /v1/turns/{id}/activity`, `POST
   /v1/settings`, `GET /v1/commands` and `GET /v1/restart`). It reads a
-  request of up to the protocol's `TURN_REQUEST_LIMIT` and refuses a larger
-  turn with 413. Callers get only the displayable part of an explanation;
+  turn of up to the protocol's `TURN_REQUEST_LIMIT` and refuses a larger one
+  with 413, and stops reading a control or settings request past 1 MiB.
+  Callers get only the displayable part of an explanation;
   other failures are logged, redacted.
 - [`core.ts`](src/core.ts): a runtime's client of core, with its own
   credential, which it sends straight to core, never through a proxy or

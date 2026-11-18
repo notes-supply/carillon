@@ -162,7 +162,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     response: ServerResponse,
   ): Promise<TurnRequest | undefined> {
     try {
-      return Parse(RuntimeTurnRequestSchema, await readJson(request));
+      return Parse(RuntimeTurnRequestSchema, await readTurn(request));
     } catch (failure) {
       if (failure instanceof ExplainedFailure) throw failure;
       writeJson(response, 400, { error: "invalid runtime turn request" });
@@ -178,11 +178,26 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     return timingSafeEqual(expected, actual);
   }
 
+  /** A control or settings request's JSON, which stops being read past 1 MiB. */
   async function readJson(request: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = [];
     let length = 0;
-    // A body over the limit is still read to its end, so core receives the
-    // refusal rather than a connection broken mid-request.
+    for await (const chunk of request) {
+      if (!Buffer.isBuffer(chunk)) throw new Error("request body is not bytes");
+      length += chunk.length;
+      if (length > 1_048_576) throw new Error("request body exceeds 1 MiB");
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString()) as unknown;
+  }
+
+  /**
+   * A turn's JSON. A body over the limit is still read to its end, so core
+   * receives the 413 rather than a connection broken mid-request.
+   */
+  async function readTurn(request: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    let length = 0;
     for await (const chunk of request) {
       if (!Buffer.isBuffer(chunk)) throw new Error("request body is not bytes");
       length += chunk.length;
