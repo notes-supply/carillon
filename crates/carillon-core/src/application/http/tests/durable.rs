@@ -371,13 +371,54 @@ async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Resu
 }
 
 #[tokio::test]
-async fn the_largest_message_core_accepts_reaches_its_runtime() -> Result<()> {
+async fn an_event_with_an_identifier_over_512_bytes_is_refused_before_any_runtime_sees_it()
+-> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let identifiers: [fn(&mut ExternalEvent) -> &mut String; 7] = [
+        |event| &mut event.event_id,
+        |event| &mut event.agent_id,
+        |event| &mut event.user_id,
+        |event| &mut event.audience_id,
+        |event| &mut event.channel_id,
+        |event| &mut event.delivery_target_id,
+        |event| &mut event.feedback_target_id,
+    ];
+    for identifier in identifiers {
+        let mut long = event("long", "conversation");
+        *identifier(&mut long) = "i".repeat(513);
+        let refused = submit_event(&state, long)
+            .await
+            .err()
+            .context("an identifier over 512 bytes was accepted")?;
+        assert_eq!(
+            refused.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            refused.message
+        );
+    }
+    assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
+    assert!(runtime.handed().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_largest_message_core_accepts_reaches_its_runtime_in_the_longest_channel_it_records()
+-> Result<()> {
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
     let (mut fixture, _) = durable(directory.path(), &runtime)?;
     fixture.config.value.core.attachments.max_files = 100;
     fixture.core = Core::open(core_options(&fixture.config))?;
     let state = configured(&fixture);
+    // A conversation keeps its first message's channel, here as long as JSON
+    // makes 512 bytes: a control character takes six.
+    let mut first = event("first", "conversation");
+    first.channel_id = "\u{1}".repeat(512);
+    ok(submit_event(&state, first.clone()).await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     // Core adds each file's captured path and digest to the turn.
     let batch = fixture
         .config
@@ -411,7 +452,8 @@ async fn the_largest_message_core_accepts_reaches_its_runtime() -> Result<()> {
     let accepted = ok(submit_event(&state, largest).await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &accepted.turn_id)?, TurnState::Running);
-    let request = runtime.request(0)?;
+    let request = runtime.request(1)?;
+    assert_eq!(request.channel_id, first.channel_id);
     assert_eq!(request.input.len(), text);
     assert_eq!(request.attachments.len(), 100);
     Ok(())
