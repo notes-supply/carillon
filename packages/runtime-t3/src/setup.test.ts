@@ -416,7 +416,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
     expect(refused.stderr).toMatch(new RegExp(`^error: .*${reason.source}.*\\n$`, "u"));
     expect(refused.stderr).not.toContain("saved-token");
   }
-}, 30_000);
+});
 
 it("takes the token on standard input, says the settings are saved for a start, and reports a refusal in one line", async () => {
   const fake = await fakeT3();

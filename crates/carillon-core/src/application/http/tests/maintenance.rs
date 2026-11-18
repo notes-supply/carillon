@@ -435,7 +435,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_pause_holds_through_a_slow_stop_only_while_core_acknowledges_it() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;

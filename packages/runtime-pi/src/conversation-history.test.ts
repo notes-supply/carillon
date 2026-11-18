@@ -497,7 +497,7 @@ it("lists the conversations of over a thousand messages about as fast as it sear
   };
   expect(history(agent, query("FROM conversation_list"))).toHaveLength(20);
   expect(timed(query("FROM conversation_list"))).toBeLessThan(2 * timed(search("invoice")));
-}, 60_000);
+});
 
 it("runs the documented commands from a Carillon home whose path has spaces", async () => {
   const agent = await fixture({ durable: true, answers: [fauxAssistantMessage("Plant in May.")] });

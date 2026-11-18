@@ -17,6 +17,12 @@ export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, "packages/web/browser/**"],
     restoreMocks: true,
+    // A test whose point is a bound asserts it. These only catch a hang, and
+    // every test shares them, so they leave room for a machine running the
+    // whole suite under load.
+    testTimeout: 120_000,
+    hookTimeout: 120_000,
+    expect: { poll: { timeout: 60_000 } },
     env: {
       HOME: home,
       XDG_CONFIG_HOME: join(home, ".config"),

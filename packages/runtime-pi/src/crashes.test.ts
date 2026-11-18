@@ -88,7 +88,7 @@ it("records an answer though crashes keep cutting off its posting", async () => 
     output: "Answer: hello",
   });
   expect(core.received.filter((call) => call.path === outcome)).toHaveLength(1);
-}, 60_000);
+});
 
 it("opens a scheduled turn though crashes keep cutting off its opening", async () => {
   const core = await fakeCore();
@@ -102,7 +102,7 @@ it("opens a scheduled turn though crashes keep cutting off its opening", async (
   opening.release();
   const scheduled = await core.outcome("opened-1");
   expect(scheduled.outcome === "answered" && scheduled.output).toMatch(/ scheduled$/u);
-}, 60_000);
+});
 
 it("reports a subagent's answer though crashes keep cutting off its reporter", async () => {
   const core = await fakeCore();
@@ -119,4 +119,4 @@ it("reports a subagent's answer though crashes keep cutting off its reporter", a
   expect(report.outcome === "answered" && report.output).toContain(
     `Held ${String(DEFAULT_RESTART_LIMIT)} times.`,
   );
-}, 60_000);
+});

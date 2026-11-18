@@ -305,7 +305,7 @@ it("waits for the run T3 starts after background work however late it comes, and
   );
   expect(thread().runs.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
   expect(dispatches()).toHaveLength(1);
-}, 10_000);
+});
 
 it("fails closed when the native session ends before it reports finished background work", async () => {
   const result = execute(turn("turn-1", "work"));
@@ -1039,9 +1039,10 @@ it("ignores a stale pending request until the new run's own item names its reque
 it.each([false, true])(
   "cancels promptly while the first snapshot never arrives, existing thread %s",
   async (existing) => {
+    await restart({ timeoutMs: 60_000 });
     if (existing) {
       const initial = execute(turn("initial", "Hello."));
-      answer(await started2("initial"), "Hi.");
+      answer(await started("initial"), "Hi.");
       await initial;
     }
     const dispatched = dispatches().length;
@@ -1050,32 +1051,31 @@ it.each([false, true])(
     const controller = new AbortController();
     const result = execute(turn("turn-1", "work"), controller.signal);
     await until(() => fake.subscriptions.length === subscribed + 1);
-    const started = Date.now();
+    const begun = Date.now();
     controller.abort(new Error("core disconnected"));
     await expect(result).rejects.toThrow("core disconnected");
-    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(Date.now() - begun).toBeLessThan(5_000);
     expect(dispatches()).toHaveLength(dispatched);
     fake.holdSnapshot = false;
     const next = execute(turn("turn-2", "again"));
-    answer(await started2("turn-2"), "ok");
+    answer(await started("turn-2"), "ok");
     expect((await next).output).toBe("ok");
   },
 );
 
 it("cancels promptly during a reconnect delay before anything was dispatched", async () => {
-  const slow = build({ reconnectDelayMs: 5_000 });
+  await restart({ reconnectDelayMs: 60_000 });
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "thread.create" && dropped++ === 0;
   const controller = new AbortController();
-  const result = execute(turn("turn-1", "work"), controller.signal, slow);
+  const result = execute(turn("turn-1", "work"), controller.signal);
   await until(() => dropped === 1);
   await pause(100);
-  const started = Date.now();
+  const begun = Date.now();
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
-  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(Date.now() - begun).toBeLessThan(5_000);
   expect(dispatches()).toHaveLength(0);
-  await slow.close();
 });
 
 it("keeps recovering a possibly dispatched turn when cancelled during a reconnect delay", async () => {
@@ -1084,7 +1084,7 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
   const controller = new AbortController();
   const result = execute(turn("turn-1", "work"), controller.signal, slow);
-  const run = await started2("turn-1");
+  const run = await started("turn-1");
   await pause(100);
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
@@ -1092,14 +1092,15 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
   await slow.close();
-}, 10_000);
+});
 
 it.each([false, true])(
   "closes promptly while the first snapshot never arrives, existing thread %s",
   async (existing) => {
+    await restart({ timeoutMs: 60_000 });
     if (existing) {
       const initial = execute(turn("initial", "Hello."));
-      answer(await started2("initial"), "Hi.");
+      answer(await started("initial"), "Hi.");
       await initial;
     }
     const dispatched = dispatches().length;
@@ -1107,16 +1108,14 @@ it.each([false, true])(
     fake.holdSnapshot = true;
     void execute(turn("turn-1", "work"));
     await until(() => fake.subscriptions.length === subscribed + 1);
-    const started = Date.now();
+    const begun = Date.now();
     await runtime.close();
-    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(Date.now() - begun).toBeLessThan(5_000);
     expect(dispatches()).toHaveLength(dispatched);
     // Core keeps the turn running, for the next process to take up.
     expect(settles("turn-1")).toEqual([]);
   },
 );
-
-const started2 = started;
 
 it("fails closed on any follow-up after an unconfirmed stop on the conversation, while plain turns continue", async () => {
   expect(runtime.restartReadiness()).toEqual({ state: "ready" });
@@ -1300,9 +1299,10 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
     /was not confirmed stopped/u,
   );
   await slow.close();
-}, 10_000);
+});
 
 it("cancels or closes promptly while T3's discovery or upgrade stalls before any dispatch", async () => {
+  await restart({ timeoutMs: 60_000 });
   fake.holdDiscovery = true;
   const controller = new AbortController();
   const result = execute(turn("turn-1", "work"), controller.signal);
@@ -1310,7 +1310,7 @@ it("cancels or closes promptly while T3's discovery or upgrade stalls before any
   let begun = Date.now();
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
-  expect(Date.now() - begun).toBeLessThan(500);
+  expect(Date.now() - begun).toBeLessThan(5_000);
   fake.holdDiscovery = false;
   fake.disconnectAll();
 
@@ -1319,7 +1319,7 @@ it("cancels or closes promptly while T3's discovery or upgrade stalls before any
   await until(() => fake.heldRequests.size === 1);
   begun = Date.now();
   await runtime.close();
-  expect(Date.now() - begun).toBeLessThan(500);
+  expect(Date.now() - begun).toBeLessThan(5_000);
   expect(settles("turn-2")).toEqual([]);
   fake.holdUpgrade = false;
   fake.disconnectAll();

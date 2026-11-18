@@ -1799,10 +1799,10 @@ async function stopAll() {
 }
 
 async function waitForHealth(port, host) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
     try {
-      const response = await fetch(`http://${host}:${String(port)}/health`);
-      if (response.ok) return;
+      const signal = AbortSignal.timeout(Math.max(deadline - Date.now(), 0));
+      if ((await fetch(`http://${host}:${String(port)}/health`, { signal })).ok) return;
     } catch {}
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }

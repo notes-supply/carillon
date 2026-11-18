@@ -218,7 +218,7 @@ export interface FakeT3 {
   session(threadId: string, status: ProviderSession["status"]): void;
   /** The detached process finally closes: nothing further can be delivered. */
   closeSession(threadId: string): void;
-  waitFor(condition: () => boolean, timeoutMs?: number): Promise<void>;
+  waitFor(condition: () => boolean): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -624,8 +624,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const thread = threadOf(threadId);
       thread.sessionClosed = true;
     },
-    async waitFor(condition, timeoutMs = 5_000) {
-      const deadline = Date.now() + timeoutMs;
+    async waitFor(condition) {
+      const deadline = Date.now() + 60_000;
       while (!condition()) {
         if (Date.now() > deadline) throw new Error("fake T3 condition not met in time");
         await new Promise((resolve) => setTimeout(resolve, 10));

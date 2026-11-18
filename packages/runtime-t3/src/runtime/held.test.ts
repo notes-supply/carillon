@@ -254,7 +254,7 @@ it("refuses a hand-over while it takes up the turns it held, before core's inbox
   const reply = execute(turn("turn-1", "hello"));
   answer(await started("turn-1"), "hi");
   expect((await reply).output).toBe("hi");
-}, 10_000);
+});
 
 it("keeps asking for the turns it held while core lists them in a form it cannot read, saying so once", async () => {
   core.hold(turn("turn-1", "hello"));

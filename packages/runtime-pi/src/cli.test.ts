@@ -3,14 +3,13 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "smol-toml";
 import { afterEach, expect, it } from "vitest";
 import { DEFAULT_RESTART_LIMIT } from "@earendil-works/pi-durable";
 import { TurnActivitySchema, TurnOutcomeSchema } from "@carillon/protocol";
-import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
+import { availablePorts, startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { Parse } from "typebox/value";
 import { WebSocketServer } from "ws";
 
@@ -55,21 +54,11 @@ async function run(args: readonly string[]) {
   return { status: started.child.exitCode, ...started.output() };
 }
 
-async function freePort(): Promise<number> {
-  const listener = createServer();
-  listener.listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const address = listener.address();
-  if (address === null || typeof address === "string") throw new Error("no TCP address");
-  await new Promise<void>((done) => listener.close(() => done()));
-  return address.port;
-}
-
 /** An installation of one Pi runtime whose agents' resources are these directories. */
 async function installation(resources: Record<string, string>, core = "127.0.0.1:1") {
   const home = await mkdtemp(join(tmpdir(), "carillon-pi-cli-"));
   cleanups.push(() => rm(home, { recursive: true, force: true }));
-  const port = await freePort();
+  const port = await availablePorts(1);
   const config = join(home, "carillon.toml");
   const credential = join(home, "runtime.token");
   await writeFile(credential, token);
@@ -210,7 +199,7 @@ it("sets an agent's model, which it then lists with the models Pi offers", async
   expect(refused.status).toBe(1);
   expect(refused.stderr).toContain("local/gone is not a model offered here.");
   expect(await models("default")).toMatchObject({ value: "local/reasoner" });
-}, 30_000);
+});
 
 async function configure(args: readonly string[]) {
   const configured = await run([
@@ -307,7 +296,7 @@ it("gives up a message whose answer keeps killing the runtime, and answers the o
   const [answered, ...more] = await outcomes(core, "turn-2");
   expect(more).toEqual([]);
   expect(answered?.body).toMatchObject({ outcome: "answered" });
-}, 90_000);
+});
 
 it("finishes a turn cut off by SIGKILL once it runs again, and settles it once", async () => {
   const core: FakeCore = await startFakeCore();
@@ -333,7 +322,7 @@ it("finishes a turn cut off by SIGKILL once it runs again, and settles it once",
   expect(settled.outcome === "answered" && settled.output).toMatch(
     /^Local provider response 1: hold /u,
   );
-}, 30_000);
+});
 
 /**
  * ChatGPT's Codex Responses socket, which Pi keeps open between a
@@ -433,14 +422,14 @@ it("exits on SIGTERM once a Codex model answered, and answers a message the stop
   await holding.ready;
   await inbox(url, home, "hello again", "turn-2");
   expect(await answering(url, core, "turn-2")).toBe("model");
-  await expect.poll(() => codex.requests, { timeout: 10_000 }).toBe(2);
+  await expect.poll(() => codex.requests).toBe(2);
   expect(await stopped(holding.child)).toBe(0);
   codex.holding = false;
   await start(live).ready;
   const [outcome, ...more] = await outcomes(core, "turn-2");
   expect(more).toEqual([]);
   expect(outcome?.body).toMatchObject({ outcome: "answered", output: "Codex answer." });
-}, 60_000);
+});
 
 it("exits on SIGTERM though a user extension left a request that never answers", async () => {
   let asked = 0;
@@ -479,4 +468,4 @@ it("exits on SIGTERM though a user extension left a request that never answers",
   expect((await outcomes(core)).map(({ body }) => body)).toMatchObject([{ outcome: "answered" }]);
   await expect.poll(() => asked).toBe(1);
   expect(await stopped(serving.child)).toBe(0);
-}, 30_000);
+});

@@ -58,7 +58,8 @@ it loads when it needs them.
 
 ## Development
 
-Rust lives in `crates/`, TypeScript in `packages/`. [Mise](https://mise.jdx.dev)
+Rust lives in `crates/`, TypeScript in `packages/`. The tests need Linux,
+because they read free ports from `/proc`. [Mise](https://mise.jdx.dev)
 installs the tools and runs the tasks:
 
 ```sh

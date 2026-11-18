@@ -109,18 +109,14 @@ it.each([
     problem:
       "The agent's extension extensions/mine.ts could not be loaded: its module did not finish importing within 5 seconds",
   },
-])(
-  "fails on $name with the problem the agent's note would carry",
-  async ({ files, problem }) => {
-    const home = await installation({ assistant: files });
-    expect(await check(home)).toMatchObject({
-      status: 1,
-      stdout: "",
-      stderr: `${join(home, "agents/assistant")} does not load:\n\n${problem}\n`,
-    });
-  },
-  20_000,
-);
+])("fails on $name with the problem the agent's note would carry", async ({ files, problem }) => {
+  const home = await installation({ assistant: files });
+  expect(await check(home)).toMatchObject({
+    status: 1,
+    stdout: "",
+    stderr: `${join(home, "agents/assistant")} does not load:\n\n${problem}\n`,
+  });
+});
 
 it("fails when a module ends the process at its top level, which would stop the runtime", async () => {
   const home = await installation({
@@ -141,7 +137,7 @@ it("fails within its bound when a module's top level never ends", async () => {
     stderr: `${join(home, "agents/assistant")} did not finish loading within 10 seconds: a module's top-level code may never end. In the runtime, that stops every agent.\n`,
   });
   expect(result.seconds).toBeLessThan(15);
-}, 30_000);
+});
 
 it("resolves a module's relative paths where the runtime's service does, not where it is run", async () => {
   const file = `carillon-check-${String(process.pid)}.json`;

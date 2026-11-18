@@ -4,7 +4,6 @@
 
 use std::{
     io::Read as _,
-    net::TcpListener,
     process::{Output, Stdio},
     time::Duration,
 };
@@ -28,6 +27,9 @@ use tokio::{
     time::Instant,
 };
 
+#[path = "support/ports.rs"]
+mod ports;
+
 const CARILLON: &str = env!("CARGO_BIN_EXE_carillon");
 /// The interface `carillon init --interface discord` registers.
 const INTERFACE: &str = "discord-private";
@@ -45,7 +47,7 @@ struct Installation {
 impl Installation {
     fn create() -> Result<Self> {
         let (home, workspace) = (tempfile::tempdir()?, tempfile::tempdir()?);
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let port = ports::available_base_port()?;
         let made = std::process::Command::new(CARILLON)
             .arg("--home")
             .arg(home.path())
