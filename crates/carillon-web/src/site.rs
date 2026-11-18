@@ -91,7 +91,7 @@ pub(crate) async fn file(State(web): State<Arc<Web>>, method: Method, uri: Uri) 
     }
     let name = match uri.path() {
         "/" => INDEX,
-        path => path.strip_prefix('/').unwrap_or(path),
+        path => path.trim_prefix('/'),
     };
     let Some(media_type) = media_type(name) else {
         return StatusCode::NOT_FOUND.into_response();

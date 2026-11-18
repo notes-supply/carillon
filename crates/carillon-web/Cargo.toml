@@ -2,7 +2,6 @@
 name = "carillon-web"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
@@ -12,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-argon2 = { version = "0.5.3", features = ["std"] }
+argon2 = "0.6.0"
 axum = { workspace = true, features = ["multipart"] }
 carillon-installation = { path = "../carillon-installation" }
 carillon-interface = { path = "../carillon-interface" }
@@ -20,7 +19,7 @@ carillon-protocol = { path = "../carillon-protocol" }
 clap.workspace = true
 futures-util = { version = "0.3.34", default-features = false }
 hex.workspace = true
-hmac = "0.12.1"
+hmac = "0.13.0"
 libc = "0.2.191"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
 pulldown-cmark-escape = "0.11.0"

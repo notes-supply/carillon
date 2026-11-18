@@ -248,8 +248,7 @@ fn kept_t3_settings_say_what_to_do_when_t3_cannot_give_an_agent_a_model() -> any
         &mut Unasked,
     )
     .err()
-    .map(|failure| format!("{failure:#}"))
-    .unwrap_or_default();
+    .map_or_default(|failure| format!("{failure:#}"));
     for said in [
         "t3-notes",
         "http://127.0.0.1:3999",

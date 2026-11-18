@@ -112,7 +112,7 @@ impl Bundled {
     #[must_use]
     pub fn name(self) -> &'static str {
         let program = self.program();
-        program.strip_prefix("runtime-").unwrap_or(program)
+        program.trim_prefix("runtime-")
     }
 
     #[must_use]

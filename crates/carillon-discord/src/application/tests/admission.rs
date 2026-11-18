@@ -60,7 +60,7 @@ async fn the_gateway_takes_direct_messages_only_from_allowlisted_people_while_th
         let bot = json!({"id": id, "username": "bot", "discriminator": "0", "bot": true});
         assert!(taken(created(bot)?).is_none(), "bot {id}");
     }
-    let edited = Event::MessageUpdate(Box::new(MessageUpdate(direct_message(&person)?.0)));
+    let edited = Event::MessageUpdate(Box::new(MessageUpdate(direct_message(&person)?.message)));
     assert!(taken(edited).is_none());
 
     edit_settings(&state, |file| {

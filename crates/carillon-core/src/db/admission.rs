@@ -143,8 +143,7 @@ fn reference_capture(
     let files = event
         .attachments
         .as_ref()
-        .map(|staged| staged.files.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|staged| staged.files.as_slice());
     if files.len() != capture.digests.len() {
         bail!("captured attachments do not match the event");
     }

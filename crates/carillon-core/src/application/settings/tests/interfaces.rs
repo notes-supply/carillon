@@ -20,10 +20,7 @@ async fn named(config: &LoadedConfig, interface: &str, arguments: &[&str]) -> Re
 }
 
 fn failure(result: Result<String>) -> String {
-    result
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default()
+    result.err().map_or_default(|error| format!("{error:#}"))
 }
 
 #[tokio::test]

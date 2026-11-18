@@ -120,9 +120,7 @@ fn message(
             channel_id: channel.to_owned(),
             parent_channel_id: None,
             content: "hello".to_owned(),
-            attachments: cdn
-                .map(|cdn| vec![attachment(cdn, "601", "a.bin", 8)])
-                .unwrap_or_default(),
+            attachments: cdn.map_or_default(|cdn| vec![attachment(cdn, "601", "a.bin", 8)]),
             reference: None,
         },
         native: Value::Null,

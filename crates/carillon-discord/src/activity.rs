@@ -315,8 +315,7 @@ pub(crate) async fn activity_monitor(
     };
     for (job_id, recorded) in cards
         .as_ref()
-        .map(|cards| cards.records.recorded())
-        .unwrap_or_default()
+        .map_or_default(|cards| cards.records.recorded())
     {
         let view = follow(&mut tasks, &job_id, Known::Unread, Some(recorded));
         jobs.insert(job_id, view);

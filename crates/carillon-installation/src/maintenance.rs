@@ -221,8 +221,7 @@ mod tests {
         assert!(MaintenanceLock::try_acquire(directory.path())?.is_none());
         let refusal = MaintenanceLock::acquire(directory.path())
             .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default();
+            .map_or_default(|error| error.to_string());
         assert!(refusal.starts_with("another Carillon maintenance operation is running"));
         drop(held);
         assert!(MaintenanceLock::try_acquire(directory.path())?.is_some());

@@ -327,13 +327,12 @@ mod tests {
     fn options(reply: &Reply) -> Vec<String> {
         reply.components[0]["components"][0]["options"]
             .as_array()
-            .map(|options| {
+            .map_or_default(|options| {
                 options
                     .iter()
                     .filter_map(|option| option["label"].as_str().map(str::to_owned))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     #[test]
@@ -386,13 +385,12 @@ mod tests {
         let reply = expect_reply(interact(&mut host, &command(None, true)))?;
         let shown: Vec<&str> = reply.components[0]["components"][0]["options"]
             .as_array()
-            .map(|options| {
+            .map_or_default(|options| {
                 options
                     .iter()
                     .filter_map(|option| option["description"].as_str())
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         assert_eq!(
             shown,
             [
@@ -436,13 +434,12 @@ mod tests {
         let run = format!("command:run:{key}");
         let ids: Vec<&str> = chosen.components[0]["components"]
             .as_array()
-            .map(|buttons| {
+            .map_or_default(|buttons| {
                 buttons
                     .iter()
                     .filter_map(|b| b["custom_id"].as_str())
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         assert_eq!(ids, [run.as_str(), "command:page:0"]);
         let sent = expect_reply(interact(&mut host, &component(&run, &[])))?;
         assert_eq!(host.submitted, ["/compact"]);

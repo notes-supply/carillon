@@ -458,9 +458,9 @@ fn gateway_interactions_map_to_their_source() -> anyhow::Result<()> {
     let base = json!({
         "id": "1",
         "application_id": "2",
+        "attachment_size_limit": 10_485_760,
         "authorizing_integration_owners": {},
         "token": "t",
-        "version": 1,
         "guild_id": "100",
         "member": {
             "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},
@@ -665,8 +665,7 @@ async fn agent_operations_authenticate_before_parsing_and_refuse_simulation() ->
 fn names(module: &Value) -> Vec<&str> {
     module["commands"]
         .as_array()
-        .map(|names| names.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default()
+        .map_or_default(|names| names.iter().filter_map(Value::as_str).collect())
 }
 
 /// Saves the settings `state` serves with the custom module `custom.wasm`

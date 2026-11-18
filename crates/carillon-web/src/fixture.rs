@@ -147,7 +147,7 @@ fn snapshot(core: &Core, view: &View) -> Snapshot {
         let Some(conversation) = core.conversations.iter().find(|listed| listed.key == *key) else {
             return Opened::Unrecorded { key: key.clone() };
         };
-        let turns = core.turns.get(key).map(Vec::as_slice).unwrap_or_default();
+        let turns = core.turns.get(key).map_or_default(Vec::as_slice);
         let shown = turns.len().min(open.turns.get().into());
         Opened::Recorded {
             conversation: conversation.clone(),

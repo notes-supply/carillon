@@ -2,7 +2,6 @@
 name = "carillon-discord"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
@@ -13,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-base64 = "0.22.1"
+base64 = "0.23.1"
 carillon-discord-module = { path = "../carillon-discord-module" }
 carillon-protocol = { path = "../carillon-protocol" }
 carillon-installation = { path = "../carillon-installation" }
@@ -31,11 +30,11 @@ tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-twilight-gateway = { version = "0.17.1", default-features = false, features = ["rustls-platform-verifier", "twilight-http", "zlib"] }
-twilight-http = "0.17.1"
+twilight-gateway = { version = "0.18.0", default-features = false, features = ["rustls-platform-verifier", "zlib"] }
+twilight-http = "0.18.0"
 twilight-model.workspace = true
-twilight-util = { version = "0.17.0", features = ["permission-calculator"] }
-twilight-validate = "0.17.0"
+twilight-util = { version = "0.18.0", features = ["permission-calculator"] }
+twilight-validate = "0.18.0"
 unicode-general-category = "1.1.0"
 uuid.workspace = true
 

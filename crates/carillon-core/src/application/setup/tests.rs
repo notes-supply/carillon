@@ -94,8 +94,7 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
         };
         let refusal = setup(&home, rerun, &mut Unasked)
             .err()
-            .map(|error| format!("{error:#}"))
-            .unwrap_or_default();
+            .map_or_default(|error| format!("{error:#}"));
         assert_eq!(
             refusal,
             format!(
@@ -434,10 +433,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
         SavedT3::Replaced,
         &mut Shown::answering(&["", "token", ""]),
     );
-    let refusal = refused
-        .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+    let refusal = refused.err().map_or_default(|error| format!("{error:#}"));
     assert!(refusal.contains("nothing runs on T3"), "{refusal}");
     assert!(!home.exists());
     let mut questions = Shown::answering(&["", "token", ""]);

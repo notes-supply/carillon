@@ -3,7 +3,6 @@ name = "carillon-card-colours"
 description = "A custom Discord module: the bundled one, with work cards coloured by state"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 

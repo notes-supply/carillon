@@ -135,8 +135,7 @@ async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> 
     let failure = Module::load(files(root), declared.clone())
         .await
         .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+        .map_or_default(|error| format!("{error:#}"));
     assert!(
         failure.contains(&format!("custom Discord module {}", path.display()))
             && failure.contains("disable it"),
@@ -480,8 +479,7 @@ async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result
     let refusal = super::super::check(&over)
         .await
         .err()
-        .map(|error| format!("{error:#}"))
-        .unwrap_or_default();
+        .map_or_default(|error| format!("{error:#}"));
     assert!(
         refusal.contains(&format!("more than {MODULE_LIMIT} bytes")),
         "{refusal}"

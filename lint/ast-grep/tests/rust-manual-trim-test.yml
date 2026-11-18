@@ -1,0 +1,12 @@
+id: rust-manual-trim
+valid:
+  - 'fn t(s: &str) -> &str { s.trim_prefix("error: ") }'
+  - "fn t(s: &str) -> &str { s.strip_prefix('/').unwrap_or(\"index\") }"
+  - "fn t(s: &str) -> Option<&str> { s.strip_prefix('/') }"
+  - "fn t(s: &str) -> String { format!(\"{}\", s.strip_prefix('/').unwrap_or(other)) }"
+invalid:
+  - 'fn t(s: &str) -> &str { s.strip_prefix("error: ").unwrap_or(s) }'
+  - "fn t(s: String) -> String { s.strip_prefix('\\u{feff}').unwrap_or(&s).to_owned() }"
+  - "fn t(s: &str) -> &str { s.strip_suffix('\\n').unwrap_or(s) }"
+  - 'fn t(e: &str) -> Result<()> { bail!("{}", e.strip_prefix("error: ").unwrap_or(e)) }'
+  - "fn t(s: &str) -> String { format!(\"{x}{}\", s.strip_suffix('\\n').unwrap_or(s)) }"
