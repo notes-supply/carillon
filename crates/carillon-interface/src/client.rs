@@ -359,7 +359,11 @@ async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T,
             });
         }
         Err(error) => {
-            warn!(%error, "settings or command call failed to reach core");
+            let error = anyhow::Error::new(error);
+            warn!(
+                error = format!("{error:#}"),
+                "settings or command call failed to reach core"
+            );
             return Err(InterfaceError {
                 status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                 message: "The runtime is not reachable right now.".to_owned(),
@@ -385,10 +389,9 @@ async fn core_send(
     request: RequestBuilder,
     action: &str,
 ) -> Result<reqwest::Response, InterfaceError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| InterfaceError::transient(format!("{action}: {error}")))?;
+    let response = request.send().await.map_err(|error| {
+        InterfaceError::transient(format!("{action}: {:#}", anyhow::Error::new(error)))
+    })?;
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -418,7 +421,9 @@ async fn core_json<T: DeserializeOwned>(
         .await?
         .bytes()
         .await
-        .map_err(|error| InterfaceError::transient(format!("read {action}: {error}")))?;
+        .map_err(|error| {
+            InterfaceError::transient(format!("read {action}: {:#}", anyhow::Error::new(error)))
+        })?;
     serde_json::from_slice(&bytes)
         .map_err(|error| InterfaceError::protocol(format!("decode {action}: {error}")))
 }

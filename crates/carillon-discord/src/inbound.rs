@@ -162,7 +162,7 @@ impl Ingress {
                 Ok(Err(failure)) => failure,
                 Err(_) => anyhow!("Discord did not answer within {}s", ATTEMPT.as_secs()),
             };
-            warn!(error = %failure, "waiting to {doing}");
+            warn!(error = format!("{failure:#}"), "waiting to {doing}");
             self.until(deadline, sleep(RETRY)).await?;
         }
     }
@@ -220,7 +220,10 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) -> Pr
                 .reactions
                 .outcome_as(&source, Feedback::Failed, &settings)
                 .await;
-            warn!(error = %failure, "Discord message route is unavailable");
+            warn!(
+                error = format!("{failure:#}"),
+                "Discord message route is unavailable"
+            );
             return Prepared::Refused;
         }
         None => return ingress.cut_short(),
@@ -302,7 +305,10 @@ async fn prepare_text(
     let resolved = match opened {
         Some(Ok(resolved)) => resolved,
         Some(Err(failure)) => {
-            warn!(error = %failure, "Discord conversation cannot be prepared");
+            warn!(
+                error = format!("{failure:#}"),
+                "Discord conversation cannot be prepared"
+            );
             reactions
                 .outcome_as(&source, Feedback::Failed, settings)
                 .await;
@@ -328,7 +334,10 @@ async fn prepare_text(
         match submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event).await {
             Some(Ok(receipt)) => Ok(receipt),
             Some(Err(failure)) => {
-                warn!(error = %failure.message, "Discord event submission failed");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "Discord event submission failed"
+                );
                 reactions
                     .outcome_as(&source, Feedback::Failed, settings)
                     .await;
@@ -365,7 +374,7 @@ async fn settle_unfinished_text(
             Prepared::Refused
         }
         Err(failure) => {
-            warn!(error = %failure.message, %event_id, "Discord stopped before core said whether it holds a message");
+            warn!(error = format!("{failure:#}"), %event_id, "Discord stopped before core said whether it holds a message");
             reactions
                 .outcome_as(&source, Feedback::Uncertain, &settings)
                 .await;
@@ -444,7 +453,10 @@ async fn prepare_files(
             // The staged files go before the sender hears anything.
             drop(staged);
             if let Some(Err(failure)) = unopened {
-                warn!(error = %failure, "Discord conversation cannot be prepared");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "Discord conversation cannot be prepared"
+                );
                 reactions
                     .outcome_as(&source, Feedback::Failed, settings)
                     .await;
@@ -511,7 +523,7 @@ async fn unanswered(ingress: &Ingress, event_id: &str) -> Result<EventReceipt, N
         Ok(Some(receipt)) => Ok(receipt),
         Ok(None) => Err(NotAccepted::Refused(ingress.unfinished())),
         Err(failure) => {
-            warn!(error = %failure.message, %event_id, "core would not say whether it holds an event it may have received");
+            warn!(error = format!("{failure:#}"), %event_id, "core would not say whether it holds an event it may have received");
             Err(NotAccepted::Unconfirmed)
         }
     }
@@ -553,7 +565,7 @@ async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Repla
             Ok(EventStatus::Unknown) => return Replayed::Absent,
             Ok(EventStatus::Capturing) => break,
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, %event_id, "waiting to ask core about a Discord event");
+                warn!(error = format!("{failure:#}"), %event_id, "waiting to ask core about a Discord event");
                 if ingress
                     .until(Some(deadline), sleep(Duration::from_secs(2)))
                     .await
@@ -563,7 +575,7 @@ async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Repla
                 }
             }
             Err(failure) => {
-                warn!(error = %failure.message, %event_id, "core refused an event status request");
+                warn!(error = format!("{failure:#}"), %event_id, "core refused an event status request");
                 return Replayed::Absent;
             }
         }
@@ -573,7 +585,7 @@ async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Repla
         // The capture ended without an acceptance.
         Ok(None) => Replayed::Absent,
         Err(failure) => {
-            warn!(error = %failure.message, %event_id, "core refused an event status request");
+            warn!(error = format!("{failure:#}"), %event_id, "core refused an event status request");
             Replayed::Uncertain
         }
     }
@@ -583,7 +595,7 @@ async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Repla
 /// is waited for; an unreachable core is waited out, as for any submission.
 pub(crate) async fn known_receipt(core: &CoreClient, event_id: &str) -> Option<EventReceipt> {
     settled(core, event_id).await.unwrap_or_else(|failure| {
-        warn!(error = %failure.message, %event_id, "core refused an event status request");
+        warn!(error = format!("{failure:#}"), %event_id, "core refused an event status request");
         None
     })
 }
@@ -620,7 +632,7 @@ async fn submit_files(
             }
             Err(failure) => failure,
         };
-        warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord attachments");
+        warn!(error = format!("{failure:#}"), event_id = %event.event_id, "waiting to submit Discord attachments");
         if Instant::now() + delay >= deadline
             || ingress.until(Some(deadline), sleep(delay)).await.is_none()
         {

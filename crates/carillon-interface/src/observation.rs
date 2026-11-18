@@ -110,7 +110,10 @@ impl Observation {
                     })
                 })?
                 .map_err(|error| {
-                    InterfaceError::transient(format!("read an observation: {error}"))
+                    InterfaceError::transient(format!(
+                        "read an observation: {:#}",
+                        anyhow::Error::new(error)
+                    ))
                 })?;
             let Some(chunk) = chunk else {
                 return Ok(None);

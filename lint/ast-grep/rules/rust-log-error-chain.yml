@@ -1,0 +1,24 @@
+id: rust-log-error-chain
+language: rust
+severity: error
+message: "`%` logs an error's own message and drops its causes."
+note: Log it as `error = format!("{error:#}")`, which writes an anyhow::Error's whole chain. Make a third-party error that has a source, such as reqwest's or twilight's, an anyhow::Error first.
+rule:
+  any:
+    - kind: identifier
+      regex: "^(error|err|failure)$"
+      follows: { regex: "^%$" }
+      precedes: { regex: "^[,)]$" }
+    - any: [{ kind: identifier }, { kind: self }]
+      follows:
+        regex: "^%$"
+        follows:
+          regex: "^=$"
+          follows: { kind: identifier, regex: "^(error|err)$" }
+  # Matched by its tokens, so that a call inside another macro's tokens,
+  # such as a branch of `tokio::select!`, counts too.
+  inside:
+    kind: token_tree
+    follows:
+      regex: "^!$"
+      follows: { regex: "^(tracing::)?(event|span|(error|warn|info|debug|trace)(_span)?)$" }

@@ -52,13 +52,7 @@ impl fmt::Display for PublishError {
     }
 }
 
-impl std::error::Error for PublishError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::NotPublished(error) | Self::Unsynced(error) => Some(error),
-        }
-    }
-}
+impl std::error::Error for PublishError {}
 
 impl From<PublishError> for std::io::Error {
     fn from(error: PublishError) -> Self {
@@ -131,4 +125,25 @@ fn sync_directory(directory: &Path) -> Result<(), PublishError> {
     fs::File::open(directory)
         .and_then(|directory| directory.sync_all())
         .map_err(PublishError::Unsynced)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{Context as _, Result};
+
+    #[test]
+    fn a_failed_write_names_its_cause_once() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let failure = super::atomic_write(&directory.path().join("missing/file"), b"", 0o600)
+            .err()
+            .context("wrote into a missing directory")?;
+        let shown = format!("{:#}", anyhow::Error::from(failure));
+        assert!(shown.starts_with("not changed: "), "{shown}");
+        assert_eq!(
+            shown.matches("No such file or directory").count(),
+            1,
+            "{shown}"
+        );
+        Ok(())
+    }
 }

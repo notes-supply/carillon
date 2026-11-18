@@ -113,7 +113,11 @@ pub(super) async fn handle_interaction(state: DiscordState, interaction: Discord
         .create_response(interaction.id, &interaction.token, &deferred)
         .await
     {
-        warn!(%error, "Discord interaction acknowledgement failed");
+        let error = anyhow::Error::new(error);
+        warn!(
+            error = format!("{error:#}"),
+            "Discord interaction acknowledgement failed"
+        );
         return;
     }
     // The interaction keeps the settings it is admitted with.
@@ -121,11 +125,17 @@ pub(super) async fn handle_interaction(state: DiscordState, interaction: Discord
     let mut answer = match admit_interaction(&settings, source) {
         Ok(admitted) => match run_interaction(&state, admitted, settings).await {
             Ok(reply) => answer(&reply).unwrap_or_else(|error| {
-                error!(%error, "Discord module reply was unusable");
+                error!(
+                    error = format!("{error:#}"),
+                    "Discord module reply was unusable"
+                );
                 Answer::notice("The command produced an unusable reply.")
             }),
             Err(error) => {
-                error!(%error, "Discord module invocation failed");
+                error!(
+                    error = format!("{error:#}"),
+                    "Discord module invocation failed"
+                );
                 Answer::notice("The command could not be completed.")
             }
         },
@@ -145,14 +155,21 @@ pub(super) async fn handle_interaction(state: DiscordState, interaction: Discord
         {
             Ok(_) => return,
             Err(error) => {
-                if attempt == 0
+                let refused_badges = attempt == 0
                     && matches!(error.kind(), twilight_http::error::ErrorType::Response { status, .. } if status.get() == 400)
-                    && answer.remove_option_emojis()
-                {
-                    warn!(%error, "Discord refused interaction badges; retrying without option emoji");
+                    && answer.remove_option_emojis();
+                let error = anyhow::Error::new(error);
+                if refused_badges {
+                    warn!(
+                        error = format!("{error:#}"),
+                        "Discord refused interaction badges; retrying without option emoji"
+                    );
                     continue;
                 }
-                warn!(%error, "Discord interaction reply failed");
+                warn!(
+                    error = format!("{error:#}"),
+                    "Discord interaction reply failed"
+                );
                 return;
             }
         }

@@ -228,7 +228,10 @@ pub(crate) fn take_record(path: &Path, identity: &Identity) -> Start {
     match remove(path) {
         Ok(()) => {}
         Err(PublishError::Unsynced(error)) => {
-            warn!(error = %error, "the recorded Discord session was removed, but a system crash may bring it back");
+            warn!(
+                error = format!("{error:#}"),
+                "the recorded Discord session was removed, but a system crash may bring it back"
+            );
         }
         Err(error) => return Start::Identify(Gap::NotConsumed(error)),
     }
@@ -453,7 +456,11 @@ impl Gateway {
                         self.observe(&event);
                     }
                     Err(error) => {
-                        warn!(%error, "Discord gateway failed while closing");
+                        let error = anyhow::Error::new(error);
+                        warn!(
+                            error = format!("{error:#}"),
+                            "Discord gateway failed while closing"
+                        );
                         return false;
                     }
                 }
@@ -515,7 +522,10 @@ impl Gateway {
         let bytes = match serde_json::to_vec(&record) {
             Ok(bytes) => bytes,
             Err(error) => {
-                warn!(%error, "the Discord gateway session could not be recorded");
+                warn!(
+                    error = format!("{error:#}"),
+                    "the Discord gateway session could not be recorded"
+                );
                 return;
             }
         };
@@ -525,11 +535,11 @@ impl Gateway {
                 "Discord gateway session recorded for the next start"
             ),
             Err(PublishError::Unsynced(error)) => warn!(
-                %error,
+                error = format!("{error:#}"),
                 "the Discord gateway session was recorded, but a system crash may lose the record"
             ),
             Err(error) => warn!(
-                %error,
+                error = format!("{error:#}"),
                 "the Discord gateway session could not be recorded; the next start begins a new one"
             ),
         }

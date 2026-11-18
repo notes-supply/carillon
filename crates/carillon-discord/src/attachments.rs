@@ -247,7 +247,7 @@ impl Downloads {
         .map_err(|_| late())?
         .map_err(|_| late())?;
         let batch = self.staging.batch().map_err(|error| {
-            warn!(%error, "attachment staging failed");
+            warn!(error = format!("{error:#}"), "attachment staging failed");
             Refusal(
                 "Carillon could not store these attachments for checking, so this message was not accepted."
                     .to_owned(),
@@ -363,7 +363,10 @@ impl Downloads {
         }
         let part = destination.with_extension("part");
         let local = |error: io::Error| {
-            warn!(%error, "attachment staging write failed");
+            warn!(
+                error = format!("{error:#}"),
+                "attachment staging write failed"
+            );
             Failure::Refused(Refusal(
                 "Carillon could not store an attachment for checking, so this message was not accepted."
                     .to_owned(),
@@ -437,7 +440,11 @@ async fn refresh(
             return Err(gone());
         }
         Err(error) => {
-            warn!(%error, "could not look up an expired attachment");
+            let error = anyhow::Error::new(error);
+            warn!(
+                error = format!("{error:#}"),
+                "could not look up an expired attachment"
+            );
             return Err(unavailable());
         }
     };

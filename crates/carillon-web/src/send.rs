@@ -201,7 +201,7 @@ async fn is_command(web: &Web, key: &ConversationKey, text: &str) -> bool {
         Err(failure) => {
             warn!(
                 status = %failure.status,
-                error = %failure.message,
+                error = format!("{failure:#}"),
                 "the runtime's commands could not be read, so a text is sent as a message"
             );
             false

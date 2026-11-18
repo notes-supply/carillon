@@ -480,7 +480,10 @@ impl Writer {
 type NoModule = std::future::Ready<Result<Change, ChangeError>>;
 
 pub(crate) fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
-    error!(error = %failure, "Discord module change refused");
+    error!(
+        error = format!("{failure:#}"),
+        "Discord module change refused"
+    );
     match failure {
         ChangeError::Busy(installation) => (
             StatusCode::CONFLICT,

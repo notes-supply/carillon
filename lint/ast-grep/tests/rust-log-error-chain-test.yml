@@ -1,0 +1,23 @@
+id: rust-log-error-chain
+valid:
+  - 'fn f() { warn!(error = format!("{error:#}"), "the capture is left"); }'
+  - 'fn f() { tracing::error!(error = format!("{failure:#}"), "a request failed"); }'
+  - 'fn f() { warn!(%status, %event_id, "core refused an event"); }'
+  - 'fn f() { info!(capture = %capture.id, "capture kept"); }'
+  - 'fn f() { warn!(error = format!("{:#}", anyhow::Error::new(error)), "a request failed"); }'
+  - 'fn f() { warn!(%status, error, "a turn control was not taken"); }'
+  - 'fn f() { warn!(error = ?error, "a request failed"); }'
+  - 'fn f() { warn!(reason = %failure.message, "a request failed"); }'
+  - 'fn f() { let rest = total % error; }'
+  - 'fn f() { println!("{}", format_args!("{error}")); }'
+invalid:
+  - 'fn f() { warn!(%error, "a request failed"); }'
+  - 'fn f() { warn!(capture = %capture.id, %error, "a capture is left"); }'
+  - 'fn f() { warn!(%err); }'
+  - 'fn f() { error!(error = %failure, "a dispatcher ended"); }'
+  - 'fn f() { error!(error = %failure.message, "core did not answer"); }'
+  - 'fn f() { tracing::warn!(err = %self.last, "a request failed"); }'
+  - 'fn f() { warn!(reason = %failure, "a request failed"); }'
+  - 'fn f() { event!(Level::WARN, %error, "a request failed"); }'
+  - 'fn f() { let span = info_span!("relay", error = %error); }'
+  - 'async fn f() { tokio::select! { Err(error) = stop => { error!(%error, "no handler"); } } }'

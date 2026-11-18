@@ -132,7 +132,7 @@ impl From<anyhow::Error> for ApiError {
         match error.downcast::<CoreError>() {
             Ok(refusal) => refusal.into(),
             Err(error) => {
-                error!(error = %error, "request failed");
+                error!(error = format!("{error:#}"), "request failed");
                 Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
             }
         }
@@ -270,7 +270,10 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     state.core.stop_capturing();
     state.core.captures_settled().await;
     if let Err(error) = supervisor.await {
-        error!(%error, "runtime dispatcher supervisor ended abnormally");
+        error!(
+            error = format!("{error:#}"),
+            "runtime dispatcher supervisor ended abnormally"
+        );
     }
     state.core.storage_settled().await;
     served?;
@@ -436,8 +439,7 @@ async fn relay_runtime_call(request: RequestBuilder) -> Result<Response, ApiErro
         .send()
         .await
         .map_err(|error| {
-            warn!(%error, "relayed call failed to reach the runtime");
-            if error.is_timeout() {
+            let refusal = if error.is_timeout() {
                 ApiError::new(
                     StatusCode::GATEWAY_TIMEOUT,
                     "The runtime did not answer in time.",
@@ -447,21 +449,30 @@ async fn relay_runtime_call(request: RequestBuilder) -> Result<Response, ApiErro
                     StatusCode::SERVICE_UNAVAILABLE,
                     "The runtime is not reachable right now.",
                 )
-            }
+            };
+            let error = anyhow::Error::new(error);
+            warn!(
+                error = format!("{error:#}"),
+                "relayed call failed to reach the runtime"
+            );
+            refusal
         })?;
     let status = response.status();
-    let unusable = |error: &dyn std::fmt::Display| {
-        warn!(%error, %status, "runtime settings, command or control response was not JSON");
+    let unusable = |error: anyhow::Error| {
+        warn!(error = format!("{error:#}"), %status, "runtime settings, command or control response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "The runtime gave an unusable answer.",
         )
     };
-    let body = response.bytes().await.map_err(|error| unusable(&error))?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| unusable(error.into()))?;
     if body.is_empty() {
         return Ok(status.into_response());
     }
-    let body = serde_json::from_slice::<Value>(&body).map_err(|error| unusable(&error))?;
+    let body = serde_json::from_slice::<Value>(&body).map_err(|error| unusable(error.into()))?;
     Ok((status, Json(body)).into_response())
 }
 
@@ -855,7 +866,10 @@ async fn shutdown(core: Core, stopping: CancellationToken) {
                 terminate.recv().await;
             }
             Err(error) => {
-                error!(%error, "failed to install termination signal handler");
+                error!(
+                    error = format!("{error:#}"),
+                    "failed to install termination signal handler"
+                );
                 std::future::pending::<()>().await;
             }
         }
@@ -863,7 +877,7 @@ async fn shutdown(core: Core, stopping: CancellationToken) {
     tokio::select! {
         interrupted = tokio::signal::ctrl_c() => {
             if let Err(error) = interrupted {
-                error!(%error, "failed to install shutdown signal handler");
+                error!(error = format!("{error:#}"), "failed to install shutdown signal handler");
             }
         }
         () = terminated => {}

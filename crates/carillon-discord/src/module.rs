@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::time::{Instant, timeout_at};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_discord_module::contract::{
     CONTRACT, Card, CardRequest, Description, HostReply, HostRequest, Intent, Interaction,
     Invocation, Outcome, Reply,
@@ -301,16 +301,18 @@ async fn submit(
         http.create_message(channel)
             .allowed_mentions(Some(&silent))
             .content(&format!("<@{}> asked to run `{shown}`", origin.user_id))
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
             .model()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(anyhow::Error::from)
     })
     .await
-    .unwrap_or_else(|_| Err("Discord did not answer in time".to_owned()))
+    .unwrap_or_else(|_| Err(anyhow!("Discord did not answer in time")))
     .map_err(|error| {
-        warn!(%error, "command marker message was not confirmed");
+        warn!(
+            error = format!("{error:#}"),
+            "command marker message was not confirmed"
+        );
         "Discord did not confirm the marker message, so the command was not sent to Carillon."
             .to_owned()
     })?;
@@ -334,14 +336,14 @@ async fn submit(
             let failure = match timeout_at(deadline, core.submit_event(&event)).await {
                 Ok(Ok(_)) => return Ok(()),
                 Ok(Err(failure)) if !failure.is_transient() => {
-                    warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
+                    warn!(error = format!("{failure:#}"), event_id = %event.event_id, "core refused a command");
                     return Err((Feedback::Failed, "Carillon could not accept it."));
                 }
                 Ok(Err(failure)) => failure.message,
                 Err(_) => "core did not answer in time".to_owned(),
             };
             if attempt < SUBMIT_ATTEMPTS && Instant::now() + retry < deadline {
-                warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
+                warn!(error = format!("{failure:#}"), event_id = %event.event_id, "waiting to submit a command");
                 attempt += 1;
                 // However the wait ends, a provider stopping by then starts
                 // no other attempt.
@@ -352,7 +354,7 @@ async fn submit(
                     continue;
                 }
             }
-            warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
+            warn!(error = format!("{failure:#}"), event_id = %event.event_id, "command submission unconfirmed");
             return Err((
                 Feedback::Uncertain,
                 "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
@@ -838,7 +840,7 @@ impl Module {
         if let Err(error) = recorded {
             // Discord confirmed the candidate. A record failure cannot undo
             // that mutation or justify keeping the previous module active.
-            warn!(%error, path = %self.files.record.display(), "commands registered but the record could not be saved; registration will be repeated");
+            warn!(error = format!("{error:#}"), path = %self.files.record.display(), "commands registered but the record could not be saved; registration will be repeated");
         }
         info!(
             commands = commands.len(),

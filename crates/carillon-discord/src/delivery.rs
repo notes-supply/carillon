@@ -203,7 +203,7 @@ impl Reactions {
                 create_feedback_reaction(&owned.http, &target, &admitted.processing_emoji).await
             {
                 // Unanswered, Discord may still apply it after the outcome.
-                warn!(error = %failure, %target, "Discord processing reaction failed or was not answered");
+                warn!(error = format!("{failure:#}"), %target, "Discord processing reaction failed or was not answered");
             }
             lock(&owned.unanswered).remove(&target);
             drop(sent);
@@ -311,10 +311,16 @@ impl Reactions {
             if let Err(failure) =
                 delete_feedback_reaction(http, target, &config.processing_emoji).await
             {
-                warn!(error = %failure, "Discord processing reaction removal failed");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "Discord processing reaction removal failed"
+                );
             }
             if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
-                warn!(error = %failure, "Discord terminal reaction failed");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "Discord terminal reaction failed"
+                );
             }
         });
         if shown.await.is_none() {
@@ -438,7 +444,7 @@ impl Controls {
                         may_show.remove(&emoji);
                     }
                     Err(failure) => {
-                        warn!(error = %failure, %target, "Discord control reaction removal failed");
+                        warn!(error = format!("{failure:#}"), %target, "Discord control reaction removal failed");
                         took = false;
                     }
                 }
@@ -446,7 +452,7 @@ impl Controls {
             for emoji in wanted {
                 may_show.insert(emoji.clone());
                 if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
-                    warn!(error = %failure, %target, "Discord control reaction failed");
+                    warn!(error = format!("{failure:#}"), %target, "Discord control reaction failed");
                     took = false;
                 }
             }
@@ -512,7 +518,10 @@ pub(crate) async fn explain(http: &DiscordHttp, source: &str, text: &str) {
     let (channel, message) = match feedback_ids(source) {
         Ok(ids) => ids,
         Err(failure) => {
-            warn!(error = %failure, "Discord explanation target is invalid");
+            warn!(
+                error = format!("{failure:#}"),
+                "Discord explanation target is invalid"
+            );
             return;
         }
     };
@@ -526,7 +535,7 @@ pub(crate) async fn explain(http: &DiscordHttp, source: &str, text: &str) {
     )
     .await
     {
-        warn!(error = %failure, "Discord explanation failed");
+        warn!(error = format!("{failure:#}"), "Discord explanation failed");
     }
 }
 
@@ -539,12 +548,18 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
     let channel = match target.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
-            warn!(error = %failure, "Discord typing target is invalid");
+            warn!(
+                error = format!("{failure:#}"),
+                "Discord typing target is invalid"
+            );
             return;
         }
     };
     if let Err(failure) = bounded(http.create_typing_trigger(channel)).await {
-        warn!(error = %failure, "Discord typing trigger failed");
+        warn!(
+            error = format!("{failure:#}"),
+            "Discord typing trigger failed"
+        );
     }
 }
 
@@ -576,7 +591,10 @@ pub(crate) async fn delivery_loop(
             // without answering is taken up by the next claim or, once the
             // provider stops, recorded as uncertain by the next instance.
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, "waiting to claim Discord delivery");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "waiting to claim Discord delivery"
+                );
                 tokio::select! {
                     reconciled = reconcile_after_claim_failure(&deliveries, &reactions) => reconciled?,
                     () = stopping.cancelled() => break,
@@ -612,7 +630,7 @@ pub(crate) async fn delivery_loop(
                 Ok(()) => break,
                 Err(failure) if failure.is_transient() => {
                     warn!(
-                        error = %failure.message,
+                        error = format!("{failure:#}"),
                         delivery_id = delivery.id,
                         "waiting to acknowledge Discord delivery"
                     );
@@ -645,7 +663,10 @@ async fn reconcile_after_claim_failure(
                 return Ok(());
             }
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "waiting to reconcile Discord delivery claims"
+                );
                 sleep(Duration::from_secs(1)).await;
             }
             Err(failure) => bail!("delivery reconciliation rejected: {}", failure.message),
@@ -668,7 +689,10 @@ async fn attempt_delivery(
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
-            warn!(error = %failure, "invalid Discord delivery target");
+            warn!(
+                error = format!("{failure:#}"),
+                "invalid Discord delivery target"
+            );
             return (DeliveryOutcome::Uncertain, Vec::new(), Feedback::Uncertain);
         }
     };
@@ -684,7 +708,11 @@ async fn attempt_delivery(
             },
         ),
         Err(Unfinished { sent, failure }) => {
-            warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
+            warn!(
+                error = format!("{failure:#}"),
+                delivery_id = delivery.id,
+                "Discord delivery outcome uncertain"
+            );
             (DeliveryOutcome::Uncertain, sent, Feedback::Uncertain)
         }
     }

@@ -198,7 +198,7 @@ async fn a_snapshot_over_its_limit_is_refused_before_it_is_whole() -> Result<()>
 }
 
 #[tokio::test]
-async fn a_lost_connection_is_a_failure_worth_repeating() -> Result<()> {
+async fn a_lost_connection_is_a_failure_worth_repeating_that_names_its_cause() -> Result<()> {
     let (mut observation, feed) = started().await?;
     feed.send(Err(io::Error::other("core was killed")))
         .ok()
@@ -206,7 +206,10 @@ async fn a_lost_connection_is_a_failure_worth_repeating() -> Result<()> {
     let error = observation.next().await.err().context("read on")?;
     assert!(error.is_transient(), "{error:?}");
     assert!(
-        error.message.starts_with("read an observation"),
+        error.message.starts_with("read an observation: ")
+            && error
+                .message
+                .ends_with(": unexpected EOF during chunk size line"),
         "{error:?}"
     );
     assert_eq!(observation.next().await?, None);
@@ -254,6 +257,13 @@ async fn core_refuses_an_observation_with_its_own_status_and_words() -> Result<(
         .err()
         .context("observed")?;
     assert!(error.is_transient(), "{error:?}");
+    assert!(
+        error.message.starts_with("observe core: ")
+            && error
+                .message
+                .ends_with(": Connection refused (os error 111)"),
+        "{error:?}"
+    );
     Ok(())
 }
 

@@ -164,7 +164,10 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         match deliveries.reconcile().await {
             Ok(reconciled) => break reconciled,
             Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
+                warn!(
+                    error = format!("{failure:#}"),
+                    "waiting to reconcile Discord delivery claims"
+                );
                 sleep(Duration::from_millis(250)).await;
             }
             Err(failure) => bail!("delivery reconciliation rejected: {}", failure.message),
@@ -511,7 +514,10 @@ async fn apply_settings(
         }
         Ok(Err(refusal)) => refusal,
         Err(failure) => {
-            error!(error = %failure, "Discord settings apply failed");
+            error!(
+                error = format!("{failure:#}"),
+                "Discord settings apply failed"
+            );
             return Err(InterfaceError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!(
@@ -919,7 +925,10 @@ async fn answered(interactions: &mut JoinSet<()>) {
 
 fn reap(finished: Result<(), JoinError>) {
     if let Err(error) = finished {
-        error!(%error, "a Discord interaction task failed");
+        error!(
+            error = format!("{error:#}"),
+            "a Discord interaction task failed"
+        );
     }
 }
 
