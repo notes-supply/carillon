@@ -1,6 +1,7 @@
 //! The provider process: one router behind one gate, and an ordered stop.
 
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
     pin::pin,
     sync::Arc,
@@ -187,8 +188,10 @@ const SIGN_IN_BODY: usize = r#"{"password":""}"#.len() + 6 * MAX_PASSWORD;
 /// cut off.
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long the provider waits after a failed accept, such as one refused
-/// for want of a descriptor, so the failure is not retried in a busy loop.
+/// How long the provider waits after an accept fails for want of something
+/// of its own, such as a descriptor, so the failure is not retried in a busy
+/// loop. A connection the peer gave up before it was accepted costs nothing,
+/// so the next is accepted at once, as axum's `serve` does.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
 
 /// Serves `web` on `listener` until `asked_to_stop` completes, then closes
@@ -216,21 +219,30 @@ pub(crate) async fn until_stopped(
     loop {
         let next = async {
             let permit = Arc::clone(&connections).acquire_owned().await;
-            let accepted = listener.accept().await;
-            if let Err(error) = &accepted {
-                warn!(
-                    error = format!("{error:#}"),
-                    "accepting a connection failed"
-                );
-                tokio::time::sleep(ACCEPT_RETRY).await;
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => break (permit, stream),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionAborted
+                                | ErrorKind::ConnectionReset
+                                | ErrorKind::ConnectionRefused
+                        ) => {}
+                    Err(error) => {
+                        warn!(
+                            error = format!("{error:#}"),
+                            "accepting a connection failed"
+                        );
+                        tokio::time::sleep(ACCEPT_RETRY).await;
+                    }
+                }
             }
-            (permit, accepted)
         };
         let (permit, stream) = tokio::select! {
-            (permit, accepted) = next => match (permit, accepted) {
-                (Ok(permit), Ok((stream, _))) => (permit, stream),
-                (Err(_), _) => break,
-                (Ok(_), Err(_)) => continue,
+            (permit, stream) = next => match permit {
+                Ok(permit) => (permit, stream),
+                Err(_) => break,
             },
             () = &mut asked_to_stop => break,
         };
