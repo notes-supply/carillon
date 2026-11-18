@@ -17,10 +17,10 @@
     "@earendil-works/pi-mcp": "catalog:",
     "croner": "11.0.0",
     "smol-toml": "catalog:",
-    "typebox": "catalog:",
-    "ws": "catalog:"
+    "typebox": "catalog:"
   },
   "devDependencies": {
-    "@types/ws": "8.18.2"
+    "@types/ws": "8.18.2",
+    "ws": "catalog:"
   }
 }
