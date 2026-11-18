@@ -172,9 +172,10 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
 /// for want of a descriptor, so the failure is not retried in a busy loop.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
 
-/// Serves `web` on `listener` until `asked_to_stop` completes, then lets
-/// the requests in flight be answered for at most [`DRAIN`]. Every stream
-/// ends as soon as its page reads again.
+/// Serves `web` on `listener` until `asked_to_stop` completes, then closes
+/// the listener, so a new connection is refused, and lets the requests in
+/// flight be answered for at most [`DRAIN`]. Every stream ends as soon as its
+/// page reads again.
 ///
 /// A connection is served only while one of [`MAX_CONNECTIONS`] permits is
 /// free, and a stop is heard while the provider waits for one. The provider
@@ -234,6 +235,7 @@ pub(crate) async fn until_stopped(
             let _ = connection.await;
         });
     }
+    drop(listener);
     stopping.cancel();
     tokio::select! {
         () = graceful.shutdown() => Ok(()),
