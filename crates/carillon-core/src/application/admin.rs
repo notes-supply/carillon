@@ -817,7 +817,7 @@ mod tests {
     fn backup_rejects_symlink_and_traversal_destinations_inside_installation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = offline_installation(&root, directory.path())?;
+        let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let mut config = LoadedConfig::load(&config_path)?;
         let inside = root.join("backups");
         fs::create_dir(&inside)?;
@@ -851,7 +851,7 @@ mod tests {
         for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
-            let config_path = offline_installation(&root, directory.path())?;
+            let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
             let external = directory.path().join("external");
             fs::create_dir(&external)?;
             fs::write(external.join("owned-state"), b"must not be omitted")?;
@@ -896,7 +896,7 @@ mod tests {
         for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
-            let config_path = offline_installation(&root, directory.path())?;
+            let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
             let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
             match field {
                 "data_dir" => config.data_dir = root.join("state"),
