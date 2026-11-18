@@ -37,6 +37,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::Semaphore,
 };
+use tokio_io_timeout::TimeoutWriter;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
@@ -174,6 +175,14 @@ const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// password holds a connection. A guess is a few bytes and its check a second.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a connection may wait to write before it is closed, so a peer
+/// that stops reading an answer does not hold it open. It bounds each wait,
+/// not the whole answer. The kernel wakes a waiting writer only once much of
+/// a full socket buffer has drained: a reader taking 10 KB a second kept a
+/// writer waiting 33 s. So only a reader slower than about 5 KB a second is
+/// cut off.
+const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How long the provider waits after a failed accept, such as one refused
 /// for want of a descriptor, so the failure is not retried in a busy loop.
 const ACCEPT_RETRY: Duration = Duration::from_secs(1);
@@ -188,7 +197,8 @@ const ACCEPT_RETRY: Duration = Duration::from_secs(1);
 /// speaks HTTP/1.1, which is what `tailscale serve` forwards to it, and the
 /// timer makes hyper's header-read timeout apply from the first poll, so a
 /// peer that opens a connection and sends no request, or sends one slowly,
-/// loses it rather than holding it open.
+/// loses it rather than holding it open. A peer that stops reading loses it
+/// after [`WRITE_STALL_TIMEOUT`].
 pub(crate) async fn until_stopped(
     listener: TcpListener,
     web: Arc<Web>,
@@ -227,8 +237,10 @@ pub(crate) async fn until_stopped(
             .header_read_timeout(HEADER_READ_TIMEOUT)
             .max_buf_size(READ_BUFFER)
             .max_header_size(READ_BUFFER);
+        let mut stream = TimeoutWriter::new(stream);
+        stream.set_timeout(Some(WRITE_STALL_TIMEOUT));
         let connection = builder.serve_connection(
-            TokioIo::new(stream),
+            TokioIo::new(Box::pin(stream)),
             service_fn(move |request: hyper::Request<Incoming>| {
                 service.clone().oneshot(request.map(Body::new))
             }),
@@ -236,10 +248,10 @@ pub(crate) async fn until_stopped(
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
             let _permit = permit;
-            // A browser that stops reading, or stops sending, holds its
-            // connection open until the graceful shutdown's bound or a
-            // timeout. A message it was sending is not lost: the page sends
-            // it again under the same event ID.
+            // A browser that stops reading, or stops sending, loses its
+            // connection to a timeout or the graceful shutdown's bound. A
+            // message it was sending is not lost: the page sends it again
+            // under the same event ID.
             let _ = connection.await;
         });
     }

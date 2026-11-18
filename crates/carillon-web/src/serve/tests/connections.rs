@@ -287,6 +287,48 @@ async fn a_download_unread_for_60_seconds_of_a_paused_clock_is_cut_off_and_one_u
     Ok(())
 }
 
+#[tokio::test]
+async fn a_stream_its_page_reads_stays_open_through_two_minutes_of_a_paused_clock() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+    let mut page = TcpStream::connect(address).await?;
+    page.write_all(
+        format!(
+            "GET {STREAM} HTTP/1.1\r\nHost: {AUTHORITY}\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await?;
+
+    tokio::time::pause();
+    let opened = Instant::now();
+    let mut read = [0; 4096];
+    while opened.elapsed() < Duration::from_secs(120) {
+        let length = page.read(&mut read).await?;
+        ensure!(
+            length > 0,
+            "the stream closed {:?} after it opened",
+            opened.elapsed()
+        );
+    }
+
+    stop.notify_one();
+    serving.await??;
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_connection_that_never_sends_its_request_is_closed_after_the_header_timeout() -> Result<()>
 {

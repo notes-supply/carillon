@@ -32,6 +32,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net"] }
+tokio-io-timeout = "1.2.1"
 tokio-util = { workspace = true, features = ["io"] }
 toml.workspace = true
 tower = { version = "0.5.2", features = ["util"] }
