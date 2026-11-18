@@ -557,7 +557,9 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     Ok(())
 }
 
-#[tokio::test]
+// Paused, the clock moves only while every task waits on a timer, so the
+// deliveries' bound counts the time they spent waiting, not the machine's.
+#[tokio::test(start_paused = true)]
 async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::Result<()> {
     let delivery = |id: i64| Delivery {
         feedback_target_id: format!("300:{}", 1_000 + id),
@@ -618,7 +620,7 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
     })
     .await
     .context("outcome reactions were not sent")?;
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     assert_eq!(reactions.stop(Duration::from_millis(200)).await, OUTCOMES);
     assert!(started.elapsed() < Duration::from_secs(2));
     tokio::time::sleep(Duration::from_millis(200)).await;
