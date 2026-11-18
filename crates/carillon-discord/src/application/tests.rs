@@ -458,9 +458,9 @@ fn gateway_interactions_map_to_their_source() -> anyhow::Result<()> {
     let base = json!({
         "id": "1",
         "application_id": "2",
+        "attachment_size_limit": 10_485_760,
         "authorizing_integration_owners": {},
         "token": "t",
-        "version": 1,
         "guild_id": "100",
         "member": {
             "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},

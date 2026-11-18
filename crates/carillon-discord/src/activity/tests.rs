@@ -1512,7 +1512,7 @@ async fn a_failed_progress_identity_save_does_not_create_a_second_card_after_res
         now() - 60,
         Some(tools(None, &[("bash", "sleep 15")], &[])),
     );
-    let embed = embed("work");
+    let embed = embed("work")?;
     assert!(matches!(
         cards
             .create_progress("work", Some(Id::new(300)), &embed)
@@ -1643,7 +1643,7 @@ async fn failed_creation_suppression_sends_no_retryable_summary() -> anyhow::Res
         Some(tools(None, &[], &[("bash", "make", true)])),
         None,
     ));
-    let summary = embed("fast");
+    let summary = embed("fast")?;
     cards
         .finish(
             "fast",
@@ -1959,22 +1959,10 @@ async fn progress_stuck_behind_the_limiter_yields_to_the_jobs_end_and_answers() 
 }
 
 /// A card that says `text`, for cases about the card's lifecycle alone.
-fn embed(text: &str) -> twilight_model::channel::message::Embed {
-    twilight_model::channel::message::Embed {
-        author: None,
-        color: None,
-        description: Some(text.to_owned()),
-        fields: Vec::new(),
-        footer: None,
-        image: None,
-        kind: "rich".to_owned(),
-        provider: None,
-        thumbnail: None,
-        timestamp: None,
-        title: None,
-        url: None,
-        video: None,
-    }
+fn embed(text: &str) -> anyhow::Result<twilight_model::channel::message::Embed> {
+    Ok(serde_json::from_value(
+        json!({"type": "rich", "description": text}),
+    )?)
 }
 
 /// What a job's card tasks share, over records in `directory`.
@@ -2146,7 +2134,7 @@ async fn a_stopping_provider_sends_no_waiting_progress_but_finishes_and_awaits_w
         now() - 60,
         Some(tools(None, &[("bash", "make")], &[])),
     );
-    let embed = embed("job");
+    let embed = embed("job")?;
     let (_view, watched) = tokio::sync::watch::channel(super::Known::Read(job));
     let (channel, other) = (Id::new(300), Id::new(301));
     let card = super::Card {

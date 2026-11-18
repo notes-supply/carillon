@@ -30,11 +30,11 @@ tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-twilight-gateway = { version = "0.17.1", default-features = false, features = ["rustls-platform-verifier", "twilight-http", "zlib"] }
-twilight-http = "0.17.1"
+twilight-gateway = { version = "0.18.0", default-features = false, features = ["rustls-platform-verifier", "zlib"] }
+twilight-http = "0.18.0"
 twilight-model.workspace = true
-twilight-util = { version = "0.17.0", features = ["permission-calculator"] }
-twilight-validate = "0.17.0"
+twilight-util = { version = "0.18.0", features = ["permission-calculator"] }
+twilight-validate = "0.18.0"
 unicode-general-category = "1.1.0"
 uuid.workspace = true
 

@@ -14,7 +14,7 @@ serde_json.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 twilight-model.workspace = true
-twilight-validate = "0.17.0"
+twilight-validate = "0.18.0"
 
 # The guest ABI needs `unsafe extern` imports, and the entry points `export!`
 # defines `#[unsafe(no_mangle)]`, which the workspace's `forbid` cannot admit.

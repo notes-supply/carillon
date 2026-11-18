@@ -65,9 +65,9 @@ pub(super) fn settings_command() -> anyhow::Result<twilight_gateway::Event> {
     let command = json!({
         "id": "1",
         "application_id": "2",
+        "attachment_size_limit": 10_485_760,
         "authorizing_integration_owners": {},
         "token": "t",
-        "version": 1,
         "type": 2,
         "guild_id": "100",
         "channel": {"id": "300", "type": 0},
