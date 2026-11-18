@@ -1,0 +1,2 @@
+# Unstable options, so they need the nightly rustfmt.
+imports_granularity = "Crate"

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -44,9 +44,7 @@ async fn core(
         post(move |Json(request): Json<SettingsRequest>| {
             let kept = kept.clone();
             async move {
-                kept.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(request);
+                kept.lock().push(request);
                 tokio::time::sleep(delay).await;
                 Json(serde_json::json!({"settings": []}))
             }
@@ -59,11 +57,7 @@ async fn core(
 }
 
 fn taken(requests: &Mutex<Vec<SettingsRequest>>) -> Vec<SettingsRequest> {
-    std::mem::take(
-        &mut *requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
+    std::mem::take(&mut *requests.lock())
 }
 
 fn until() -> Instant {

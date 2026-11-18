@@ -9,7 +9,7 @@ async fn refused_menu_emoji_is_retried_once_without_changing_the_reply() -> anyh
         (true, StatusCode::INTERNAL_SERVER_ERROR, false, 1),
     ] {
         let directory = tempfile::tempdir()?;
-        let replies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let replies = Arc::new(std::sync::nonpoison::Mutex::new(Vec::<Value>::new()));
         let discord = Router::new()
             .route(
                 "/api/v10/interactions/{id}/{token}/callback",
@@ -20,11 +20,10 @@ async fn refused_menu_emoji_is_retried_once_without_changing_the_reply() -> anyh
                 axum::routing::patch({
                     let replies = replies.clone();
                     move |Json(reply): Json<Value>| {
-                        let attempt = if let Ok(mut replies) = replies.lock() {
+                        let attempt = {
+                            let mut replies = replies.lock();
                             replies.push(reply);
                             replies.len()
-                        } else {
-                            0
                         };
                         async move {
                             if attempt == 1 || !accepts_retry {
@@ -66,9 +65,7 @@ async fn refused_menu_emoji_is_retried_once_without_changing_the_reply() -> anyh
             super::super::answered(&mut interactions),
         )
         .await?;
-        let replies = replies
-            .lock()
-            .map_err(|_| anyhow::anyhow!("reply capture lock"))?;
+        let replies = replies.lock();
         assert_eq!(replies.len(), attempts, "badge={badge}, status={status}");
         let mut expected = reply;
         expected["allowed_mentions"] = json!({"parse": []});

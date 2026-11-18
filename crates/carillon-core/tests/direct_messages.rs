@@ -1,3 +1,4 @@
+#![feature(must_not_suspend)]
 use anyhow::{Context as _, Result};
 use carillon_core::{AgentOptions, Core, CoreOptions, RuntimeProvider, WorkerStep};
 use carillon_installation::config::AttachmentLimits;

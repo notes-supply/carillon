@@ -1,3 +1,4 @@
+#![feature(must_not_suspend)]
 use anyhow::Context as _;
 use axum::{
     Json, Router,

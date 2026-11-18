@@ -1,5 +1,7 @@
 //! Durable conversation operations, independently usable with SQLite.
 //! See `examples/conversation.rs` for an HTTP-free caller.
+#![feature(must_not_suspend, nonpoison_mutex, rename_noreplace, sync_nonpoison)]
+#![cfg_attr(test, feature(default_field_values, unix_mkfifo))]
 mod answers;
 pub mod application;
 mod attachments;

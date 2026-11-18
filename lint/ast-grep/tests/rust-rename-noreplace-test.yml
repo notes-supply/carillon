@@ -1,0 +1,12 @@
+id: rust-rename-noreplace
+valid:
+  - "fn t(a: &Path, b: &Path) -> io::Result<()> { fs::rename_noreplace(a, b) }"
+  - "fn t(a: &Path, b: &Path) -> io::Result<()> { fs::rename(a, b) }"
+  - "fn t(a: &Path, b: &Path) -> rustix::io::Result<()> { renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE) }"
+  - "fn t(a: &Path, b: &Path) -> io::Result<()> { fs::hard_link(a, b) }"
+invalid:
+  - "fn t(a: &Path, b: &Path) -> rustix::io::Result<()> { rustix::fs::renameat_with(CWD, a, CWD, b, RenameFlags::NOREPLACE) }"
+  - "fn t(a: &Path, b: &Path) -> rustix::io::Result<()> { renameat_with(CWD, a, CWD, b, rustix::fs::RenameFlags::NOREPLACE) }"
+  - 'fn t(a: &Path, b: &Path) -> Result<()> { ensure!(renameat_with(CWD, a, CWD, b, RenameFlags::NOREPLACE).is_ok(), "x"); Ok(()) }'
+  - "fn t(a: &Path, b: &Path) -> io::Result<()> { fs::hard_link(a, b)?; fs::remove_file(a) }"
+  - "fn t(a: &Path, b: &Path) -> io::Result<()> { if let Err(e) = fs::hard_link(&a, &b) { let _ = fs::remove_file(&a); return Err(e); } let _ = fs::remove_file(&a); Ok(()) }"

@@ -99,7 +99,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     let directory = tempfile::tempdir()?;
     // Discord takes the acknowledgement and the reply at once.
     let acknowledged = Arc::new(Notify::new());
-    let replies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let replies = Arc::new(std::sync::nonpoison::Mutex::new(Vec::<Value>::new()));
     let discord = Router::new()
         .route(
             "/api/v10/interactions/{id}/{token}/callback",
@@ -116,9 +116,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
             patch({
                 let replies = replies.clone();
                 move |Json(reply): Json<Value>| async move {
-                    if let Ok(mut replies) = replies.lock() {
-                        replies.push(reply);
-                    }
+                    replies.lock().push(reply);
                     Json(json!({}))
                 }
             }),
@@ -168,10 +166,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         .context("the provider returned while an acknowledged interaction was still running")?;
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(10), answering).await?;
-    let replies = replies
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .clone();
+    let replies = replies.lock().clone();
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert_eq!(replies[0]["content"], "settings received");
     assert_eq!(

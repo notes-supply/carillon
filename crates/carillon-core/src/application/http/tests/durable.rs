@@ -2,7 +2,7 @@
 //! turn in order and waits for no answer, a turn it did not take is handed
 //! over again, also after core restarts, and drains wait for none of them.
 
-use std::{collections::VecDeque, fs, path::Path, sync::Mutex};
+use std::{collections::VecDeque, fs, path::Path, sync::nonpoison::Mutex};
 
 use anyhow::Context as _;
 use axum::{body::Body, http::Request};
@@ -12,7 +12,7 @@ use tower::ServiceExt as _;
 
 use super::{
     Fixture, configured, installation,
-    live::{event, lock, ok, operator, submit, submit_event},
+    live::{event, ok, operator, submit, submit_event},
 };
 use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
 use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest, StagedAttachments, StagedFile};
@@ -80,8 +80,9 @@ impl DurableRuntime {
             .route(
                 "/v1/inbox",
                 post(move |Json(request): Json<RuntimeTurnRequest>| {
-                    lock(&handed).push(request);
-                    let answer = lock(&script)
+                    handed.lock().push(request);
+                    let answer = script
+                        .lock()
                         .pop_front()
                         .unwrap_or_else(|| (StatusCode::ACCEPTED, json!({})));
                     async move { (answer.0, Json(answer.1)) }
@@ -92,8 +93,8 @@ impl DurableRuntime {
                 "/v1/turns/{id}/control",
                 post(
                     move |AxumPath(id): AxumPath<String>, Json(body): Json<Value>| {
-                        lock(&controlled).push((id, body));
-                        let (status, body) = lock(&control).clone();
+                        controlled.lock().push((id, body));
+                        let (status, body) = control.lock().clone();
                         async move {
                             if body.is_null() {
                                 status.into_response()
@@ -110,26 +111,28 @@ impl DurableRuntime {
 
     /// Answers the next hand-overs as given, in order.
     pub(super) fn answer(&self, answers: impl IntoIterator<Item = (StatusCode, Value)>) {
-        lock(&self.script).extend(answers);
+        self.script.lock().extend(answers);
     }
 
     /// The inputs of the turns handed over, in order.
     pub(super) fn handed(&self) -> Vec<String> {
-        lock(&self.handed)
+        self.handed
+            .lock()
             .iter()
             .map(|request| request.input.clone())
             .collect()
     }
 
     pub(super) fn request(&self, index: usize) -> Result<RuntimeTurnRequest> {
-        lock(&self.handed)
+        self.handed
+            .lock()
             .get(index)
             .cloned()
             .context("no such hand-over")
     }
 
     pub(super) fn controlled(&self) -> Vec<(String, Value)> {
-        lock(&self.controlled).clone()
+        self.controlled.lock().clone()
     }
 }
 
@@ -553,7 +556,7 @@ async fn context_the_interface_adds_reaches_the_runtime_apart_from_the_persons_w
     }
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
-    assert_eq!(lock(&runtime.handed).len(), 1);
+    assert_eq!(runtime.handed.lock().len(), 1);
     let handed = runtime.request(0)?;
     assert_eq!(handed.input, "");
     assert_eq!(handed.native[NATIVE_CONTEXT], quote);

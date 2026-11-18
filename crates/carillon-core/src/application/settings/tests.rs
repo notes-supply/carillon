@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, nonpoison::Mutex};
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::{
@@ -372,10 +372,6 @@ struct Stub {
 
 type Shared = Arc<Mutex<Stub>>;
 
-fn lock(stub: &Shared) -> std::sync::MutexGuard<'_, Stub> {
-    stub.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn refused(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
 }
@@ -428,7 +424,7 @@ fn stub_router(stub: Shared) -> Router {
             "/v1/channels",
             get(
                 |State(stub): State<Shared>, headers: HeaderMap| async move {
-                    let stub = lock(&stub);
+                    let stub = stub.lock();
                     if !stub.authorized(&headers) {
                         return StatusCode::FORBIDDEN.into_response();
                     }
@@ -442,7 +438,7 @@ fn stub_router(stub: Shared) -> Router {
                 |State(stub): State<Shared>,
                  headers: HeaderMap,
                  AxumPath(channel): AxumPath<String>| async move {
-                    let mut stub = lock(&stub);
+                    let mut stub = stub.lock();
                     if !stub.authorized(&headers) {
                         return StatusCode::FORBIDDEN.into_response();
                     }
@@ -463,7 +459,7 @@ fn stub_router(stub: Shared) -> Router {
                  headers: HeaderMap,
                  AxumPath(channel): AxumPath<String>,
                  Json(change): Json<Change>| async move {
-                    let mut stub = lock(&stub);
+                    let mut stub = stub.lock();
                     if !stub.authorized(&headers) || channel != stub.channel {
                         return StatusCode::FORBIDDEN.into_response();
                     }
@@ -478,7 +474,7 @@ fn stub_router(stub: Shared) -> Router {
                 |State(stub): State<Shared>,
                  headers: HeaderMap,
                  Json(request): Json<SettingsRequest>| async move {
-                    let mut stub = lock(&stub);
+                    let mut stub = stub.lock();
                     if !stub.authorized(&headers) {
                         return StatusCode::FORBIDDEN.into_response();
                     }
@@ -544,7 +540,7 @@ async fn run(config: &LoadedConfig, agent: Option<&str>, arguments: &[&str]) -> 
 }
 
 fn calls(stub: &Shared) -> Vec<serde_json::Value> {
-    std::mem::take(&mut lock(stub).calls)
+    std::mem::take(&mut stub.lock().calls)
 }
 
 #[tokio::test]
@@ -628,7 +624,7 @@ async fn the_first_refusal_stops_the_rest_and_an_unknown_change_is_never_sent() 
         );
     }
     assert_eq!(calls(&stub), Vec::<serde_json::Value>::new());
-    lock(&stub).token = "rotated".to_owned();
+    stub.lock().token = "rotated".to_owned();
     crate::assert_refused(run(&config, None, &["300"]).await, "refused with 403")?;
     served.abort();
     Ok(())

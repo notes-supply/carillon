@@ -16,7 +16,7 @@ use super::{
     durable::{
         DurableRuntime, RUNTIME, add_runtime, delivered, dispatch, durable, settle, state_of,
     },
-    live::{lock, ok, submit},
+    live::{ok, submit},
 };
 use crate::{WorkerStep, application::http::*};
 
@@ -503,7 +503,7 @@ async fn controls_reach_the_runtime_holding_a_running_turn_and_its_answer_comes_
         control(&state, "one", "steer").await?,
         (StatusCode::NO_CONTENT, Value::Null)
     );
-    *lock(&runtime.control) = (
+    *runtime.control.lock() = (
         StatusCode::CONFLICT,
         json!({"error": "That message is already running."}),
     );

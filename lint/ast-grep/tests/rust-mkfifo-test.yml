@@ -1,0 +1,11 @@
+id: rust-mkfifo
+valid:
+  - "fn t(p: &Path) -> io::Result<()> { mkfifo(p, Permissions::from_mode(0o600)) }"
+  - 'fn t() { let _ = Command::new("mknod"); }'
+  - "fn t(p: &Path) -> io::Result<()> { rustix::fs::mknodat(CWD, p, FileType::CharacterDevice, Mode::RUSR, 0) }"
+invalid:
+  - 'fn t(p: &Path) { let _ = std::process::Command::new("mkfifo").arg(p).status(); }'
+  - 'fn t(p: &Path) { let _ = Command::new("mkfifo").arg(p).status(); }'
+  - "fn t(p: &Path) -> io::Result<()> { rustix::fs::mknodat(rustix::fs::CWD, p, rustix::fs::FileType::Fifo, Mode::RUSR, 0) }"
+  - "fn t(p: &Path) -> io::Result<()> { mknodat(CWD, p, FileType::Fifo, Mode::RUSR, 0) }"
+  - 'fn t(p: &Path) -> Result<()> { assert!(std::process::Command::new("mkfifo").arg(p).status()?.success()); Ok(()) }'

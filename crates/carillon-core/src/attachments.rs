@@ -35,7 +35,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{attachment_staging, attachment_store};
 use carillon_protocol::model::{StagedAttachments, TurnAttachment};
-use rustix::fs::{CWD, Mode, OFlags, RenameFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags, ResolveFlags};
 use sha2::{Digest as _, Sha256};
 
 /// The copy buffer: a capture's memory does not grow with its files.
@@ -86,11 +86,11 @@ pub(crate) struct Cancel {
     shutdown: Arc<AtomicBool>,
     /// Tests hold this to stall a copy between chunks, as a slow disk would.
     #[cfg(test)]
-    pub(crate) stall: Arc<std::sync::Mutex<()>>,
+    pub(crate) stall: Arc<std::sync::nonpoison::Mutex<()>>,
     /// Tests hold this to stall a copy that passed its last check while it
     /// publishes, as a slow sync would; `publishing` shows it got there.
     #[cfg(test)]
-    pub(crate) publication: Arc<std::sync::Mutex<()>>,
+    pub(crate) publication: Arc<std::sync::nonpoison::Mutex<()>>,
     #[cfg(test)]
     pub(crate) publishing: Arc<AtomicBool>,
 }
@@ -366,8 +366,7 @@ fn copy_file(
 fn publish(store: &Path, partial: &Path, id: &str) -> Result<(), CaptureError> {
     fs::File::open(partial)?.sync_all()?;
     fs::set_permissions(partial, fs::Permissions::from_mode(0o750))?;
-    rustix::fs::renameat_with(CWD, partial, CWD, store.join(id), RenameFlags::NOREPLACE)
-        .map_err(io::Error::from)?;
+    fs::rename_noreplace(partial, store.join(id))?;
     fs::File::open(store)?.sync_all()?;
     Ok(())
 }

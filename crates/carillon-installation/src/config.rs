@@ -50,34 +50,21 @@ pub struct CoreConfig {
 /// interface submits them. Interfaces apply their own, possibly smaller,
 /// limits before staging; these protect core's storage. Changes apply when
 /// core restarts.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AttachmentLimits {
     /// Files one event may carry; 0 refuses every attachment.
-    pub max_files: u32,
-    pub max_file_mib: u64,
-    pub max_event_mib: u64,
+    pub max_files: u32 = 10,
+    pub max_file_mib: u64 = 1024,
+    pub max_event_mib: u64 = 2048,
     /// Bytes kept by accepted captures together with captures in progress.
     /// New captures are refused beyond it; accepted files are never removed
     /// to make room.
-    pub storage_mib: u64,
+    pub storage_mib: u64 = 10 * 1024,
     /// Space a capture must leave free on the attachment filesystem.
-    pub free_space_mib: u64,
+    pub free_space_mib: u64 = 2048,
     /// Captures copied at once; further submissions are refused as busy.
-    pub concurrent_captures: u32,
-}
-
-impl Default for AttachmentLimits {
-    fn default() -> Self {
-        Self {
-            max_files: 10,
-            max_file_mib: 1024,
-            max_event_mib: 2048,
-            storage_mib: 10 * 1024,
-            free_space_mib: 2048,
-            concurrent_captures: 2,
-        }
-    }
+    pub concurrent_captures: u32 = 2,
 }
 
 /// One MiB, the unit of configured attachment sizes.

@@ -14,7 +14,7 @@ use std::{
     fmt, fs,
     io::{self, Read as _},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 use tokio::time::{Instant, timeout_at};
@@ -787,10 +787,7 @@ impl Module {
     /// Replaces the module in use with the candidate, returning the previous one.
     fn activate(&self, candidate: Generation) -> Arc<Generation> {
         let source = candidate.source.clone();
-        let previous = std::mem::replace(
-            &mut *self.current.lock().unwrap_or_else(PoisonError::into_inner),
-            Arc::new(candidate),
-        );
+        let previous = std::mem::replace(&mut *self.current.lock(), Arc::new(candidate));
         info!(%source, "Discord module activated");
         previous
     }
@@ -850,7 +847,7 @@ impl Module {
     }
 
     fn current(&self) -> Arc<Generation> {
-        Arc::clone(&self.current.lock().unwrap_or_else(PoisonError::into_inner))
+        Arc::clone(&self.current.lock())
     }
 }
 

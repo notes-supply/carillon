@@ -1,6 +1,7 @@
 //! An observation against the real program: an installation `carillon init`
 //! made, served by `carillon core` in a process of its own, read through
 //! the interface client, and stopped as the service manager stops it.
+#![feature(must_not_suspend)]
 
 use std::{
     io::Read as _,

@@ -10,7 +10,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
 };
 
 #[derive(Clone)]
@@ -20,10 +20,14 @@ struct Step {
     status: StatusCode,
     body: Value,
 }
+struct Exchange {
+    pending: VecDeque<Step>,
+    bodies: Vec<Value>,
+    unexpected: Vec<String>,
+}
 struct Mock {
     http: Client,
-    pending: Arc<Mutex<VecDeque<Step>>>,
-    seen: Arc<Mutex<Vec<Value>>>,
+    exchange: Arc<Mutex<Exchange>>,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
     participation: Participation,
     _state: tempfile::TempDir,
@@ -35,11 +39,12 @@ impl Drop for Mock {
 }
 impl Mock {
     async fn new(steps: Vec<Step>) -> anyhow::Result<Self> {
-        let pending = Arc::new(Mutex::new(VecDeque::from(steps)));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let router = Router::new()
-            .fallback(handler)
-            .with_state((pending.clone(), seen.clone()));
+        let exchange = Arc::new(Mutex::new(Exchange {
+            pending: VecDeque::from(steps),
+            bodies: Vec::new(),
+            unexpected: Vec::new(),
+        }));
+        let router = Router::new().fallback(handler).with_state(exchange.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -50,8 +55,7 @@ impl Mock {
         let state = tempfile::tempdir()?;
         Ok(Self {
             http,
-            pending,
-            seen,
+            exchange,
             server,
             participation: Participation::load(state.path().join("participation.json"))?,
             _state: state,
@@ -69,41 +73,35 @@ impl Mock {
             )
             .await)
     }
-    fn bodies(&self) -> anyhow::Result<Vec<Value>> {
-        Ok(self
-            .seen
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned"))?
-            .clone())
+    fn bodies(&self) -> Vec<Value> {
+        self.exchange.lock().bodies.clone()
     }
-    fn finished(&self) -> anyhow::Result<()> {
+    fn finished(&self) {
+        let exchange = self.exchange.lock();
+        assert_eq!(exchange.unexpected, Vec::<String>::new());
         assert!(
-            self.pending
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .is_empty()
+            exchange.pending.is_empty(),
+            "an expected request was never made"
         );
-        Ok(())
     }
 }
-type MockState = (Arc<Mutex<VecDeque<Step>>>, Arc<Mutex<Vec<Value>>>);
 async fn handler(
-    State((pending, seen)): State<MockState>,
+    State(exchange): State<Arc<Mutex<Exchange>>>,
     method: Method,
     uri: Uri,
     body: Bytes,
 ) -> axum::response::Response {
-    let Ok(mut pending) = pending.lock() else {
+    let mut exchange = exchange.lock();
+    let Some(step) = exchange
+        .pending
+        .pop_front_if(|step| step.method == method && uri == step.path)
+    else {
+        exchange.unexpected.push(format!("{method} {uri}"));
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let Some(step) = pending.pop_front() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    assert_eq!(method, step.method);
-    assert_eq!(uri.to_string(), step.path);
-    if let Ok(mut seen) = seen.lock() {
-        seen.push(serde_json::from_slice(&body).unwrap_or(Value::Null));
-    }
+    exchange
+        .bodies
+        .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
     (step.status, axum::Json(step.body)).into_response()
 }
 fn get(path: &'static str, body: Value) -> Step {
@@ -128,8 +126,32 @@ async fn cross_guild_mutation_is_rejected_before_write() -> anyhow::Result<()> {
         .execute(json!({"action":"channels.delete","channel_id":"2"}))
         .await?;
     assert_eq!(result.err().context("should refuse")?.outcome, "rejected");
-    server.finished()?;
-    assert_eq!(server.bodies()?.len(), 1);
+    server.finished();
+    assert_eq!(server.bodies().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_mock_fails_a_test_that_made_a_request_no_step_expects() -> anyhow::Result<()> {
+    let server = Mock::new(Vec::new()).await?;
+    let result = server
+        .execute(json!({"action":"channels.delete","channel_id":"2"}))
+        .await?;
+    result
+        .err()
+        .context("a request no step expects should fail")?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finished()))
+        .err()
+        .context("the mock passed a request no step expected")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_mock_fails_a_test_that_never_made_an_expected_request() -> anyhow::Result<()> {
+    let server = Mock::new(vec![get("/api/v10/channels/2", channel_fixture("1"))]).await?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finished()))
+        .err()
+        .context("the mock passed with an expected request never made")?;
     Ok(())
 }
 
@@ -150,7 +172,8 @@ async fn history_has_an_honest_cursor_and_preserves_string_ids() -> anyhow::Resu
     assert_eq!(result["next_before"], "7");
     assert_eq!(result["may_have_more"], true);
     assert_eq!(result["items"][0]["id"], "7");
-    server.finished()
+    server.finished();
+    Ok(())
 }
 
 /// A message whose attachments, embed and replied-to message carry
@@ -215,7 +238,8 @@ async fn message_reads_withhold_signed_attachment_addresses() -> anyhow::Result<
             "earlier.pdf"
         );
     }
-    server.finished()
+    server.finished();
+    Ok(())
 }
 
 #[tokio::test]
@@ -242,7 +266,7 @@ async fn send_disables_mentions_and_failed_writes_are_not_replayed() -> anyhow::
         let result = server
             .execute(json!({"action":"messages.send","channel_id":"2","content":"@everyone <@3>"}))
             .await?;
-        let bodies = server.bodies()?;
+        let bodies = server.bodies();
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[1]["allowed_mentions"]["parse"], json!([]));
         let mentions: twilight_model::channel::message::AllowedMentions =
@@ -265,7 +289,7 @@ async fn send_disables_mentions_and_failed_writes_are_not_replayed() -> anyhow::
             );
             assert!(!error.message.contains("secret"));
         }
-        server.finished()?;
+        server.finished();
     }
     Ok(())
 }
@@ -285,13 +309,13 @@ async fn permission_edit_uses_one_target_not_the_whole_channel() -> anyhow::Resu
     ])
     .await?;
     server.execute(json!({"action":"channels.overwrite","channel_id":"2","target_id":"4","kind":"role","allow":"1024","deny":"0"})).await??;
-    let bodies = server.bodies()?;
+    let bodies = server.bodies();
     assert_eq!(bodies[2], json!({"type":0,"allow":"1024","deny":"0"}));
-    server.finished()
+    server.finished();
+    Ok(())
 }
 
 #[tokio::test]
-#[expect(clippy::expect_used, reason = "test mutex")]
 async fn project_channel_role_thread_and_member_workflow() -> anyhow::Result<()> {
     let role = json!({"id":"7","name":"project","color":0,"colors":{"primary_color":0},"hoist":false,"position":1,"permissions":"1024","managed":false,"mentionable":false,"flags":0});
     let thread = json!({"id":"8","guild_id":"1","parent_id":"2","type":11,"name":"discussion"});
@@ -360,10 +384,11 @@ async fn project_channel_role_thread_and_member_workflow() -> anyhow::Result<()>
             .await?
             .with_context(|| format!("operation {operation}"))?;
     }
-    let bodies = server.seen.lock().expect("test mutex");
+    let bodies = server.bodies();
     assert_eq!(bodies[2], json!({"topic":"Work"}));
     assert_eq!(bodies[5], json!({"color":42}));
     assert_eq!(bodies[12], json!({"archived":true}));
+    server.finished();
     Ok(())
 }
 
@@ -394,8 +419,8 @@ async fn message_operations_reach_allowlisted_peoples_direct_messages_only() -> 
         .await?
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     assert_eq!(sent["url"], "https://discord.com/channels/@me/9/7");
-    assert_eq!(server.bodies()?[0], json!({"recipient_id":"3"}));
-    server.finished()?;
+    assert_eq!(server.bodies()[0], json!({"recipient_id":"3"}));
+    server.finished();
 
     let server = Mock::new(vec![
         get("/api/v10/channels/9", direct_fixture("3")),
@@ -406,7 +431,7 @@ async fn message_operations_reach_allowlisted_peoples_direct_messages_only() -> 
         .execute(json!({"action":"messages.list","channel_id":"9"}))
         .await?
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    server.finished()?;
+    server.finished();
 
     for (operation, steps) in [
         (
@@ -433,7 +458,7 @@ async fn message_operations_reach_allowlisted_peoples_direct_messages_only() -> 
             .err()
             .with_context(|| format!("{operation} was not refused"))?;
         assert_eq!(refused.outcome, "rejected", "{operation}");
-        server.finished()?;
+        server.finished();
     }
     Ok(())
 }

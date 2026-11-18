@@ -7,7 +7,7 @@ use std::{
     io::{BufReader, BufWriter, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -16,14 +16,15 @@ use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
-use carillon_installation::bundled::Bundled;
-pub(super) use carillon_installation::config::ASSISTANT;
-use carillon_installation::config::{
-    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    attachment_staging, hash_token, new_token, validate_provider_identity,
+use carillon_installation::{
+    bundled::Bundled,
+    config::{
+        ASSISTANT, AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider,
+        ProviderRole, attachment_staging, hash_token, new_token, validate_provider_identity,
+    },
+    filesystem::{atomic_write, sync_ancestors, sync_tree},
+    maintenance::ServiceLock,
 };
-use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
-use carillon_installation::maintenance::ServiceLock;
 
 use crate::{attachments, db::Database};
 
@@ -338,13 +339,10 @@ pub(super) fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         let _ = fs::remove_file(&staging);
         return Err(failure);
     }
-    // Unlike rename, hard_link fails if the destination appeared meanwhile,
-    // so a finished archive can never overwrite an existing file.
-    if let Err(failure) = fs::hard_link(&staging, &destination) {
+    if let Err(failure) = fs::rename_noreplace(&staging, &destination) {
         let _ = fs::remove_file(&staging);
         return Err(failure.into());
     }
-    let _ = fs::remove_file(&staging);
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -405,7 +403,7 @@ pub(super) fn unpack_regular(archive_path: &Path, target: &Path) -> Result<()> {
         if path.is_absolute()
             || path
                 .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+                .any(|component| component == Component::ParentDir)
         {
             bail!("archive contains unsafe path {}", path.display());
         }
@@ -424,9 +422,7 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     for (field, path) in installation_paths(&config) {
         if path.is_empty()
             || path.is_absolute()
-            || path
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || path.components().any(|part| part == Component::ParentDir)
         {
             bail!("backup and restore require {field} to be installation-relative without '..'");
         }
@@ -538,7 +534,7 @@ mod tests {
     use std::{
         fs,
         io::Cursor,
-        os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{FileExt, MetadataExt, PermissionsExt, mkfifo, symlink},
         path::{Path, PathBuf},
     };
 
@@ -731,13 +727,7 @@ mod tests {
             let listener = if socket {
                 Some(std::os::unix::net::UnixListener::bind(&special)?)
             } else {
-                rustix::fs::mknodat(
-                    rustix::fs::CWD,
-                    &special,
-                    rustix::fs::FileType::Fifo,
-                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-                    0,
-                )?;
+                mkfifo(&special, fs::Permissions::from_mode(0o600))?;
                 None
             };
             let failure = backup(&config, &destination)

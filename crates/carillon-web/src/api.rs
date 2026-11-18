@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::DefaultBodyLimit,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     routing::{get, post, put},
 };

@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -48,11 +48,6 @@ struct Core {
 
 type Shared = Arc<Mutex<Core>>;
 
-fn lock(core: &Shared) -> std::sync::MutexGuard<'_, Core> {
-    core.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
     EventReceipt {
         event_id: event_id.to_owned(),
@@ -64,7 +59,7 @@ fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
 
 async fn submit(State(core): State<Shared>, Json(event): Json<ExternalEvent>) -> Response {
     let id = event.event_id;
-    let mut core = lock(&core);
+    let mut core = core.lock();
     *core.submissions.entry(id.clone()).or_default() += 1;
     if core.refused.contains(&id) {
         return (StatusCode::CONFLICT, "refused").into_response();
@@ -78,7 +73,7 @@ async fn submit(State(core): State<Shared>, Json(event): Json<ExternalEvent>) ->
 
 async fn status(State(core): State<Shared>, Path(id): Path<String>) -> Response {
     let (lookup, stalled, held, lost) = {
-        let mut core = lock(&core);
+        let mut core = core.lock();
         let lookup = core.lookups.entry(id.clone()).or_default();
         *lookup += 1;
         let lookup = *lookup;
@@ -190,7 +185,7 @@ async fn a_stop_leaves_unsettled_exactly_what_core_may_still_need_replayed() -> 
     .await?;
     let core = Shared::default();
     {
-        let mut core = lock(&core);
+        let mut core = core.lock();
         core.refused.insert("11".to_owned());
         core.stalled.insert("12".to_owned());
         core.lost.insert("13".to_owned());
@@ -217,7 +212,7 @@ async fn a_stop_leaves_unsettled_exactly_what_core_may_still_need_replayed() -> 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             {
-                let core = lock(&core);
+                let core = core.lock();
                 if core.lookups.contains_key("12")
                     && core.submissions.contains_key("13")
                     && core.submissions.contains_key("16")
@@ -238,13 +233,13 @@ async fn a_stop_leaves_unsettled_exactly_what_core_may_still_need_replayed() -> 
     // lookup and the lost answers, for text and for files, which core would
     // not resolve, and the message still waiting.
     assert_eq!(reported(&mut settlements), BTreeSet::from([10, 11, 15]));
-    assert_eq!(lock(&core).submissions.get("14"), None);
+    assert_eq!(core.lock().submissions.get("14"), None);
     server.abort();
 
     // The next process: Discord replays from the floor. Core's identity
     // resolves the message it accepted, and the others are admitted.
     {
-        let mut core = lock(&core);
+        let mut core = core.lock();
         core.stalled.clear();
         core.lost.clear();
         core.lookups.clear();
@@ -270,7 +265,7 @@ async fn a_stop_leaves_unsettled_exactly_what_core_may_still_need_replayed() -> 
         reported(&mut settlements),
         BTreeSet::from([10, 12, 13, 14, 16])
     );
-    let core = lock(&core);
+    let core = core.lock();
     assert_eq!(
         core.submissions.get("10"),
         Some(&1),

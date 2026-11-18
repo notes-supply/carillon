@@ -93,7 +93,7 @@ async fn a_start_that_fails_before_its_gateway_keeps_the_recorded_session() -> a
 #[tokio::test]
 async fn a_start_marks_what_an_earlier_instance_left_unfinished_uncertain() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let requests = Arc::new(std::sync::nonpoison::Mutex::new(Vec::<String>::new()));
     let recorded = requests.clone();
     let discord = discord_identity()
         .route(
@@ -110,17 +110,15 @@ async fn a_start_marks_what_an_earlier_instance_left_unfinished_uncertain() -> a
                     String,
                     String,
                 )>| async move {
-                    if let Ok(mut requests) = requests.lock() {
-                        requests.push(format!("{method} {channel}:{message} {emoji}"));
-                    }
+                    requests
+                        .lock()
+                        .push(format!("{method} {channel}:{message} {emoji}"));
                     StatusCode::NO_CONTENT
                 }
             }),
         )
         .fallback(move |method: Method, uri: Uri| async move {
-            if let Ok(mut requests) = recorded.lock() {
-                requests.push(format!("{method} {uri}"));
-            }
+            recorded.lock().push(format!("{method} {uri}"));
             StatusCode::NO_CONTENT
         });
     let discord_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -152,11 +150,7 @@ async fn a_start_marks_what_an_earlier_instance_left_unfinished_uncertain() -> a
         None,
         core_client("http://127.0.0.1:1".to_owned())?.deliveries(),
     ));
-    let seen = |request: &str| {
-        requests
-            .lock()
-            .is_ok_and(|requests| requests.iter().any(|seen| seen == request))
-    };
+    let seen = |request: &str| requests.lock().iter().any(|seen| seen == request);
     let shown = tokio::time::timeout(Duration::from_secs(10), async {
         while !seen(&uncertain) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -167,7 +161,7 @@ async fn a_start_marks_what_an_earlier_instance_left_unfinished_uncertain() -> a
     server.abort();
     shown.context("no uncertain reaction was shown")?;
     assert!(seen(&processing), "the processing reaction is removed");
-    let requests = requests.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let requests = requests.lock();
     assert!(
         !requests
             .iter()

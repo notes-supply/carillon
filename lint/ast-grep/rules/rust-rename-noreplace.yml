@@ -1,0 +1,21 @@
+id: rust-rename-noreplace
+language: rust
+severity: error
+message: A rename that refuses to replace its target is std::fs::rename_noreplace.
+note: Write fs::rename_noreplace(from, to), which also covers filesystems without RENAME_NOREPLACE.
+rule:
+  any:
+    - kind: scoped_identifier
+      regex: (^|::)RenameFlags::NOREPLACE$
+    - all:
+        - kind: token_tree
+        - regex: RenameFlags::NOREPLACE
+        - not: { has: { kind: token_tree, regex: RenameFlags::NOREPLACE, stopBy: end } }
+    # Linking the new name and then removing the old one.
+    - all:
+        - pattern: $LINK($FROM, $TO)
+        - has: { field: function, regex: (^|::)hard_link$ }
+        - inside:
+            kind: function_item
+            stopBy: end
+            has: { pattern: $REMOVE($FROM), stopBy: end }

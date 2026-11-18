@@ -2,7 +2,7 @@
 //! page would drive them.
 
 use std::{
-    os::unix::fs::{PermissionsExt as _, symlink},
+    os::unix::fs::{PermissionsExt as _, mkfifo, symlink},
     sync::Arc,
     time::Duration,
 };
@@ -603,10 +603,10 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     };
     std::fs::write(root.join("secret.token"), "operator-secret")?;
     std::fs::create_dir(root.join("release/folder.js"))?;
-    let pipe = std::process::Command::new("mkfifo")
-        .arg(root.join("release/pipe.js"))
-        .status()?;
-    assert!(pipe.success());
+    mkfifo(
+        root.join("release/pipe.js"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
     let custom = root.join("state/components/web/site");
     std::fs::create_dir_all(&custom)?;
     symlink(root.join("release/index.html"), custom.join("index.html"))?;

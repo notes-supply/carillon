@@ -9,7 +9,7 @@ async fn unknown_agents_are_refused_before_attachment_capture() -> Result<()> {
         AttachmentLimits {
             concurrent_captures: 1,
             free_space_mib: 0,
-            ..AttachmentLimits::default()
+            ..
         },
     )?;
     let staged = stage(&state, "unknown", &[("a", b"must not be copied")])?;

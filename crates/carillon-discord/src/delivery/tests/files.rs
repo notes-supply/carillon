@@ -91,13 +91,13 @@ fn uploading_core(
     refused: Option<usize>,
     uploaded: Arc<tokio::sync::Mutex<Uploaded>>,
 ) -> Router {
-    let claims = Arc::new(std::sync::Mutex::new(claims.into_iter()));
+    let claims = Arc::new(std::sync::nonpoison::Mutex::new(claims.into_iter()));
     let (acked, sent, reacted) = (uploaded.clone(), uploaded.clone(), uploaded);
     Router::new()
         .route(
             "/v1/deliveries",
             get(move || {
-                let next = claims.lock().ok().and_then(|mut claims| claims.next());
+                let next = claims.lock().next();
                 async move {
                     match next {
                         Some(Some(delivery)) => Json(Some(delivery)).into_response(),

@@ -1,4 +1,6 @@
 use std::{
+    fs::Permissions,
+    os::unix::fs::{PermissionsExt as _, mkfifo},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -37,12 +39,7 @@ fn only_a_regular_module_file_is_read() -> anyhow::Result<()> {
     assert_eq!(super::read_module(&file)?, b"module");
     assert_eq!(super::read_module(&link)?, b"module");
     let fifo = directory.path().join("fifo.wasm");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()?
-            .success()
-    );
+    mkfifo(&fifo, Permissions::from_mode(0o600))?;
     for path in [
         fifo,
         directory.path().to_owned(),

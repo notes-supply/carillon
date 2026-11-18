@@ -23,7 +23,7 @@ struct SimulatedCore {
     files: Vec<carillon_protocol::model::AnswerFile>,
 }
 
-type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
+type SharedCore = Arc<std::sync::nonpoison::Mutex<SimulatedCore>>;
 
 impl SimulatedCore {
     /// Capture `event` from staging as it is now, and keep it.
@@ -101,9 +101,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
             "/v1/events",
             post(
                 move |State(core): State<SharedCore>, Json(event): Json<ExternalEvent>| async move {
-                    let Ok(mut core) = core.lock() else {
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    };
+                    let mut core = core.lock();
                     if core.lose.as_deref() == Some(event.event_id.as_str()) {
                         core.lose = None;
                         core.capturing.insert(event.event_id.clone(), (1, event));
@@ -122,9 +120,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
             "/v1/events/{event_id}",
             get(
                 move |State(core): State<SharedCore>, AxumPath(event_id): AxumPath<String>| async move {
-                    let Ok(mut core) = core.lock() else {
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    };
+                    let mut core = core.lock();
                     if let Some((lookups, _)) = core.capturing.get_mut(&event_id)
                         && *lookups > 0
                     {
@@ -149,9 +145,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
             get(
                 |State(core): State<SharedCore>,
                  Query(claim): Query<HashMap<String, String>>| async move {
-                    let Ok(mut core) = core.lock() else {
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    };
+                    let mut core = core.lock();
                     Json(core.claim(claim.get("turn_id"))).into_response()
                 },
             ),
@@ -160,9 +154,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
             "/v1/deliveries/{id}/ack",
             post(
                 |State(core): State<SharedCore>, AxumPath(id): AxumPath<i64>| async move {
-                    if let Ok(mut core) = core.lock() {
-                        core.deliveries.retain(|(delivery, _)| delivery.id != id);
-                    }
+                    core.lock().deliveries.retain(|(delivery, _)| delivery.id != id);
                     StatusCode::NO_CONTENT
                 },
             ),
@@ -401,7 +393,7 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
         Downloads::open(staging.clone(), state.settings.current().attachments)?
             .with_fixture_cdn(cdn),
     );
-    let requests = || log.lock().map_or(usize::MAX, |log| log.requests.len());
+    let requests = || log.lock().requests.len();
     let file = attachment(cdn, "601", "a.png", 32);
 
     // Admission comes first: a sender who is not allowed, or a message that
@@ -443,7 +435,7 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["receipt"]["duplicate"], false);
     {
-        let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let core = core.lock();
         let [event] = core.events.as_slice() else {
             anyhow::bail!("expected one accepted event");
         };
@@ -465,23 +457,20 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     assert_eq!(body["receipt"]["duplicate"], true);
     assert_eq!(requests(), fetched);
     // Nor is one core is still capturing: simulation waits for it.
-    let mut replay = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.events[0].clone();
+    let mut replay = core.lock().events[0].clone();
     "5".clone_into(&mut replay.event_id);
-    core.lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .capturing
-        .insert("5".to_owned(), (1, replay));
+    core.lock().capturing.insert("5".to_owned(), (1, replay));
     let (status, body) = simulate(&state, "5", "200", std::slice::from_ref(&file)).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["receipt"]["event_id"], "5");
     assert_eq!(requests(), fetched);
     // When core's answer is lost while it captures, the staged files stay
     // until core settles the submission.
-    core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.lose = Some("6".to_owned());
+    core.lock().lose = Some("6".to_owned());
     let (status, body) = simulate(&state, "6", "200", &[file]).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["receipt"]["event_id"], "6");
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     assert_eq!(
         core.events.last().map(|event| event.event_id.as_str()),
         Some("6")
@@ -503,7 +492,7 @@ async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Res
     // only after the requests stopped waiting: both answers are pending, the
     // abandoned one oldest.
     {
-        let mut core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let mut core = core.lock();
         for id in ["abandoned", "late"] {
             let event = carillon_protocol::model::ExternalEvent {
                 event_id: id.to_owned(),
@@ -540,7 +529,7 @@ async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Res
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["delivery"]["turn_id"], "turn-next");
     // Nobody claimed the abandoned turn's answer.
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     assert!(
         matches!(
             core.deliveries.as_slice(),
@@ -601,7 +590,7 @@ async fn a_reply_or_forward_opens_with_a_quote_of_the_message_it_points_at() -> 
     let (status, body) = simulate_message(&state, &message("5", "", forward)).await?;
     assert_eq!(status, StatusCode::OK, "a bare forward is answered: {body}");
 
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     let contents: Vec<String> = core
         .events
         .iter()
@@ -680,7 +669,7 @@ async fn a_direct_message_opens_with_what_was_sent_its_person_since_their_last_o
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     let contents: Vec<String> = core
         .events
         .iter()
@@ -750,7 +739,7 @@ async fn an_allowlisted_persons_direct_messages_are_one_conversation_with_their_
     let (status, _) = simulate_message(&state, &direct("4", "250")).await?;
     assert_eq!(status, StatusCode::FORBIDDEN, "250 is not allowlisted");
 
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     assert_eq!(core.events.len(), 2);
     for event in &core.events {
         assert_eq!(event.agent_id, "default");
@@ -791,7 +780,7 @@ async fn a_voice_message_reaches_core_as_its_unconverted_audio_file() -> anyhow:
     let (status, body) = simulate(&state, "1", "200", &[voice]).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     let [event] = core.events.as_slice() else {
         anyhow::bail!("expected the voice message to be accepted");
     };
@@ -833,14 +822,13 @@ async fn a_forwarded_file_goes_to_core_and_only_the_answers_file_comes_back() ->
     std::fs::create_dir_all(store.join(kept).parent().context("no capture")?)?;
     std::fs::write(store.join(kept), chart)?;
     let digest = hex::encode(Sha256::digest(chart));
-    core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.files =
-        vec![carillon_protocol::model::AnswerFile {
-            path: kept.to_owned(),
-            name: "chart.png".to_owned(),
-            source: "/home/owner/out/chart.png".to_owned(),
-            size: chart.len().try_into()?,
-            sha256: digest.clone(),
-        }];
+    core.lock().files = vec![carillon_protocol::model::AnswerFile {
+        path: kept.to_owned(),
+        name: "chart.png".to_owned(),
+        source: "/home/owner/out/chart.png".to_owned(),
+        size: chart.len().try_into()?,
+        sha256: digest.clone(),
+    }];
     let forward = json!({
         "event_id": "1", "guild_id": "100", "user_id": "200", "channel_id": "300",
         "content": "",
@@ -856,7 +844,7 @@ async fn a_forwarded_file_goes_to_core_and_only_the_answers_file_comes_back() ->
         json!([{"content": "answer", "files": [["chart.png", digest]]}])
     );
 
-    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let core = core.lock();
     let [event] = core.events.as_slice() else {
         anyhow::bail!("expected the forward to be accepted");
     };

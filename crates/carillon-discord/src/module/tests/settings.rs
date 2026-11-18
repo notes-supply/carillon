@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::nonpoison::Mutex;
 
 use axum::{
     Json,
@@ -111,9 +111,7 @@ fn revision(seed: u64) -> anyhow::Result<Revision> {
 }
 
 async fn answer(State(runtime): State<Shared>, Json(request): Json<SettingsRequest>) -> Response {
-    let Ok(mut runtime) = runtime.lock() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let mut runtime = runtime.lock();
     runtime.requests.push(request.clone());
     if let Some(change) = request.change {
         if let Some((status, error)) = runtime.refusal {
@@ -263,11 +261,7 @@ async fn a_thread_draws_its_channels_page_through_the_host() -> anyhow::Result<(
     let in_thread = invoke(&core, source("401", None), &markers).await?;
     assert_eq!(in_thread.content, HOME);
     assert_eq!(in_thread, in_channel);
-    let requests = runtime
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .requests
-        .clone();
+    let requests = runtime.lock().requests.clone();
     let channel = SettingsRequest {
         subject: Subject::Channel {
             interface_id: "discord".to_owned(),
@@ -295,11 +289,10 @@ async fn a_change_applies_through_core_and_a_stale_card_sends_nothing() -> anyho
     );
     assert!(high.content.starts_with("<#300>\n"));
     control(&high, "reset")?;
-    let lock = || runtime.lock().map_err(|_| anyhow::anyhow!("poisoned"));
-    assert_eq!(lock()?.changes(), 1);
+    assert_eq!(runtime.lock().changes(), 1);
 
     let stale = click(&core, &thinking, "set", "Low").await?;
-    assert_eq!(lock()?.changes(), 1, "a stale card sent a change");
+    assert_eq!(runtime.lock().changes(), 1, "a stale card sent a change");
     assert!(
         stale.content.starts_with("⚠ Changed meanwhile\n<#300>\n"),
         "{}",
@@ -307,18 +300,18 @@ async fn a_change_applies_through_core_and_a_stale_card_sends_nothing() -> anyho
     );
     assert!(stale.content.contains("\nThinking  High\n"));
 
-    lock()?.set("model.thinking", None)?;
+    runtime.lock().set("model.thinking", None)?;
     let raced = click(&core, &stale, "set", "Low").await?;
     assert_eq!(
-        lock()?.changes(),
+        runtime.lock().changes(),
         1,
         "a card raced by another writer sent a change"
     );
     assert!(raced.content.starts_with("⚠ Changed meanwhile\n"));
     let fresh = click(&core, &raced, "set", "Low").await?;
-    lock()?.refusal = Some((StatusCode::CONFLICT, "This setting changed meanwhile."));
+    runtime.lock().refusal = Some((StatusCode::CONFLICT, "This setting changed meanwhile."));
     let refused = click(&core, &fresh, "set", "High").await?;
-    assert_eq!(lock()?.changes(), 3);
+    assert_eq!(runtime.lock().changes(), 3);
     assert!(
         refused.content.starts_with("⚠ Changed meanwhile\n"),
         "a change core finds stale is read again: {}",
@@ -332,10 +325,9 @@ async fn a_change_applies_through_core_and_a_stale_card_sends_nothing() -> anyho
 async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyhow::Result<()> {
     let runtime = Arc::new(Mutex::new(Runtime::new()?));
     let (core, server) = core(&runtime).await?;
-    let lock = || runtime.lock().map_err(|_| anyhow::anyhow!("poisoned"));
     let drawn = invoke(&core, source("401", None), &ActivityMarkers::default()).await?;
     let drawn = click(&core, &drawn, "pick", "Model").await?;
-    lock()?.refusal = Some((
+    runtime.lock().refusal = Some((
         StatusCode::GATEWAY_TIMEOUT,
         "The runtime did not answer in time.",
     ));
@@ -345,7 +337,7 @@ async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyh
         "{}",
         unconfirmed.content
     );
-    let requests = lock()?.requests.clone();
+    let requests = runtime.lock().requests.clone();
     assert_eq!(
         requests
             .iter()
@@ -355,7 +347,7 @@ async fn a_change_core_could_not_confirm_is_read_again_and_not_retried() -> anyh
         "the click reads, changes once, and reads again"
     );
 
-    lock()?.refusal = Some((
+    runtime.lock().refusal = Some((
         StatusCode::UNPROCESSABLE_ENTITY,
         "That model is not offered here.",
     ));
@@ -454,7 +446,6 @@ async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow:
     let reply = click(&client, &drawn, "set", "GPT-6.1 Mini").await?;
     let writes: Vec<bool> = runtime
         .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
         .requests
         .iter()
         .map(|request| request.change.is_some())
@@ -486,9 +477,7 @@ async fn a_runtime_that_goes_out_on_the_change_is_named_once() -> anyhow::Result
                     let down = down.clone();
                     async move {
                         use std::sync::atomic::Ordering;
-                        if let Ok(mut held) = runtime.lock() {
-                            held.requests.push(request.clone());
-                        }
+                        runtime.lock().requests.push(request.clone());
                         if request.change.is_some() {
                             down.store(true, Ordering::SeqCst);
                         }
@@ -499,11 +488,7 @@ async fn a_runtime_that_goes_out_on_the_change_is_named_once() -> anyhow::Result
                             )
                                 .into_response();
                         }
-                        let settings = runtime.lock().map(|held| held.settings.clone());
-                        match settings {
-                            Ok(settings) => Json(settings).into_response(),
-                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                        }
+                        Json(runtime.lock().settings.clone()).into_response()
                     }
                 },
             ),

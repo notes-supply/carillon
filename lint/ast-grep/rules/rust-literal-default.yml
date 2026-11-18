@@ -1,0 +1,28 @@
+id: rust-literal-default
+language: rust
+severity: error
+message: A Default impl that only sets fields to constants repeats what default field values say beside each field.
+note: "Derive Default and write each default on its field, as in `pub max_files: u32 = 10,`."
+utils:
+  constant:
+    any:
+      - kind: integer_literal
+      - kind: float_literal
+      - kind: boolean_literal
+      - kind: char_literal
+      - all:
+          - any: [{ kind: binary_expression }, { kind: unary_expression }, { kind: parenthesized_expression }]
+          - not: { has: { kind: identifier, stopBy: end } }
+          - not: { has: { kind: call_expression, stopBy: end } }
+rule:
+  kind: impl_item
+  pattern: impl Default for $TYPE { fn default() -> Self { Self { $$$FIELDS } } }
+  not:
+    has:
+      stopBy: end
+      any:
+        - kind: shorthand_field_initializer
+        - kind: base_field_initializer
+        - all:
+            - kind: field_initializer
+            - not: { has: { field: value, matches: constant } }

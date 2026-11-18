@@ -1,4 +1,11 @@
 //! Discord components. Importing this library never connects a gateway or starts a server.
+#![feature(
+    default_field_values,
+    must_not_suspend,
+    nonpoison_mutex,
+    sync_nonpoison
+)]
+#![cfg_attr(test, feature(unix_mkfifo))]
 mod activity;
 pub mod application;
 mod attachments;

@@ -3,6 +3,7 @@
 //! filesystem utilities, in-place edits of its TOML files, the loopback HTTP
 //! client and setup's terminal questions. Library construction does not
 //! discover or modify an installation.
+#![feature(default_field_values, must_not_suspend)]
 
 pub mod bundled;
 pub mod config;

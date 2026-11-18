@@ -2,7 +2,7 @@
 use std::{
     collections::BTreeSet,
     fs,
-    os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink},
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _, mkfifo, symlink},
     path::{Path, PathBuf},
 };
 
@@ -173,13 +173,7 @@ fn staged_sources_are_confined_regular_files_of_the_declared_length() -> Result<
     // directories are refused too.
     let fifo = staging(data.path()).join("batch/0");
     fs::remove_file(&fifo)?;
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        &fifo,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )?;
+    mkfifo(&fifo, fs::Permissions::from_mode(0o600))?;
     staged.files[0].size = 0;
     assert!(matches!(
         capture(data.path(), "interface", &staged, &Cancel::default()),

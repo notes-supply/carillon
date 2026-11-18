@@ -140,7 +140,7 @@ fn admitting_server(
     };
     use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
     use std::collections::HashMap;
-    let jobs = Arc::new(std::sync::Mutex::new(HashMap::<
+    let jobs = Arc::new(std::sync::nonpoison::Mutex::new(HashMap::<
         String,
         tokio::sync::watch::Receiver<bool>,
     >::new()));
@@ -169,9 +169,7 @@ fn admitting_server(
             post(move |Json(event): Json<ExternalEvent>| {
                 posts.fetch_add(1, Ordering::SeqCst);
                 let (mut done, first) = {
-                    let mut jobs = jobs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut jobs = jobs.lock();
                     if let Some(job) = jobs.get(&event.event_id) {
                         (job.clone(), false)
                     } else {

@@ -1,4 +1,5 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
+#![feature(must_not_suspend)]
 use anyhow::{Context as _, Result, ensure};
 use carillon_core::{AgentOptions, Core, CoreOptions, RuntimeProvider, Settled, WorkerStep};
 use carillon_installation::config::AttachmentLimits;

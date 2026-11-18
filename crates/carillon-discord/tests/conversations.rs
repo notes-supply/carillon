@@ -1,4 +1,5 @@
 //! External callers use native preparation, not private plans or simulation shortcuts.
+#![feature(must_not_suspend)]
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,

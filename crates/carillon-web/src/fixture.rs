@@ -7,7 +7,10 @@ use std::{
     convert::Infallible,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc,
+        nonpoison::{Mutex, MutexGuard},
+    },
 };
 
 use anyhow::{Context as _, Result};
@@ -45,7 +48,11 @@ use futures_util::{StreamExt as _, stream};
 use serde_json::{Value, json};
 use sse_core::{SseDecoder, SseEvent};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, sync::Notify, sync::watch, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
@@ -125,7 +132,7 @@ impl Drop for Held<'_> {
 
 fn locked(fake: &Fake) -> Held<'_> {
     Held {
-        core: fake.core.lock().unwrap_or_else(PoisonError::into_inner),
+        core: fake.core.lock(),
         changes: &fake.changes,
     }
 }
@@ -179,7 +186,7 @@ async fn observe(State(fake): State<Arc<Fake>>, Query(view): Query<View>) -> Res
         move |(fake, view, mut changes, sent)| async move {
             loop {
                 changes.changed().await.ok()?;
-                let core = fake.core.lock().unwrap_or_else(PoisonError::into_inner);
+                let core = fake.core.lock();
                 if core.stopping {
                     return None;
                 }
@@ -198,12 +205,7 @@ async fn observe(State(fake): State<Arc<Fake>>, Query(view): Query<View>) -> Res
 }
 
 async fn submit(State(fake): State<Arc<Fake>>, Json(event): Json<ExternalEvent>) -> Response {
-    let hold = fake
-        .core
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .hold
-        .clone();
+    let hold = fake.core.lock().hold.clone();
     if let Some(hold) = hold {
         hold.notified().await;
     }
@@ -313,7 +315,7 @@ fn fake(fake: &Arc<Fake>) -> Router {
         next: axum::middleware::Next,
     ) -> Response {
         {
-            let mut core = fake.core.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut core = fake.core.lock();
             core.asked.push(request.uri().to_string());
             if core.away_for_requests > 0 {
                 core.away_for_requests -= 1;
