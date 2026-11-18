@@ -5,8 +5,10 @@
 use std::{collections::VecDeque, fs, path::Path, sync::Mutex};
 
 use anyhow::Context as _;
+use axum::{body::Body, http::Request};
 use carillon_protocol::turns::{Silence, TurnOpening};
 use tempfile::tempdir;
+use tower::ServiceExt as _;
 
 use super::{
     Fixture, configured, installation,
@@ -26,6 +28,22 @@ fn request_limit() -> Result<usize> {
         "../../../../../../packages/protocol/fixtures/turns.json"
     ))?;
     Ok(turns.request_limit)
+}
+
+/// Posts `body` to core's event route as the test interface, through the
+/// route's own limit on what it reads.
+async fn post_event(state: &AppState, body: String) -> Result<Response> {
+    Ok(router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::AUTHORIZATION, "Bearer test-only")
+                .header(PROVIDER_HEADER, "test-interface")
+                .body(Body::from(body))?,
+        )
+        .await?)
 }
 
 /// A durable runtime that keeps every turn core hands it, reading as much of
@@ -443,13 +461,13 @@ async fn the_largest_message_core_accepts_reaches_its_runtime_in_the_longest_cha
     });
     let text = EVENT_BODY_LIMIT - serde_json::to_vec(&largest)?.len();
     largest.content = "x".repeat(text + 1);
-    let refused = submit_event(&state, largest.clone())
-        .await
-        .err()
-        .context("an event a byte over its limit was accepted")?;
-    assert_eq!(refused.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let refused = post_event(&state, serde_json::to_string(&largest)?).await?;
+    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
     largest.content.pop();
-    let accepted = ok(submit_event(&state, largest).await)?;
+    let accepted = post_event(&state, serde_json::to_string(&largest)?).await?;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted: EventReceipt =
+        serde_json::from_slice(&axum::body::to_bytes(accepted.into_body(), usize::MAX).await?)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &accepted.turn_id)?, TurnState::Running);
     let request = runtime.request(1)?;
@@ -462,9 +480,6 @@ async fn the_largest_message_core_accepts_reaches_its_runtime_in_the_longest_cha
 #[tokio::test]
 async fn an_event_over_its_limit_as_core_writes_it_is_refused_before_any_runtime_sees_it()
 -> Result<()> {
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt as _;
-
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
     let (_fixture, state) = durable(directory.path(), &runtime)?;
@@ -475,17 +490,7 @@ async fn an_event_over_its_limit_as_core_writes_it_is_refused_before_any_runtime
         &format!(r#""native":{{"numbers":[{numbers}]}}"#),
     );
     assert!(body.len() <= EVENT_BODY_LIMIT);
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/events")
-                .header(http::header::CONTENT_TYPE, "application/json")
-                .header(http::header::AUTHORIZATION, "Bearer test-only")
-                .header(PROVIDER_HEADER, "test-interface")
-                .body(Body::from(body))?,
-        )
-        .await?;
+    let response = post_event(&state, body).await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(dispatch(&state).await?, WorkerStep::Idle);
     assert!(runtime.handed().is_empty());
