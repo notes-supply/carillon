@@ -8,9 +8,9 @@ pnpm = "12.16.1"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.150"
 "github:EmbarkStudios/cargo-about" = "0.9.3"
 actionlint = "1.7.12"
-ast-grep = "0.51.0"
+ast-grep = "0.51.2"
 shellcheck = "0.11.0"
-zizmor = "1.31.1"
+zizmor = "1.32.0"
 # GNU coreutils 9.5+ for the `mv --exchange` installer updates use; Ubuntu
 # 24.04 has 9.4.
 "conda:coreutils" = { version = "9.12", os = ["linux"] }

@@ -13,11 +13,14 @@ export default defineConfig<object, Options>({
   reporter: "list",
   use: {
     site: join(import.meta.dirname, "..", "dist"),
-    browserName: "chromium",
     headless: true,
     locale: "en-GB",
     timezoneId: "UTC",
     viewport: { width: 1280, height: 800 },
     trace: "retain-on-failure",
   },
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "webkit", use: { browserName: "webkit" } },
+  ],
 });
