@@ -184,7 +184,10 @@ pub(crate) async fn until_stopped(
             let permit = Arc::clone(&connections).acquire_owned().await;
             let accepted = listener.accept().await;
             if let Err(error) = &accepted {
-                warn!(%error, "accepting a connection failed");
+                warn!(
+                    error = format!("{error:#}"),
+                    "accepting a connection failed"
+                );
                 tokio::time::sleep(ACCEPT_RETRY).await;
             }
             (permit, accepted)
