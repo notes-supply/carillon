@@ -253,7 +253,6 @@ async fn an_unread_download(address: SocketAddr) -> Result<TcpStream> {
     Ok(browser)
 }
 
-/// The length of the body after the head of `answer`, which must be 200.
 fn body_length(answer: &[u8]) -> Result<usize> {
     ensure!(
         answer.starts_with(b"HTTP/1.1 200 OK\r\n"),
