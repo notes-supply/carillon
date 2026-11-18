@@ -50,8 +50,9 @@ pub(crate) struct Browser {
     /// The addresses besides `listen` the chat is opened at, from the
     /// provider's settings.
     addresses: Vec<Address>,
-    /// Held across each guess at the password, and for a second more after
-    /// a wrong one, so guesses are made one at a time.
+    /// Held across one guess at the password, and for a second more after a
+    /// wrong one. A guess made while it is held is refused, so a peer's
+    /// guesses never queue ahead of the owner's.
     guessing: Arc<Mutex<()>>,
 }
 
@@ -124,12 +125,21 @@ pub(crate) fn password_file(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("password.hash")
 }
 
+/// The longest password the web chat takes, in bytes. A sign-in's body is
+/// accepted only as far as this password's JSON could reach.
+pub(crate) const MAX_PASSWORD: usize = 4096;
+
 /// Makes `password` the web chat's, which voids every token and file link
 /// made before. The provider's directory is made when it has not started yet.
 pub(crate) fn set_password(file: &Path, password: &str) -> Result<()> {
     let password = password.trim();
     if password.chars().count() < 12 {
         bail!("a password needs 12 characters or more, so the web chat's password is as it was");
+    }
+    if password.len() > MAX_PASSWORD {
+        bail!(
+            "a password is {MAX_PASSWORD} bytes or fewer, so the web chat's password is as it was"
+        );
     }
     let hash: PasswordHash = Argon2::default()
         .hash_password(password.as_bytes())
@@ -275,12 +285,19 @@ impl Browser {
         Ok(())
     }
 
-    /// The browser's token for `password`, when it is the web chat's. The
-    /// guess runs in a task of its own, which keeps the turn to its end, so
-    /// a request dropped midway frees no turn early.
+    /// The browser's token for `password`, when it is the web chat's. One
+    /// guess is checked at a time, each wrong one for a second, and the
+    /// check runs in a task of its own, which keeps the turn to its end, so
+    /// a request dropped midway frees no turn early. A guess made while
+    /// another is being checked is refused at once, not queued.
     pub(crate) async fn sign_in(&self, password: String) -> Result<String, InterfaceError> {
         const WRONG: &str = "That is not the web chat's password.";
-        let turn = Arc::clone(&self.guessing).lock_owned().await;
+        let Ok(turn) = Arc::clone(&self.guessing).try_lock_owned() else {
+            return Err(refusal(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Another sign-in is being checked. Wait a moment, then try again.",
+            ));
+        };
         let file = self.password_file.clone();
         let guess = tokio::spawn(async move {
             let _turn = turn;

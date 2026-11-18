@@ -7,31 +7,26 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail, ensure};
 use axum::{
     body::Body,
     http::{
         Method, Request, StatusCode,
-        header::{AUTHORIZATION, HOST, ORIGIN},
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN},
     },
 };
 use carillon_installation::config::LoadedConfig;
+use futures_util::{FutureExt as _, StreamExt as _, stream};
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use serde_json::json;
 use sha2::Sha256;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-    sync::Notify,
-    time::Instant,
-};
+use tokio::time::Instant;
 
-use super::until_stopped;
 use crate::{
     browser::{Address, addresses, password_file, set_password},
     fixture::{
-        AUTHORITY, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, PASSWORD, TAILNET, bearer, guess,
-        operator, request,
+        AUTHORITY, Answer, Fixture, INTERFACE_TOKEN, OPERATOR_TOKEN, PASSWORD, TAILNET, bearer,
+        guess, operator, request,
     },
 };
 
@@ -287,62 +282,121 @@ async fn the_password_alone_signs_a_browser_in() -> Result<()> {
     Ok(())
 }
 
+/// Drives `wrong` until it holds the slot, which a right guess sent meanwhile
+/// shows by its 429, and returns that answer.
+async fn refused_while_checked(
+    fixture: &Fixture,
+    wrong: &mut (impl Future<Output = Result<Answer>> + Unpin),
+) -> Result<Answer> {
+    for _ in 0..10 {
+        ensure!(
+            (&mut *wrong).now_or_never().is_none(),
+            "a wrong guess was answered before a guess sent meanwhile was refused"
+        );
+        let probe = fixture.send(guess(PASSWORD)?).await?;
+        if probe.status == StatusCode::TOO_MANY_REQUESTS {
+            return Ok(probe);
+        }
+    }
+    bail!("a wrong guess never held the slot against a guess sent meanwhile")
+}
+
 #[tokio::test(start_paused = true)]
-async fn guesses_wait_their_turn_and_a_wrong_one_holds_it_a_second() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
-    let sent = |password: &'static str| {
-        let fixture = Arc::clone(&fixture);
-        tokio::spawn(async move {
-            let answer = fixture.send(guess(password)?).await?;
-            anyhow::Ok((answer.status, Instant::now()))
-        })
-    };
+async fn a_wrong_guess_holds_the_slot_a_second_and_a_guess_meanwhile_is_refused() -> Result<()> {
+    let fixture = Fixture::new().await?;
     let start = Instant::now();
-    let wrong = sent("not the password at all");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let right = sent(PASSWORD);
-    let (wrong, wrong_at) = wrong.await??;
-    let (right, right_at) = right.await??;
-    assert_eq!((wrong, right), (StatusCode::UNAUTHORIZED, StatusCode::OK));
-    assert!(wrong_at - start >= Duration::from_secs(1));
-    assert!(
-        right_at >= wrong_at,
-        "a guess finished during a wrong one's second"
+    let mut wrong = Box::pin(fixture.send(guess("not the password at all")?));
+    let refused = refused_while_checked(&fixture, &mut wrong).await?;
+    assert_eq!(
+        refused.json()?["error"],
+        "Another sign-in is being checked. Wait a moment, then try again."
     );
+    assert_eq!(wrong.await?.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "the cooldown was dropped"
+    );
+    let right = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(right.status, StatusCode::OK);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_guess_is_small() -> Result<()> {
+async fn the_longest_password_signs_in_with_every_byte_escaped_and_a_longer_guess_is_not_read()
+-> Result<()> {
     let fixture = Fixture::new().await?;
-    let long = fixture.send(guess(&"x".repeat(5000))?).await?;
-    assert_eq!(long.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let file = fixture.password_file();
+    let signing_in = |body: Body| {
+        request(Method::POST, "/api/sign-in")
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+    };
+    // JSON writes a control character as `\u0001`, six bytes for one.
+    let longest = "\u{1}".repeat(4096);
+    set_password(&file, &longest)?;
+    let body = json!({ "password": longest }).to_string();
+    assert_eq!(body.len(), 24_591);
+
+    // A body that never ends is answered 413 only if the provider refuses
+    // it as it arrives. Read to its end, it would be answered 408.
+    let longer =
+        stream::iter([Ok::<_, std::io::Error>(format!("{body} "))]).chain(stream::pending());
+    let longer = fixture.send(signing_in(Body::from_stream(longer))?).await?;
+    assert_eq!(longer.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let signed_in = fixture.send(signing_in(Body::from(body))?).await?;
+    assert_eq!(signed_in.status, StatusCode::OK, "{}", signed_in.text());
+    let hash = std::fs::read_to_string(&file)?;
+    // Two bytes a character, so a bound on characters would take it.
+    let refused = set_password(&file, &"é".repeat(2049))
+        .err()
+        .context("a password of 4098 bytes was set")?;
+    assert!(refused.to_string().contains("4096 bytes"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&file)?, hash);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_guess_still_arriving_10_seconds_after_its_headers_is_answered_408() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let start = Instant::now();
+    // A byte a second never leaves the body idle long enough to time out.
+    let body = json!({ "password": PASSWORD }).to_string().into_bytes();
+    let trickle = stream::iter(body).then(|byte| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok::<_, std::io::Error>(vec![byte])
+    });
+    let trickled = fixture
+        .send(
+            request(Method::POST, "/api/sign-in")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from_stream(trickle))?,
+        )
+        .await?;
+    assert_eq!(trickled.status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(start.elapsed().as_secs(), 10, "{:?}", start.elapsed());
     let right = fixture.send(guess(PASSWORD)?).await?;
     assert_eq!(right.status, StatusCode::OK);
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_guess_whose_request_is_dropped_keeps_its_turn() -> Result<()> {
-    let fixture = Arc::new(Fixture::new().await?);
-    // Dropped while the password is checked, then during the wrong guess's second.
-    for dropped_after in [Duration::ZERO, Duration::from_millis(500)] {
-        let start = Instant::now();
-        let dropped = {
-            let fixture = Arc::clone(&fixture);
-            tokio::spawn(async move { fixture.send(guess("not the password at all")?).await })
-        };
-        tokio::task::yield_now().await;
-        tokio::time::sleep(dropped_after).await;
-        dropped.abort();
-        let right = fixture.send(guess(PASSWORD)?).await?;
-        assert_eq!(right.status, StatusCode::OK);
-        assert!(
-            start.elapsed() >= Duration::from_secs(1),
-            "a guess went in {:?} after one dropped {dropped_after:?} in",
-            start.elapsed()
-        );
-    }
+async fn a_dropped_guess_keeps_the_slot_through_its_one_second_cooldown() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let start = Instant::now();
+    let mut dropped = Box::pin(fixture.send(guess("not the password at all")?));
+    refused_while_checked(&fixture, &mut dropped).await?;
+    drop(dropped);
+    let refused = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    // Only time marks the end of a dropped guess's check. The paused clock
+    // stands still while a blocking task hashes the password, so the
+    // cooldown ends one second after `start`.
+    tokio::time::sleep_until(start + Duration::from_millis(999)).await;
+    let late = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(late.status, StatusCode::TOO_MANY_REQUESTS);
+    tokio::time::sleep_until(start + Duration::from_millis(1001)).await;
+    let right = fixture.send(guess(PASSWORD)?).await?;
+    assert_eq!(right.status, StatusCode::OK);
     Ok(())
 }
 
@@ -650,43 +704,4 @@ async fn only_a_file_that_is_itself_in_the_page_s_folder_is_served() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn a_browser_that_holds_its_connection_open_delays_a_stop_by_two_seconds_of_a_paused_clock()
--> Result<()> {
-    let fixture = Fixture::new().await?;
-    let token = fixture.sign_in().await?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let stop = Arc::new(Notify::new());
-    let asked_to_stop = {
-        let stop = Arc::clone(&stop);
-        async move { stop.notified().await }
-    };
-    let serving = tokio::spawn(until_stopped(
-        listener,
-        Arc::clone(&fixture.web),
-        asked_to_stop,
-    ));
-
-    // A message whose upload never comes: the provider says it is ready
-    // for the body, and the browser sends none of it.
-    let mut browser = TcpStream::connect(address).await?;
-    let upload = format!(
-        "PUT /api/conversations/assistant/0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b/messages/\
-         m-0190f3a8-7b1c-7def-8a2b-3c4d5e6f7a8b HTTP/1.1\r\nHost: {AUTHORITY}\r\n\
-         Authorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary=b\r\n\
-         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n"
-    );
-    browser.write_all(upload.as_bytes()).await?;
-    let mut ready = [0; 25];
-    browser.read_exact(&mut ready).await?;
-    assert_eq!(&ready, b"HTTP/1.1 100 Continue\r\n\r\n");
-
-    tokio::time::pause();
-    let told = Instant::now();
-    stop.notify_one();
-    serving.await??;
-    // A timer is a millisecond coarse.
-    assert_eq!(told.elapsed().as_secs(), 2, "{:?}", told.elapsed());
-    Ok(())
-}
+mod connections;

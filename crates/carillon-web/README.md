@@ -38,7 +38,8 @@ carillon web password        # choose the password, which signs every browser ou
 
 `password` asks twice at a terminal. Otherwise it reads one line from
 standard input, so a script or a password manager can pipe it in. Space at
-either end is not part of the password, and it needs 12 characters or more.
+either end is not part of the password, and it needs 12 characters or more
+and 4,096 bytes or fewer.
 It writes the hash and sends the provider no request, so it works whether or
 not the provider runs. Running it again, even with the same password, signs
 every browser out and voids every file link. Both commands take
@@ -99,9 +100,11 @@ loopback, so the provider trusts nothing a browser attaches on its own.
 - A file that holds anything but a whole hash, salt and output included,
   signs no one in. Replace a damaged one with `carillon web password`
   rather than editing it.
-- The provider checks one password at a time, and a wrong one holds the next
-  for a second, so guesses come at about one a second, all browsers
-  together. A guess keeps its turn when its request is dropped.
+- The provider checks one password at a time, and a wrong one holds the
+  check for a second more, so guesses come at about one a second, all
+  browsers together. A guess is answered 429 at once, unchecked, if another is still being checked when the provider comes to check it, once its body is read. A guess keeps the check
+  when its request is dropped. A guess not sent whole and checked 10 s after
+  its headers is answered 408.
 - Every `/api` request carries `Authorization: Bearer <token>`. No cookie
   carries authority.
 - `Host` must be the address the provider listens on or one in
@@ -109,6 +112,7 @@ loopback, so the provider trusts nothing a browser attaches on its own.
   another name and is refused.
 - An `Origin` other than one of those addresses is 403, a preflight's
   included. No answer has a CORS header.
+- A request's line and headers must fit in 64 KiB, or the answer is 431.
 - The page runs under a content security policy that allows only its own
   scripts, styles, images and fonts.
 - The token and every file link are HMACs of the hash's text. A new

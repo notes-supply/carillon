@@ -1,7 +1,9 @@
 //! The provider process: one router behind one gate, and an ordered stop.
 
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
+    pin::pin,
     sync::Arc,
     time::Duration,
 };
@@ -9,6 +11,7 @@ use std::{
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Request, State},
     http::{
         HeaderName, HeaderValue, StatusCode,
@@ -25,16 +28,25 @@ use carillon_interface::{
     CoreClient, InterfaceError, Staging, Started, authorize_operator, bearer, start,
 };
 use carillon_protocol::{model::Health, settings::Page};
+use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    server::graceful::GracefulShutdown,
+};
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
+    sync::Semaphore,
 };
+use tokio_io_timeout::TimeoutWriter;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
+use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
 use tracing::{info, warn};
 
 use crate::{
     api,
-    browser::{self, Browser, Key, refusal},
+    browser::{self, Browser, Key, MAX_PASSWORD, refusal},
     files,
     site::{self, Site},
 };
@@ -135,38 +147,144 @@ pub(crate) async fn serve(
 /// is told to stop.
 const DRAIN: Duration = Duration::from_secs(2);
 
-/// Serves `web` on `listener` until `asked_to_stop` completes, then lets
-/// the requests in flight be answered for at most [`DRAIN`]. Every stream
-/// ends as soon as its page reads again.
+/// The most connections the provider serves at once. A peer cannot take
+/// every descriptor and shut the owner out, and the provider keeps
+/// descriptors free for core and for staged files. This is far more than a
+/// person opens.
+const MAX_CONNECTIONS: usize = 512;
+
+/// How much of a connection hyper buffers. A request's line and headers must
+/// fit in it, and a body is read in frames that fit in what the buffer grows
+/// to, under twice this, which bounds how far the provider reads past a
+/// multipart window.
+const READ_BUFFER: usize = 64 * 1024;
+
+/// How long a connection has to send a request's line and headers before it
+/// is closed, so a peer that opens one and sends nothing, or sends it a byte
+/// at a time, does not hold it open.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a request's body may send nothing before the request fails and
+/// its connection closes, so a peer that sends a request's headers and then
+/// nothing does not hold the connection open. It bounds each pause, not the
+/// whole body: an upload from a phone on a weak network pauses and goes on.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a sign-in has, once its headers are read, to arrive whole and be
+/// checked. Anyone who can reach the provider can send one, and a body sent a
+/// byte at a time is never idle, so this bounds how long a peer without the
+/// password holds a connection. A guess is a few bytes and its check a second.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most of a sign-in's body the provider accepts: the longest password's
+/// JSON with every byte escaped in six, as a control character is.
+const SIGN_IN_BODY: usize = r#"{"password":""}"#.len() + 6 * MAX_PASSWORD;
+
+/// How long a connection may wait to write before it is closed, so a peer
+/// that stops reading an answer does not hold it open. It bounds each wait,
+/// not the whole answer. The kernel wakes a waiting writer only once much of
+/// a full socket buffer has drained, so a slow reader that keeps reading can
+/// keep a write waiting for tens of seconds.
+const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long the provider waits after an accept fails for want of something
+/// of its own, such as a descriptor, so the failure is not retried in a busy
+/// loop. A connection the peer gave up before it was accepted costs nothing,
+/// so the next is accepted at once, as axum's `serve` does.
+const ACCEPT_RETRY: Duration = Duration::from_secs(1);
+
+/// Serves `web` on `listener` until `asked_to_stop` completes, then closes
+/// the listener, so a new connection is refused, and lets the requests in
+/// flight be answered for at most [`DRAIN`]. Every stream ends as soon as its
+/// page reads again.
+///
+/// A connection is served only while one of [`MAX_CONNECTIONS`] permits is
+/// free, and a stop is heard while the provider waits for one. The provider
+/// speaks HTTP/1.1, which is what `tailscale serve` forwards to it, and the
+/// timer makes hyper's header-read timeout apply from the first poll, so a
+/// peer that opens a connection and sends no request, or sends one slowly,
+/// loses it rather than holding it open. A peer that stops reading loses it
+/// after [`WRITE_STALL_TIMEOUT`].
 pub(crate) async fn until_stopped(
     listener: TcpListener,
     web: Arc<Web>,
     asked_to_stop: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let stopping = web.stopping.clone();
-    let stopped = stopping.clone();
-    let graceful = axum::serve(listener, router(web)).with_graceful_shutdown(async move {
-        asked_to_stop.await;
-        stopping.cancel();
-    });
+    let service = router(web);
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let graceful = GracefulShutdown::new();
+    let mut asked_to_stop = pin!(asked_to_stop);
+    loop {
+        let next = async {
+            let permit = Arc::clone(&connections).acquire_owned().await;
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => break (permit, stream),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionAborted
+                                | ErrorKind::ConnectionReset
+                                | ErrorKind::ConnectionRefused
+                        ) => {}
+                    Err(error) => {
+                        warn!(
+                            error = format!("{error:#}"),
+                            "accepting a connection failed"
+                        );
+                        tokio::time::sleep(ACCEPT_RETRY).await;
+                    }
+                }
+            }
+        };
+        let (permit, stream) = tokio::select! {
+            (permit, stream) = next => match permit {
+                Ok(permit) => (permit, stream),
+                Err(_) => break,
+            },
+            () = &mut asked_to_stop => break,
+        };
+        let service = service.clone();
+        let mut builder = http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .max_buf_size(READ_BUFFER)
+            .max_header_size(READ_BUFFER);
+        let mut stream = TimeoutWriter::new(stream);
+        stream.set_timeout(Some(WRITE_STALL_TIMEOUT));
+        let connection = builder.serve_connection(
+            TokioIo::new(Box::pin(stream)),
+            service_fn(move |request: hyper::Request<Incoming>| {
+                service.clone().oneshot(request.map(Body::new))
+            }),
+        );
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _permit = permit;
+            // A browser that stops reading, or stops sending, loses its
+            // connection to a timeout or the graceful shutdown's bound. A
+            // message it was sending is not lost: the page sends it again
+            // under the same event ID.
+            let _ = connection.await;
+        });
+    }
+    drop(listener);
+    stopping.cancel();
     tokio::select! {
-        served = graceful => served,
-        // A browser that stops reading, or stops sending, holds its
-        // connection open, and with it the graceful shutdown, for as long
-        // as it likes. Past the bound it is left to the end of the process.
-        // A message it was sending is not lost: the page sends it again
-        // under the same event ID.
-        () = async { stopped.cancelled().await; tokio::time::sleep(DRAIN).await } => {
+        () = graceful.shutdown() => Ok(()),
+        () = tokio::time::sleep(DRAIN) => {
             warn!("connections were still open {DRAIN:?} after the provider was told to stop");
             Ok(())
         }
     }
 }
 
-/// Every route. The gate wraps them all, the fallback included, so a route
-/// added here cannot be reached around it. A route added under `/api` needs
-/// the browser's token and one under `/v1` the operator's credential,
-/// whether or not it remembers to ask.
+/// Every route. The gate and [`BODY_IDLE_TIMEOUT`] wrap them all, the
+/// fallback included, so a route added here cannot be reached around them. A
+/// route added under `/api` needs the browser's token and one under `/v1` the
+/// operator's credential, whether or not it remembers to ask.
 pub(crate) fn router(web: Arc<Web>) -> Router {
     // Each has a fallback of its own, inside its layer: a path that is no
     // route is refused like one that is, and never reaches the page's files.
@@ -181,16 +299,22 @@ pub(crate) fn router(web: Arc<Web>) -> Router {
         .layer(from_fn_with_state(Arc::clone(&web), operator_only));
     Router::new()
         .route("/health", get(health))
-        // A guess waits its turn holding its body, so a body is kept small.
+        // Anyone who can reach the provider can send a guess, and a guess is
+        // read whole before it is checked, so its body is kept small and its
+        // time short.
         .route(
             "/api/sign-in",
-            post(api::sign_in).layer(DefaultBodyLimit::max(4096)),
+            post(api::sign_in).layer((
+                DefaultBodyLimit::max(SIGN_IN_BODY),
+                TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, SIGN_IN_TIMEOUT),
+            )),
         )
         .nest("/api", api)
         .nest("/v1", operator)
         .route("/files/{*path}", get(files::file))
         .fallback(site::file)
         .layer(from_fn_with_state(Arc::clone(&web), gate))
+        .layer(RequestBodyTimeoutLayer::new(BODY_IDLE_TIMEOUT))
         .with_state(web)
 }
 

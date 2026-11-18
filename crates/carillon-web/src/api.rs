@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -42,10 +42,11 @@ pub(crate) fn from_core(failure: InterfaceError) -> InterfaceError {
 pub(crate) fn routes() -> Router<Arc<Web>> {
     Router::new()
         .route("/stream", get(stream::stream))
-        // A message's files are bounded part by part as they are staged.
+        // A message's files are bounded part by part as they are staged, and
+        // what it holds between parts is bounded as the body is read.
         .route(
             "/conversations/{agent_id}/{audience_id}/messages/{event_id}",
-            put(send::send).layer(DefaultBodyLimit::disable()),
+            put(send::send),
         )
         .route(
             "/conversations/{agent_id}/{audience_id}/commands",

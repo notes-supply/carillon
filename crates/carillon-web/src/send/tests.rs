@@ -2,20 +2,25 @@
 //! page is told when a message cannot be taken.
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
 use carillon_protocol::model::{ExternalEvent, StagedAttachments, StagedFile};
+use futures_util::{StreamExt as _, stream};
 use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
 
+use super::bound::REFUSED_DRAIN;
 use crate::{
     api::AWAY,
     fixture::{Answer, Fixture, bearer},
@@ -660,5 +665,249 @@ async fn a_refused_message_is_read_to_its_end_before_it_is_answered() -> Result<
         assert_eq!(staged(&fixture)?, 0, "{said}");
     }
     assert!(!submitted(&fixture), "a refused message reached core");
+    Ok(())
+}
+
+#[tokio::test]
+async fn bytes_between_parts_past_the_bound_are_refused_without_holding_them_whole() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let flood = "A".repeat(256 * 1024);
+    let text =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nhello\r\n");
+    // None of these reaches the end the parser looks for: a boundary, a
+    // header's blank line, or the line end after a boundary. Nothing but the
+    // bound stops the parser reading all of it.
+    for (body, said) in [
+        (flood.clone(), "a preamble"),
+        (
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{flood}"
+            ),
+            "a first part's header",
+        ),
+        (
+            format!("{text}--{BOUNDARY}\r\nX-Pad: {flood}"),
+            "a header after a part's data",
+        ),
+        (
+            format!("{text}--{BOUNDARY}{}", " ".repeat(flood.len())),
+            "padding after a boundary",
+        ),
+    ] {
+        let body = Bytes::from(body);
+        let length = body.len();
+        let read = Arc::new(AtomicUsize::new(0));
+        // Each frame waits a turn, as hyper's wait for the socket, so the
+        // parser parses between frames rather than taking every one at once.
+        let frames = {
+            let read = Arc::clone(&read);
+            stream::iter((0..length).step_by(1024)).then(move |at| {
+                let frame = body.slice(at..length.min(at + 1024));
+                let read = Arc::clone(&read);
+                async move {
+                    tokio::task::yield_now().await;
+                    read.fetch_add(frame.len(), Relaxed);
+                    Ok::<_, std::io::Error>(frame)
+                }
+            })
+        };
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(frames))?;
+        let answer = fixture.send(request).await?;
+        let read = read.load(Relaxed);
+        assert!(
+            read < length,
+            "{said}: the provider read all {length} bytes"
+        );
+        assert_eq!(
+            answer.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{said}: {}",
+            answer.text()
+        );
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message's parts are larger than the web chat reads."}),
+            "{said}"
+        );
+        assert_eq!(staged(&fixture)?, 0, "{said}");
+    }
+    assert!(fixture.core().asked.is_empty(), "core was asked");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_first_part_s_headers_may_end_64_kib_into_the_body_and_not_a_byte_later() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let hello = form(&[Part::Text("hello")]);
+    let head =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\n").len();
+    // The window counts from the body's first byte, so a preamble sets where
+    // the first part's headers end.
+    for (past, status) in [(0, StatusCode::OK), (1, StatusCode::PAYLOAD_TOO_LARGE)] {
+        let mut body = vec![b'p'; 64 * 1024 - head + past];
+        body.extend_from_slice(&hello);
+        let answer = fixture
+            .send(message(&token, &path("assistant", EVENT), body)?)
+            .await?;
+        assert_eq!(answer.status, status, "{past} past: {}", answer.text());
+    }
+    let core = fixture.core();
+    let [(event, _)] = core.events.as_slice() else {
+        anyhow::bail!("expected one event, not {}", core.events.len());
+    };
+    assert_eq!(event.content, "hello");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_body_that_ends_with_the_window_partway_through_a_part_s_headers_did_not_arrive_whole()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let mut window =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"text\"\r\nX-Pad: ")
+            .into_bytes();
+    window.resize(64 * 1024, b'p');
+    // The window fills the first frame, so what comes past it comes in a
+    // second: a byte, or a read that failed.
+    let failed = || Err(std::io::Error::other("the browser went away"));
+    for (frames, status, past) in [
+        (vec![Ok(window.clone())], StatusCode::BAD_REQUEST, "the end"),
+        (
+            vec![Ok(window.clone()), Ok(b"p".to_vec())],
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a byte",
+        ),
+        (
+            vec![Ok(window.clone()), failed()],
+            StatusCode::BAD_REQUEST,
+            "a failed read",
+        ),
+    ] {
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(stream::iter(frames)))?;
+        let answer = fixture.send(request).await?;
+        assert_eq!(answer.status, status, "{past}: {}", answer.text());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    // An unknown first part refuses the message. The rest carries four drains'
+    // worth, in one large part or in many empty parts whose headers each stay
+    // within the between-parts bound.
+    let mut large = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"big.bin\"\r\n\r\n"
+    )
+    .into_bytes();
+    large.resize(large.len() + REFUSED_DRAIN * 4, b'r');
+    large.extend_from_slice(b"\r\n");
+    let empty = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\nX-Pad: {}\r\n\r\n\r\n",
+        "p".repeat(8000)
+    );
+    let empties = empty.repeat(REFUSED_DRAIN * 4 / empty.len()).into_bytes();
+    let refused =
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"native\"\r\n\r\n");
+    for (rest, said) in [(large, "one large part"), (empties, "many empty parts")] {
+        let mut body = b"hi\r\n".to_vec();
+        body.extend_from_slice(&rest);
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        // The first frame ends with the refused part's headers, and the rest
+        // comes a kibibyte at a time once the parser has parsed them, so the
+        // drain counts from the refusal and every frame read is small.
+        let body = Bytes::from(body);
+        let frames = std::iter::once(Bytes::from(refused.clone())).chain(
+            (0..body.len())
+                .step_by(1024)
+                .map(move |at| body.slice(at..body.len().min(at + 1024))),
+        );
+        let read = Arc::new(AtomicUsize::new(0));
+        let counted = {
+            let read = Arc::clone(&read);
+            stream::iter(frames.enumerate()).then(move |(index, frame)| {
+                let read = Arc::clone(&read);
+                async move {
+                    if index == 1 {
+                        tokio::task::yield_now().await;
+                    }
+                    read.fetch_add(frame.len(), Relaxed);
+                    Ok::<_, std::io::Error>(frame)
+                }
+            })
+        };
+        let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from_stream(counted))?;
+        let answer = fixture.send(request).await?;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{said}");
+        assert_eq!(
+            answer.json()?,
+            json!({"error": "A message's parts are `text` and `file`."}),
+            "{said}"
+        );
+        // The body reads one frame past the drain, to see whether it ended.
+        let drained = read.load(Relaxed) - refused.len();
+        assert!(
+            drained <= 2 * MIB + 1024,
+            "{said}: the provider read {drained} bytes past a refusal"
+        );
+    }
+    assert!(
+        fixture.core().events.is_empty(),
+        "a refused message reached core"
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_that_pauses_29_seconds_between_pieces_is_taken_whole() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let file: Vec<u8> = (0..=u8::MAX).cycle().take(8192).collect();
+    let body = form(&[Part::Text("slow"), Part::File("slow.bin", None, &file)]);
+    let pieces: Vec<_> = body
+        .chunks(body.len().div_ceil(3))
+        .map(<[u8]>::to_vec)
+        .collect();
+    let slow = stream::iter(pieces).then(|piece| async move {
+        tokio::time::sleep(Duration::from_secs(29)).await;
+        Ok::<_, std::io::Error>(piece)
+    });
+    let start = tokio::time::Instant::now();
+    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from_stream(slow))?;
+    let sent = fixture.send(request).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(start.elapsed(), Duration::from_secs(3 * 29));
+    let core = fixture.core();
+    let [(event, staged)] = core.events.as_slice() else {
+        anyhow::bail!("expected one event, not {}", core.events.len());
+    };
+    assert_eq!(event.content, "slow");
+    assert_eq!(staged, &[file]);
     Ok(())
 }

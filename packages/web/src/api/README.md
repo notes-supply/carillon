@@ -66,16 +66,18 @@ A `FileLink` is `{ name, size, type, url }`. `type` is `image/png`, `image/jpeg`
 
 ## The requests
 
-| Request                         | Body                                                                          | Answers                                            |
-| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
-| `POST /api/sign-in`             | `signInBody(password)`                                                        | 200 `SignedInSchema`, 401 with the reason          |
-| `GET streamPath(view)`          |                                                                               | 200 event stream, 400, 401                         |
-| `PUT messagePath(key, eventId)` | `messageForm(text, files)`: one `text` part, then a `file` part for each file | 200, 400, 413, 422, 503, 507                       |
-| `POST controlPath(message)`     | `controlBody(action)`                                                         | 204, 404, 409, 503                                 |
-| `GET commandsPath(key)`         |                                                                               | 200 `CommandCatalogSchema`, 422, 503               |
-| `GET <FileLink.url>`            |                                                                               | The file's bytes, 403 for a link that is void, 404 |
+| Request                         | Body                                                                          | Answers                                                  |
+| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `POST /api/sign-in`             | `signInBody(password)`                                                        | 200 `SignedInSchema`, 401 with the reason, 408, 413, 429 |
+| `GET streamPath(view)`          |                                                                               | 200 event stream, 400, 401                               |
+| `PUT messagePath(key, eventId)` | `messageForm(text, files)`: one `text` part, then a `file` part for each file | 200, 400, 413, 422, 503, 507                             |
+| `POST controlPath(message)`     | `controlBody(action)`                                                         | 204, 404, 409, 503                                       |
+| `GET commandsPath(key)`         |                                                                               | 200 `CommandCatalogSchema`, 422, 503                     |
+| `GET <FileLink.url>`            |                                                                               | The file's bytes, 403 for a link that is void, 404       |
 
 Every request but the sign-in and a file link carries `Authorization: bearer(token)`. A JSON body goes with `Content-Type: application/json`, and the provider answers 415 to one without it.
+
+The provider checks one sign-in at a time, and a wrong password keeps the check a second longer. A sign-in is answered 429 at once, unchecked, if another is still being checked when the provider comes to check it, once its body is read. A sign-in that has not arrived and been checked 10 s after its headers is answered 408. The provider accepts at most 24,591 bytes of a sign-in's body. That is the JSON of the longest password, 4,096 bytes, with every byte escaped. It counts the bytes that arrive, not `Content-Length`, and answers 413 once they pass that, without waiting for the body to end and without checking the password.
 
 - `mintEventId()` names a message before its first attempt. Every retry sends the same ID, and core takes a repeat as the first message, so a retry never makes a second turn. A 2xx is the message's receipt, and the page does not read its body.
 - `mintAudienceId()` names a new conversation.
