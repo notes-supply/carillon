@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -46,7 +46,7 @@ pub(crate) fn routes() -> Router<Arc<Web>> {
         // what it holds between parts is bounded as the body is read.
         .route(
             "/conversations/{agent_id}/{audience_id}/messages/{event_id}",
-            put(send::send).layer(DefaultBodyLimit::disable()),
+            put(send::send),
         )
         .route(
             "/conversations/{agent_id}/{audience_id}/commands",
