@@ -1,5 +1,6 @@
 //! The wire shape of an observation: snapshots round-trip unchanged, a view
 //! travels as a query string, and what neither may say is refused.
+#![feature(must_not_suspend)]
 use anyhow::{Context as _, Result, ensure};
 use carillon_protocol::observation::{
     ConversationKey, InvalidView, Limit, ObservedTurn, OpenView, Opened, Snapshot, View,

@@ -28,8 +28,9 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        nonpoison::Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -155,7 +156,7 @@ impl Substitute {
                     };
                 }
                 if uri.path() == "/v1/deliveries" {
-                    let mut core = lock(&core);
+                    let mut core = core.lock();
                     let delivery = core.deliveries.pop_front();
                     if let Some(delivery) = &delivery {
                         core.claimed.insert(delivery.id, delivery.turn_id.clone());
@@ -182,7 +183,7 @@ impl Substitute {
                     body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                 };
                 let (earlier, creates) = {
-                    let mut seen = lock(&seen);
+                    let mut seen = seen.lock();
                     let earlier = seen
                         .iter()
                         .filter(|other| other.is(&request.method, &request.path))
@@ -223,22 +224,22 @@ impl Substitute {
 
     /// Core's record of every job from now on.
     fn record(&self, jobs: Vec<Job>) {
-        lock(&self.core).jobs = Some(jobs);
+        self.core.lock().jobs = Some(jobs);
     }
 
     /// Core answers no read until it records jobs again.
     fn unavailable(&self) {
-        lock(&self.core).jobs = None;
+        self.core.lock().jobs = None;
     }
 
     /// Core hands `delivery` to the delivery loop's next claim.
     fn deliver(&self, delivery: Delivery) {
-        lock(&self.core).deliveries.push_back(delivery);
+        self.core.lock().deliveries.push_back(delivery);
     }
 
     /// The names each read by name was given.
     fn named(&self) -> Vec<Vec<String>> {
-        lock(&self.core).named.clone()
+        self.core.lock().named.clone()
     }
 
     /// Holds every acknowledgement until the guard is dropped, as a core
@@ -269,7 +270,7 @@ impl Substitute {
     }
 
     fn seen(&self) -> Vec<Seen> {
-        lock(&self.seen).clone()
+        self.seen.lock().clone()
     }
 
     fn matching(&self, method: &Method, prefix: &str) -> Vec<Seen> {
@@ -419,7 +420,7 @@ impl Substitute {
 /// Serves a read of jobs as core does: those named in `tracked`, or a page
 /// of those at work after the one `after` names.
 fn read_jobs(core: &Mutex<Recorded>, query: &str) -> Option<JobPage> {
-    let mut core = lock(core);
+    let mut core = core.lock();
     let jobs = core.jobs.clone()?;
     let parameter = |name: &str| {
         query
@@ -461,7 +462,7 @@ fn read_jobs(core: &Mutex<Recorded>, query: &str) -> Option<JobPage> {
 
 /// Records how a handed delivery went on its turn, as core does.
 fn acknowledge(core: &Mutex<Recorded>, id: i64, outcome: DeliveryOutcome) {
-    let mut core = lock(core);
+    let mut core = core.lock();
     let Some(turn_id) = core.claimed.get(&id).cloned() else {
         return;
     };
@@ -502,10 +503,6 @@ impl Drop for Substitute {
     fn drop(&mut self) {
         self.server.abort();
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn respond(request: &Seen, reply: Reply, creates: usize) -> Response {
@@ -1553,11 +1550,11 @@ async fn an_uncertain_progress_edit_keeps_the_identity_to_repair_a_late_overwrit
                 // arrive after the client's timeout and the final edit.
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(18)).await;
-                    *lock(&remote) = content;
+                    *remote.lock() = content;
                 });
                 Reply::Delayed(Duration::from_secs(18))
             } else {
-                *lock(&remote) = content;
+                *remote.lock() = content;
                 Reply::Success
             }
         }
@@ -1588,7 +1585,7 @@ async fn an_uncertain_progress_edit_keeps_the_identity_to_repair_a_late_overwrit
         .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
         .await?;
     tokio::time::timeout(Duration::from_secs(20), async {
-        while !lock(&remote).contains("Finishing up") {
+        while !remote.lock().contains("Finishing up") {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -1611,7 +1608,7 @@ async fn an_uncertain_progress_edit_keeps_the_identity_to_repair_a_late_overwrit
             .is_some_and(|edit| edit.content().starts_with("✓ Done"))
     );
     recorded_soon(&records, &json!({})).await?;
-    assert!(lock(&remote).starts_with("✓ Done"));
+    assert!(remote.lock().starts_with("✓ Done"));
     assert_eq!(discord.cards_in("300").len(), 1);
     monitor.abort();
     Ok(())
@@ -2042,7 +2039,7 @@ async fn a_stopping_provider_finishes_the_card_its_last_answer_settles() -> anyh
     assert!(!sent[1].is_card());
     // The provider stops; jobs core lists from now on are not shown.
     provider.stopping.cancel();
-    let mut later = lock(&discord.core).jobs.clone().unwrap_or_default();
+    let mut later = discord.core.lock().jobs.clone().unwrap_or_default();
     later.push(make("302", "make"));
     discord.record(later);
     let started = Instant::now();
@@ -2255,7 +2252,9 @@ async fn a_module_that_draws_no_card_costs_no_answer_and_leaves_cards_for_the_ne
     assert!(messages.iter().all(|seen| !seen.is_card()), "{messages:#?}");
     assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
-    let settled = lock(&discord.core)
+    let settled = discord
+        .core
+        .lock()
         .jobs
         .iter()
         .flatten()

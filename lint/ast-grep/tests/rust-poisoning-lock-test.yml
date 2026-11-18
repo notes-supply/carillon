@@ -1,0 +1,20 @@
+id: rust-poisoning-lock
+valid:
+  - "use std::sync::nonpoison::Mutex;"
+  - "use std::sync::{Arc, nonpoison::Mutex};"
+  - "use std::{fs, sync::{Arc, nonpoison::{Mutex, MutexGuard}}};"
+  - "use tokio::sync::{Mutex, MutexGuard};"
+  - "use tokio::{sync::{Mutex, oneshot}, time::Instant};"
+  - "struct S { m: Arc<std::sync::nonpoison::Mutex<()>>, t: tokio::sync::Mutex<()> }"
+  - "fn f() { let m = std::sync::nonpoison::Mutex::new(0); }"
+  - "use std::sync::{Arc, OnceLock};"
+invalid:
+  - "use std::sync::Mutex;"
+  - "use std::sync::{Arc, Mutex};"
+  - "use std::sync::{Arc, RwLock};"
+  - "use std::{fs, sync::{Arc, Mutex, PoisonError}};"
+  - "use std::{fs, sync::Mutex};"
+  - "struct S { m: Arc<std::sync::Mutex<()>> }"
+  - "fn f() { let m = std::sync::Mutex::new(0); }"
+  - "fn f(m: &M) -> G<'_> { m.lock().unwrap_or_else(std::sync::PoisonError::into_inner) }"
+  - "fn f(m: &M) -> G<'_> { m.lock().unwrap_or_else(PoisonError::into_inner) }"

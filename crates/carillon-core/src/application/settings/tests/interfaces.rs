@@ -75,7 +75,7 @@ async fn a_channel_needs_its_interface_named_once_two_are_enabled() -> Result<()
 async fn a_change_drawn_from_a_page_since_changed_is_refused() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let (config, stub, served) = installation(directory.path()).await?;
-    lock(&stub).drifts = true;
+    stub.lock().drifts = true;
     assert_eq!(
         failure(named(&config, DISCORD, &["300", "thinking=high"]).await),
         "thinking: Thinking changed meanwhile."
@@ -88,7 +88,7 @@ async fn a_change_drawn_from_a_page_since_changed_is_refused() -> Result<()> {
 async fn a_channel_id_with_slashes_is_one_segment_of_the_address() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let (config, stub, served) = installation(directory.path()).await?;
-    "chat/assistant/7".clone_into(&mut lock(&stub).channel);
+    "chat/assistant/7".clone_into(&mut stub.lock().channel);
     assert_eq!(
         named(&config, DISCORD, &["chat/assistant/7"]).await?,
         render(&home(0))

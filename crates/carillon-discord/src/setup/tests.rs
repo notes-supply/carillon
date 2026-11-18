@@ -2,8 +2,9 @@ use std::{
     collections::{HashMap, VecDeque},
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
+        nonpoison::Mutex,
     },
 };
 
@@ -139,9 +140,7 @@ async fn discord(state: Arc<Discord>) -> anyhow::Result<std::net::SocketAddr> {
                             return refused();
                         }
                         let (after, limit) = (query.get("after"), query.get("limit"));
-                        if let Ok(mut pages) = state.pages.lock() {
-                            pages.push((after.cloned(), limit.cloned()));
-                        }
+                        state.pages.lock().push((after.cloned(), limit.cloned()));
                         if !shown(&state.invited) {
                             return Json(json!([])).into_response();
                         }
@@ -803,13 +802,7 @@ async fn a_failed_setup_leaves_settings_that_name_a_token_written_before_them() 
 
 #[tokio::test]
 async fn every_server_is_offered_page_after_page() -> anyhow::Result<()> {
-    let pages = |state: &Discord| {
-        state
-            .pages
-            .lock()
-            .map(|pages| pages.clone())
-            .map_err(|_| anyhow!("the recorded pages are poisoned"))
-    };
+    let pages = |state: &Discord| state.pages.lock().clone();
     let page = |after: Option<&str>| (after.map(str::to_owned), Some("200".to_owned()));
 
     // The last of 253 servers, on the second page, with someone in it.
@@ -829,7 +822,7 @@ async fn every_server_is_offered_page_after_page() -> anyhow::Result<()> {
         "1249"
     );
     // The second page starts after the 200th server's ID.
-    assert_eq!(pages(&state)?, [page(None), page(Some("1196"))]);
+    assert_eq!(pages(&state), [page(None), page(Some("1196"))]);
 
     // Servers that fit one page take one request.
     let directory = tempfile::tempdir()?;
@@ -838,7 +831,7 @@ async fn every_server_is_offered_page_after_page() -> anyhow::Result<()> {
     let address = discord(state.clone()).await?;
     let (result, _) = run(&config, address, &[TOKEN, "", "", "", "", ""]).await;
     result?;
-    assert_eq!(pages(&state)?, [page(None)]);
+    assert_eq!(pages(&state), [page(None)]);
     Ok(())
 }
 

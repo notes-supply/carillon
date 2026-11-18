@@ -598,7 +598,7 @@ async fn jobs_call(
 
 /// A runtime that records each activity request and answers as `mode` says.
 fn activity_runtime(
-    mode: Arc<std::sync::Mutex<Snapshot>>,
+    mode: Arc<std::sync::nonpoison::Mutex<Snapshot>>,
     sent: tokio::sync::mpsc::UnboundedSender<Value>,
 ) -> Router {
     Router::new().route(
@@ -607,9 +607,7 @@ fn activity_runtime(
             move |AxumPath(id): AxumPath<String>,
                   Query(query): Query<std::collections::HashMap<String, String>>,
                   headers: HeaderMap| {
-                let mode = *mode
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mode = *mode.lock();
                 let _ = sent.send(json!({
                     "id": id,
                     "query": query,
@@ -668,7 +666,7 @@ async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventRece
 async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
-    let mode = Arc::new(std::sync::Mutex::new(Snapshot::Current));
+    let mode = Arc::new(std::sync::nonpoison::Mutex::new(Snapshot::Current));
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
@@ -738,9 +736,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
 
     // A snapshot the runtime cannot supply is absent, never a shorter list.
     for snapshot in [Snapshot::Missing, Snapshot::Malformed, Snapshot::Hanging] {
-        *mode
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+        *mode.lock() = snapshot;
         let started = std::time::Instant::now();
         let (status, body) = jobs_call(&state, "test-interface", Some("test-only"), "").await?;
         assert_eq!(status, StatusCode::OK);
@@ -841,7 +837,10 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let mut services = tokio::task::JoinSet::new();
-    let runtime = activity_runtime(Arc::new(std::sync::Mutex::new(Snapshot::Hanging)), sent);
+    let runtime = activity_runtime(
+        Arc::new(std::sync::nonpoison::Mutex::new(Snapshot::Hanging)),
+        sent,
+    );
     services.spawn(async move { axum::serve(listener, runtime).await });
     let mut accepted = Vec::new();
     for index in 0..6 {

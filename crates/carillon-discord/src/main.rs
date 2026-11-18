@@ -1,3 +1,4 @@
+#![feature(must_not_suspend)]
 use std::process::ExitCode;
 
 #[tokio::main]

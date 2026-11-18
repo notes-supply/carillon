@@ -4,6 +4,8 @@
 //!
 //! A provider owns its own server, routes and loops. Wire types stay in
 //! `carillon-protocol`.
+#![feature(must_not_suspend)]
+#![cfg_attr(test, feature(nonpoison_mutex, sync_nonpoison))]
 mod client;
 mod error;
 mod instance;

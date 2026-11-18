@@ -16,8 +16,7 @@ use uuid::Uuid;
 use super::{
     Fixture,
     live::{
-        HeldRuntime, answer_held, apply, counts, edit, lock, ok, operator, serving, submit,
-        workers_are,
+        HeldRuntime, answer_held, apply, counts, edit, ok, operator, serving, submit, workers_are,
     },
 };
 use crate::application::{
@@ -256,7 +255,7 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
     assert_eq!(drain.runtimes, ready());
     // A runtime's own refusal is reported; an answer that is not a
     // readiness never counts as ready.
-    *lock(&runtime.restart) = json!({"state": "unready", "reason": "a fence"});
+    *runtime.restart.lock() = json!({"state": "unready", "reason": "a fence"});
     assert_eq!(
         ok(renew(&state, second).await)?.runtimes[0]
             .unready
@@ -267,7 +266,7 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
         json!({"state": "ready", "also": 1}),
         json!({"state": "maybe"}),
     ] {
-        *lock(&runtime.restart) = answer;
+        *runtime.restart.lock() = answer;
         let drain = ok(renew(&state, second).await)?;
         let unready = drain.runtimes[0].unready.as_deref().unwrap_or_default();
         assert!(unready.starts_with("it did not say"), "{drain:?}");
@@ -404,7 +403,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
     lapsed().await?;
     deliver(&state)?;
     // A runtime that would lose what it holds.
-    *lock(&runtime.restart) = json!({"state": "unready", "reason": "a fence"});
+    *runtime.restart.lock() = json!({"state": "unready", "reason": "a fence"});
     let refused = refusal(drain(&running.config, timeout, false, PACE).await.err())?;
     assert!(
         refused.contains("test-runtime is not ready to restart: a fence"),
@@ -417,7 +416,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
         .context("forced without a pause")?
         .end(Duration::from_secs(2))
         .await;
-    *lock(&runtime.restart) = json!({"state": "ready"});
+    *runtime.restart.lock() = json!({"state": "ready"});
     drain(&running.config, timeout, false, PACE)
         .await?
         .context("drained without a pause")?

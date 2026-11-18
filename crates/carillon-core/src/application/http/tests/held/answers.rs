@@ -13,7 +13,7 @@ use super::super::{
     durable::{DurableRuntime, RUNTIME, dispatch, durable, settle},
     live::{ok, submit},
 };
-use crate::{WorkerStep, application::http::*, attachments, intake::lock};
+use crate::{WorkerStep, application::http::*, attachments};
 
 /// The one delivery waiting for the interface, claimed by `instance`.
 fn claim(core: &Core, instance: &str) -> Result<Delivery> {
@@ -313,7 +313,7 @@ async fn kept_files_outlast_a_stop_while_copying_and_a_restart_before_delivery()
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> Result<()> {
@@ -326,13 +326,13 @@ async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> R
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     let answer = json!({"outcome": "answered", "output": "Here.", "files": [chart]});
     let stall = state.core.intake.signals.stall.clone();
-    let held = stall.lock().map_err(|_| anyhow!("poisoned"))?;
+    let held = stall.lock();
     let first = {
         let (state, turn, answer) = (state.clone(), receipt.turn_id.clone(), answer.clone());
         tokio::spawn(async move { settle(&state, RUNTIME, &turn, &answer).await })
     };
     let started = std::time::Instant::now();
-    while !lock(&state.core.intake.keeping).contains(&receipt.turn_id) {
+    while !state.core.intake.keeping.lock().contains(&receipt.turn_id) {
         anyhow::ensure!(started.elapsed() < Duration::from_secs(30), "no copy began");
         tokio::task::yield_now().await;
     }
@@ -348,7 +348,7 @@ async fn the_same_outcome_during_a_copy_is_asked_again_and_copies_nothing() -> R
     );
     let store = fixture.config.value.data_dir.join("attachments");
     assert_eq!(fs::read_dir(&store)?.count(), 1);
-    assert!(lock(&state.core.intake.keeping).is_empty());
+    assert!(state.core.intake.keeping.lock().is_empty());
     Ok(())
 }
 
@@ -382,7 +382,7 @@ async fn an_answer_waits_its_turn_while_core_copies_as_many_files_as_it_may() ->
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn a_file_that_fails_while_core_copies_it_costs_only_itself() -> Result<()> {
@@ -408,7 +408,7 @@ async fn a_file_that_fails_while_core_copies_it_costs_only_itself() -> Result<()
         "files": [report, "/proc/self/maps", log, table],
     });
     let stall = state.core.intake.signals.stall.clone();
-    let held = stall.lock().map_err(|_| anyhow!("poisoned"))?;
+    let held = stall.lock();
     let settling = {
         let (state, turn) = (state.clone(), receipt.turn_id.clone());
         tokio::spawn(async move { settle(&state, RUNTIME, &turn, &answer).await })

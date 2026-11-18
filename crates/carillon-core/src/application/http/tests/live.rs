@@ -2,7 +2,7 @@
 //! operation, and the dispatchers following it, against a runtime whose
 //! hand-overs wait for the case to release them.
 
-use std::{collections::HashMap, fs, path::Path, sync::Mutex};
+use std::{collections::HashMap, fs, path::Path, sync::nonpoison::Mutex};
 
 use anyhow::Context as _;
 use tempfile::tempdir;
@@ -24,12 +24,6 @@ pub(super) struct HeldRuntime {
     pub(super) restart: Arc<Mutex<Value>>,
 }
 
-pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 impl HeldRuntime {
     pub(super) async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -45,7 +39,7 @@ impl HeldRuntime {
             runtime.restart.clone(),
         );
         let answer = move || {
-            let answer = lock(&restart).clone();
+            let answer = restart.lock().clone();
             async move { Json(answer) }
         };
         let router = Router::new().route("/v1/restart", get(answer)).route(
@@ -54,8 +48,8 @@ impl HeldRuntime {
                 let (held, given) = (held.clone(), given.clone());
                 async move {
                     let (release, released) = oneshot::channel();
-                    lock(&given).push(request.input.clone());
-                    lock(&held).insert(request.input, release);
+                    given.lock().push(request.input.clone());
+                    held.lock().insert(request.input, release);
                     let _ = released.await;
                     (StatusCode::ACCEPTED, Json(json!({})))
                 }
@@ -69,7 +63,7 @@ impl HeldRuntime {
     pub(super) async fn holding(&self, count: usize) -> Result<Vec<String>> {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let held = lock(&self.held).keys().cloned().collect::<Vec<_>>();
+                let held = self.held.lock().keys().cloned().collect::<Vec<_>>();
                 if held.len() >= count {
                     return held;
                 }
@@ -82,7 +76,8 @@ impl HeldRuntime {
 
     /// Takes the turn handed over with `input`.
     pub(super) fn release(&self, input: &str) -> Result<()> {
-        lock(&self.held)
+        self.held
+            .lock()
             .remove(input)
             .with_context(|| format!("the runtime holds no hand-over {input}"))?
             .send(())
@@ -90,7 +85,7 @@ impl HeldRuntime {
     }
 
     pub(super) fn given(&self) -> Vec<String> {
-        lock(&self.given).clone()
+        self.given.lock().clone()
     }
 
     /// Takes every turn handed over and answers every turn it holds until
@@ -98,7 +93,7 @@ impl HeldRuntime {
     pub(super) async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while counts(state)? != wanted {
-                let held = lock(&self.held).keys().cloned().collect::<Vec<_>>();
+                let held = self.held.lock().keys().cloned().collect::<Vec<_>>();
                 for input in held {
                     self.release(&input)?;
                 }

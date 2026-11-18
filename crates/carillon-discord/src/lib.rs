@@ -1,4 +1,5 @@
 //! Discord components. Importing this library never connects a gateway or starts a server.
+#![feature(must_not_suspend, nonpoison_mutex, sync_nonpoison)]
 mod activity;
 pub mod application;
 mod attachments;

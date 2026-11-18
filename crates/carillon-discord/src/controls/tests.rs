@@ -7,7 +7,7 @@ use crate::{
 use axum::{Json, Router, extract::Path, http::StatusCode, routing::post};
 use carillon_protocol::turns::ControlAction;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, nonpoison::Mutex};
 use twilight_model::{channel::message::EmojiReactionType, gateway::GatewayReaction, id::Id};
 
 /// A reaction `user` added in `guild` to message 400 of channel 300.
@@ -119,10 +119,7 @@ async fn an_admitted_control_asks_core_to_relay_it_for_the_message() -> anyhow::
         "/v1/events/{event_id}/control",
         post(
             move |Path(event_id): Path<String>, Json(body): Json<Value>| {
-                recorded
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push((event_id, body));
+                recorded.lock().push((event_id, body));
                 async { StatusCode::CONFLICT }
             },
         ),
@@ -135,9 +132,7 @@ async fn an_admitted_control_asks_core_to_relay_it_for_the_message() -> anyhow::
     relay(core, "400".to_owned(), ControlAction::Stop).await;
     server.abort();
     assert_eq!(
-        *asked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *asked.lock(),
         [
             ("400".to_owned(), json!({"action": "steer"})),
             ("400".to_owned(), json!({"action": "stop"})),
@@ -152,10 +147,7 @@ struct Warnings(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for Warnings {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(bytes);
+        self.0.lock().extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -174,11 +166,7 @@ async fn only_an_unexpected_refusal_of_a_control_is_a_warning() -> anyhow::Resul
     let app = Router::new().route(
         "/v1/events/{event_id}/control",
         post(move || {
-            let status = answers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop()
-                .unwrap_or(StatusCode::NO_CONTENT);
+            let status = answers.lock().pop().unwrap_or(StatusCode::NO_CONTENT);
             async move { status }
         }),
     );
@@ -194,15 +182,7 @@ async fn only_an_unexpected_refusal_of_a_control_is_a_warning() -> anyhow::Resul
             .with_writer(move || writer.clone())
             .finish(),
     );
-    let logged = || {
-        String::from_utf8_lossy(
-            &warnings
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-        .into_owned()
-    };
+    let logged = || String::from_utf8_lossy(&warnings.0.lock()).into_owned();
     for _ in 0..2 {
         relay(core.clone(), "400".to_owned(), ControlAction::Steer).await;
     }

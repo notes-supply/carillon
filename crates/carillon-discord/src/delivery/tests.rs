@@ -310,12 +310,12 @@ fn delivering_core(
     feedback: Duration,
     received: Arc<AtomicUsize>,
 ) -> Router {
-    let pending = Arc::new(std::sync::Mutex::new(deliveries.into_iter()));
+    let pending = Arc::new(std::sync::nonpoison::Mutex::new(deliveries.into_iter()));
     Router::new()
         .route(
             "/v1/deliveries",
             get(move || {
-                let next = pending.lock().ok().and_then(|mut pending| pending.next());
+                let next = pending.lock().next();
                 async move {
                     match next {
                         Some(delivery) => Json(Some(delivery)).into_response(),
@@ -793,7 +793,7 @@ async fn a_skipped_outcome_leaves_a_replayed_message_to_the_settings_serving() -
     }
     reactions.show_outcome("300:400".to_owned(), Feedback::Failed);
     // The skipped outcome still frees the message's record of controls.
-    assert!(super::lock(&reactions.0.controls).is_empty());
+    assert!(reactions.0.controls.lock().is_empty());
     // The operator then serves other reactions, and the gateway replays the
     // message, which is admitted again and answered.
     settings

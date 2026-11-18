@@ -19,7 +19,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -115,10 +115,6 @@ fn total(staged: &StagedAttachments) -> u64 {
     staged.files.iter().map(|file| file.size).sum()
 }
 
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl Intake {
     pub(crate) fn new(limits: AttachmentLimits) -> Self {
         Self {
@@ -143,7 +139,7 @@ impl Intake {
             let settled = self.settled.notified();
             tokio::pin!(settled);
             settled.as_mut().enable();
-            if lock(&self.capturing).is_empty() {
+            if self.capturing.lock().is_empty() {
                 return;
             }
             settled.await;
@@ -151,7 +147,9 @@ impl Intake {
     }
 
     pub(crate) fn capturing(&self, interface: &str, event_id: &str) -> bool {
-        lock(&self.capturing).contains_key(&(interface.to_owned(), event_id.to_owned()))
+        self.capturing
+            .lock()
+            .contains_key(&(interface.to_owned(), event_id.to_owned()))
     }
 
     /// Refuse `event` while another event of its conversation is being
@@ -161,7 +159,7 @@ impl Intake {
         interface: &str,
         event: &ExternalEvent,
     ) -> Result<(), CoreError> {
-        earlier_capture(&lock(&self.capturing), interface, event)
+        earlier_capture(&self.capturing.lock(), interface, event)
     }
 
     /// Join the capture of this event, or start one when a worker is free.
@@ -174,7 +172,7 @@ impl Intake {
     ) -> Result<EventReceipt, CoreError> {
         let key = (interface.id.clone(), event.event_id.clone());
         let mut outcome = {
-            let mut capturing = lock(&self.capturing);
+            let mut capturing = self.capturing.lock();
             if let Some(running) = capturing.get(&key) {
                 running.outcome.clone()
             } else if let Some(receipt) = core
@@ -240,7 +238,7 @@ impl Intake {
     /// bytes exactly; the floor uses reported availability and may still lag
     /// a completed capture after its reservation is released.
     pub(crate) fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
-        let mut reserved = lock(&self.reserved);
+        let mut reserved = self.reserved.lock();
         let kept = core.database.captured_bytes()?;
         let budget = self.limits.storage_bytes();
         if kept + *reserved + bytes > budget {
@@ -291,7 +289,7 @@ pub(crate) struct Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        *lock(&self.reserved) -= self.bytes;
+        *self.reserved.lock() -= self.bytes;
     }
 }
 
@@ -303,7 +301,7 @@ struct Registered {
 
 impl Drop for Registered {
     fn drop(&mut self) {
-        let mut capturing = lock(&self.intake.capturing);
+        let mut capturing = self.intake.capturing.lock();
         capturing.remove(&self.key);
         if capturing.is_empty() {
             self.intake.settled.notify_waiters();

@@ -235,15 +235,7 @@ async fn duplicates_keep_the_first_accepted_files_and_concurrent_submissions_cop
         .context("turn")?;
     let winner = fs::read(root.join(&race.attachments[0].path))?;
     assert!(String::from_utf8(winner)?.starts_with("source "));
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        0
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 0);
     Ok(())
 }
 
@@ -302,15 +294,7 @@ async fn limits_and_storage_budget_refuse_before_copying_and_release_reservation
         refusal.message
     );
     assert_eq!(captures(&state)?.len(), 1);
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        0
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 0);
 
     // The free-space floor refuses too, before copying.
     with_limits(
@@ -348,7 +332,7 @@ async fn limits_and_storage_budget_refuse_before_copying_and_release_reservation
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn an_interface_clearing_its_staging_never_fails_an_admitted_capture() -> Result<()> {
@@ -373,26 +357,12 @@ async fn an_interface_clearing_its_staging_never_fails_an_admitted_capture() -> 
     ));
     assert!(captures(&state)?.is_empty());
     assert_eq!(state.core.intake.workers.available_permits(), 2);
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        0
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 0);
 
     // Once core reports a capture, it reads the files it opened, whatever
     // becomes of the staging.
     let staged = stage(&state, "admitted", &files)?;
-    let held = state
-        .core
-        .intake
-        .signals
-        .stall
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?;
+    let held = state.core.intake.signals.stall.lock();
     let submission = {
         let (state, event) = (state.clone(), event("admitted", "", staged));
         tokio::spawn(async move { submit(&state, event).await })
@@ -415,7 +385,7 @@ async fn an_interface_clearing_its_staging_never_fails_an_admitted_capture() -> 
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_settles() -> Result<()>
@@ -432,7 +402,7 @@ async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_set
     )?;
     let slow = stage(&state, "slow", &[("slow.bin", &[7; 64])])?;
     let stall = state.core.intake.signals.stall.clone();
-    let held = stall.lock().map_err(|_| anyhow!("poisoned"))?;
+    let held = stall.lock();
     let first = {
         let (state, event) = (state.clone(), event("slow", "", slow.clone()));
         tokio::spawn(async move { submit(&state, event).await })
@@ -479,20 +449,14 @@ async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_set
 
 #[tokio::test(start_paused = true)]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn a_capture_past_its_deadline_is_refused_only_after_the_copy_returns() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let staged = stage(&state, "stalled", &[("stalled.bin", &[1; 64])])?;
-    let held = state
-        .core
-        .intake
-        .signals
-        .stall
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?;
+    let held = state.core.intake.signals.stall.lock();
     let submission = {
         let (state, event) = (state.clone(), event("stalled", "", staged));
         tokio::spawn(async move { submit(&state, event).await })
@@ -527,7 +491,7 @@ async fn a_capture_past_its_deadline_is_refused_only_after_the_copy_returns() ->
 
 #[tokio::test(start_paused = true)]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the publishing copy"
 )]
 async fn a_capture_cancelled_while_publishing_makes_no_new_acceptance() -> Result<()> {
@@ -539,10 +503,7 @@ async fn a_capture_cancelled_while_publishing_makes_no_new_acceptance() -> Resul
     // with `meanwhile` happening, then let publication finish.
     let past_deadline_while_publishing = async |event: ExternalEvent, meanwhile| {
         signals.publishing.store(false, Ordering::SeqCst);
-        let held = signals
-            .publication
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?;
+        let held = signals.publication.lock();
         let submission = {
             let state = state.clone();
             tokio::spawn(async move { submit(&state, event).await })
@@ -662,20 +623,14 @@ async fn startup_reconciliation_keeps_accepted_files_and_removes_crash_leftovers
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn a_conversations_later_messages_wait_for_its_capture_in_progress() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let staged = stage(&state, "first", &[("a", b"first")])?;
-    let held = state
-        .core
-        .intake
-        .signals
-        .stall
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?;
+    let held = state.core.intake.signals.stall.lock();
     let first = {
         let (state, event) = (state.clone(), event("first", "", staged.clone()));
         tokio::spawn(async move { submit(&state, event).await })
@@ -697,15 +652,7 @@ async fn a_conversations_later_messages_wait_for_its_capture_in_progress() -> Re
         .err()
         .context("later files overtook a capture in progress")?;
     assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        5
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 5);
     // Other conversations are not held up.
     let mut elsewhere = later.clone();
     "elsewhere".clone_into(&mut elsewhere.event_id);
@@ -788,20 +735,14 @@ async fn status_and_staging_belong_to_the_authenticated_interface() -> Result<()
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn a_capture_that_loses_to_an_earlier_acceptance_is_removed() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let staged = stage(&state, "late", &[("late.bin", b"late bytes")])?;
-    let held = state
-        .core
-        .intake
-        .signals
-        .stall
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?;
+    let held = state.core.intake.signals.stall.lock();
     let capturing = {
         let (state, event) = (state.clone(), event("raced", "", staged.clone()));
         tokio::spawn(async move { submit(&state, event).await })
@@ -825,15 +766,7 @@ async fn a_capture_that_loses_to_an_earlier_acceptance_is_removed() -> Result<()
     // The losing copy was removed once the database showed nothing uses it.
     assert!(captures(&state)?.is_empty());
     assert!(state.core.database.captures()?.is_empty());
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        0
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 0);
     Ok(())
 }
 
@@ -876,15 +809,7 @@ async fn concurrent_reservations_never_oversell_the_storage_budget() -> Result<(
     assert_eq!((accepted, refused), (3, 5));
     assert_eq!(state.core.database.captured_bytes()?, 3 * 600 * 1024);
     assert_eq!(captures(&state)?.len(), 3);
-    assert_eq!(
-        *state
-            .core
-            .intake
-            .reserved
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?,
-        0
-    );
+    assert_eq!(*state.core.intake.reserved.lock(), 0);
     Ok(())
 }
 
@@ -949,20 +874,14 @@ async fn an_unreadable_capture_is_not_reported_as_altered() -> Result<()> {
 
 #[tokio::test]
 #[expect(
-    clippy::await_holding_lock,
+    must_not_suspend,
     reason = "the held lock is what stalls the blocking copy"
 )]
 async fn shutdown_waits_for_running_captures_to_settle() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let staged = stage(&state, "settling", &[("a", b"bytes")])?;
-    let held = state
-        .core
-        .intake
-        .signals
-        .stall
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?;
+    let held = state.core.intake.signals.stall.lock();
     let submission = {
         let (state, event) = (state.clone(), event("settling", "", staged));
         tokio::spawn(async move { submit(&state, event).await })

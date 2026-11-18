@@ -86,11 +86,11 @@ pub(crate) struct Cancel {
     shutdown: Arc<AtomicBool>,
     /// Tests hold this to stall a copy between chunks, as a slow disk would.
     #[cfg(test)]
-    pub(crate) stall: Arc<std::sync::Mutex<()>>,
+    pub(crate) stall: Arc<std::sync::nonpoison::Mutex<()>>,
     /// Tests hold this to stall a copy that passed its last check while it
     /// publishes, as a slow sync would; `publishing` shows it got there.
     #[cfg(test)]
-    pub(crate) publication: Arc<std::sync::Mutex<()>>,
+    pub(crate) publication: Arc<std::sync::nonpoison::Mutex<()>>,
     #[cfg(test)]
     pub(crate) publishing: Arc<AtomicBool>,
 }

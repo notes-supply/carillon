@@ -1,0 +1,41 @@
+id: rust-poisoning-lock
+language: rust
+severity: error
+message: A poisoning std lock makes every caller recover from a panic it never caused.
+note: Use std::sync::nonpoison's Mutex, RwLock or Condvar, whose lock returns the guard.
+utils:
+  lock-name:
+    any:
+      - kind: identifier
+      - kind: type_identifier
+    regex: ^(Mutex|MutexGuard|RwLock|RwLockReadGuard|RwLockWriteGuard|Condvar)$
+  sync-path:
+    regex: (^|::)sync$
+rule:
+  any:
+    - any:
+        - kind: identifier
+        - kind: type_identifier
+      regex: ^PoisonError$
+    # std::sync::Mutex<T> and std::sync::Mutex::new outside a use.
+    - all:
+        - matches: lock-name
+        - inside:
+            any:
+              - kind: scoped_identifier
+              - kind: scoped_type_identifier
+            has: { field: path, regex: ^(::)?std::sync$ }
+    # use std::sync::Mutex, use std::sync::{Arc, Mutex} and
+    # use std::{sync::{Arc, Mutex}}.
+    - all:
+        - matches: lock-name
+        - any:
+            - inside:
+                kind: scoped_identifier
+                has: { field: path, matches: sync-path }
+            - inside:
+                kind: use_list
+                inside:
+                  kind: scoped_use_list
+                  has: { field: path, matches: sync-path }
+        - inside: { kind: use_declaration, regex: ^use std, stopBy: end }

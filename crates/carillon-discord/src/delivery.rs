@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, hash_map::Entry},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 use tokio::{
@@ -178,15 +178,18 @@ impl Reactions {
     /// The returned receiver closes when the request has ended.
     fn processing(&self, target: &str, config: &Arc<DiscordConfig>) -> Option<watch::Receiver<()>> {
         // Admitted here, the message shows no control this process did not add.
-        lock(&self.0.controls).entry(target.to_owned()).or_default();
-        let admitted = lock(&self.0.admitted)
+        self.0.controls.lock().entry(target.to_owned()).or_default();
+        let admitted = self
+            .0
+            .admitted
+            .lock()
             .entry(target.to_owned())
             .or_insert_with(|| config.clone())
             .clone();
         if !admitted.reactions {
             return None;
         }
-        let (sent, ended) = match lock(&self.0.unanswered).entry(target.to_owned()) {
+        let (sent, ended) = match self.0.unanswered.lock().entry(target.to_owned()) {
             // A message admitted again shares the request under way: a
             // second one could be applied after an outcome that waited only
             // for the first.
@@ -205,7 +208,7 @@ impl Reactions {
                 // Unanswered, Discord may still apply it after the outcome.
                 warn!(error = format!("{failure:#}"), %target, "Discord processing reaction failed or was not answered");
             }
-            lock(&owned.unanswered).remove(&target);
+            owned.unanswered.lock().remove(&target);
             drop(sent);
         });
         Some(ended)
@@ -231,7 +234,7 @@ impl Reactions {
     /// Waits until the message's processing request, if one is under way,
     /// has ended.
     async fn after_processing(&self, target: &str) {
-        let under_way = lock(&self.0.unanswered).get(target).cloned();
+        let under_way = self.0.unanswered.lock().get(target).cloned();
         if let Some(mut ended) = under_way {
             let _ = ended.changed().await;
         }
@@ -248,12 +251,12 @@ impl Reactions {
             controls,
             ..
         } = &*self.0;
-        let admitted = lock(admitted).remove(target);
+        let admitted = admitted.lock().remove(target);
         Settled {
             config: admitted
                 .or_else(|| known.cloned())
                 .unwrap_or_else(|| settings.current()),
-            controls: lock(controls).remove(target),
+            controls: controls.lock().remove(target),
         }
     }
 
@@ -350,7 +353,10 @@ impl Reactions {
     /// control `config` offers, which an earlier process may have left. The
     /// record lasts until the message's outcome is asked for.
     pub(crate) fn controls(&self, target: &str, config: &DiscordConfig) -> Controls {
-        let may_show = lock(&self.0.controls)
+        let may_show = self
+            .0
+            .controls
+            .lock()
             .entry(target.to_owned())
             .or_insert_with(|| unknown(config))
             .clone();
@@ -460,10 +466,6 @@ impl Controls {
         };
         stopped.run_until_cancelled(pass).await.unwrap_or(false)
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 async fn create_feedback_reaction(

@@ -19,7 +19,7 @@ use tracing::warn;
 use crate::{
     Core, CoreError,
     attachments::{self, CaptureError, Copies, Sources},
-    intake::{Intake, Reservation, lock},
+    intake::{Intake, Reservation},
 };
 
 /// A file kept with an answer; its ordinal in the answer is its ordinal in
@@ -93,7 +93,7 @@ struct Keeping {
 
 impl Drop for Keeping {
     fn drop(&mut self) {
-        lock(&self.intake.keeping).remove(&self.turn);
+        self.intake.keeping.lock().remove(&self.turn);
     }
 }
 
@@ -183,7 +183,7 @@ impl Core {
         turn_id: &str,
         paths: &[PathBuf],
     ) -> Result<Kept, CoreError> {
-        if !lock(&self.intake.keeping).insert(turn_id.to_owned()) {
+        if !self.intake.keeping.lock().insert(turn_id.to_owned()) {
             return Err(CoreError::Unavailable(
                 "Carillon is still keeping this answer's files".to_owned(),
             ));

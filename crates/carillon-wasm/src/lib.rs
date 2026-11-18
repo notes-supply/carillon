@@ -16,6 +16,8 @@
 //! - export `input(len) -> ptr`: reserve space for the invocation payload
 //! - export `invoke() -> len`: handle the payload, return the output length
 //! - export `output() -> ptr`: locate the output
+#![feature(must_not_suspend)]
+#![cfg_attr(test, feature(nonpoison_mutex, sync_nonpoison))]
 
 use std::{fmt, time::Duration};
 
@@ -208,7 +210,7 @@ fn read_guest(
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
+        sync::{Arc, nonpoison::Mutex},
         time::{Duration, Instant},
     };
 
@@ -283,9 +285,7 @@ mod tests {
         async fn call(&mut self, request: Vec<u8>) -> Vec<u8> {
             tokio::time::sleep(self.delay).await;
             let reply = format!("host saw {}", String::from_utf8_lossy(&request)).into_bytes();
-            if let Ok(mut requests) = self.requests.lock() {
-                requests.push(request);
-            }
+            self.requests.lock().push(request);
             reply
         }
     }
@@ -303,13 +303,7 @@ mod tests {
             .invoke(&module, recorder.clone(), b"ping", Duration::from_secs(5))
             .await?;
         assert_eq!(output, b"host saw ping");
-        assert_eq!(
-            recorder
-                .requests
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poisoned"))?[..],
-            [b"ping".to_vec()]
-        );
+        assert_eq!(recorder.requests.lock()[..], [b"ping".to_vec()]);
         Ok(())
     }
 

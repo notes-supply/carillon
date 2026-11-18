@@ -1,4 +1,5 @@
 //! Both languages consume the same wire examples, including canonical round trips.
+#![feature(must_not_suspend)]
 use anyhow::{Context as _, Result};
 use carillon_protocol::{
     model::{CommandCatalog, ExternalEvent, OpenedTurn, RuntimeTurnRequest, TurnActivity},

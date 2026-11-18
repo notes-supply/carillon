@@ -11,15 +11,15 @@ use carillon_protocol::turns::Silence;
 async fn deliver(
     deliveries: Vec<Delivery>,
 ) -> anyhow::Result<(Vec<String>, Vec<serde_json::Value>)> {
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::new(std::sync::nonpoison::Mutex::new(Vec::new()));
     let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let pending = Arc::new(std::sync::Mutex::new(deliveries.into_iter()));
+    let pending = Arc::new(std::sync::nonpoison::Mutex::new(deliveries.into_iter()));
     let (seen, acknowledged) = (requests.clone(), acks.clone());
     let app = Router::new()
         .route(
             "/v1/deliveries",
             get(move || {
-                let next = pending.lock().ok().and_then(|mut pending| pending.next());
+                let next = pending.lock().next();
                 async move {
                     match next {
                         Some(delivery) => Json(Some(delivery)).into_response(),
@@ -36,9 +36,7 @@ async fn deliver(
             }),
         )
         .fallback(move |method: Method, uri: Uri, body: Bytes| {
-            seen.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(format!("{method} {}", uri.path()));
+            seen.lock().push(format!("{method} {}", uri.path()));
             let body = serde_json::from_slice(&body).unwrap_or_default();
             async move {
                 if method == Method::POST {
@@ -80,10 +78,7 @@ async fn deliver(
     );
     assert_eq!(reactions.stop(Duration::from_secs(5)).await, 0);
     server.abort();
-    let requests = requests
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let requests = requests.lock().clone();
     let acks = acks.lock().await.clone();
     Ok((requests, acks))
 }

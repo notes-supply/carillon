@@ -1,3 +1,4 @@
+#![feature(must_not_suspend)]
 use anyhow::{Context, Result, bail};
 use carillon_discord::{
     config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},

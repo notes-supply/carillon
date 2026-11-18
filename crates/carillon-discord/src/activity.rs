@@ -43,7 +43,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, nonpoison::Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -216,7 +216,7 @@ impl CardRecords {
     }
 
     fn recorded(&self) -> BTreeMap<String, Recorded> {
-        lock(&self.cards).clone()
+        self.cards.lock().clone()
     }
 
     fn insert(&self, job: &str, card: Recorded) -> bool {
@@ -236,7 +236,7 @@ impl CardRecords {
     /// was not removed on disk is finished again by the next start; one that
     /// was not added leaves a card no later start knows of.
     fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Recorded>) -> bool) -> bool {
-        let mut cards = lock(&self.cards);
+        let mut cards = self.cards.lock();
         if !change(&mut cards) {
             return true;
         }
@@ -249,10 +249,6 @@ impl CardRecords {
         }
         true
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[derive(Clone)]

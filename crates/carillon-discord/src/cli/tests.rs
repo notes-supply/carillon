@@ -13,7 +13,7 @@ use axum::{
 };
 use clap::{Parser as _, error::ErrorKind};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, nonpoison::Mutex};
 
 fn parsed_call(arguments: &[&str]) -> Result<Operation> {
     let cli = Cli::try_parse_from(
@@ -230,9 +230,7 @@ impl CallProvider {
                     "authorization": headers.get("authorization").and_then(|value| value.to_str().ok()),
                     "operation": serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
                 });
-                if let Ok(mut requests) = requests.lock() {
-                    requests.push((uri.to_string(), recorded));
-                }
+                requests.lock().push((uri.to_string(), recorded));
                 let mut response = (status, answer).into_response();
                 if status.is_redirection() {
                     response.headers_mut().insert("location", axum::http::HeaderValue::from_static("/redirected"));
@@ -249,12 +247,8 @@ impl CallProvider {
         })
     }
 
-    fn requests(&self) -> Result<Vec<(String, Value)>> {
-        Ok(self
-            .seen
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned requests"))?
-            .clone())
+    fn requests(&self) -> Vec<(String, Value)> {
+        self.seen.lock().clone()
     }
 }
 
@@ -269,7 +263,7 @@ async fn call_authenticates_at_the_existing_endpoint_and_returns_native_json() -
     let result = call(&provider.config, "discord-private", operation).await?;
     assert_eq!(result, json!({"messages": [], "may_have_more": false}));
     assert_eq!(
-        provider.requests()?,
+        provider.requests(),
         vec![(
             "/v1/operations".into(),
             json!({
@@ -307,7 +301,7 @@ async fn call_never_retries_an_uncertain_write_or_follows_a_redirect() -> Result
             .err()
             .context("write should fail")?;
         assert!(error.to_string().starts_with("uncertain:"), "{error}");
-        assert_eq!(provider.requests()?.len(), 1);
+        assert_eq!(provider.requests().len(), 1);
     }
     Ok(())
 }
@@ -329,7 +323,7 @@ async fn an_unreadable_answer_preserves_write_uncertainty_without_replaying() ->
             .err()
             .context("invalid answer should fail")?;
         assert!(error.to_string().starts_with("uncertain:"), "{error}");
-        assert_eq!(provider.requests()?.len(), 1);
+        assert_eq!(provider.requests().len(), 1);
     }
     Ok(())
 }
@@ -363,7 +357,7 @@ async fn a_refusal_without_a_readable_body_keeps_its_status() -> Result<()> {
             .to_string();
         assert!(error.starts_with(&format!("{outcome}:")), "{error}");
         assert!(error.contains(status.as_str()), "{error}");
-        assert_eq!(provider.requests()?.len(), 1);
+        assert_eq!(provider.requests().len(), 1);
     }
     Ok(())
 }
@@ -394,7 +388,7 @@ async fn upload_rejections_happen_before_any_http_operation() -> Result<()> {
         .err()
         .context("eleven files were sent")?;
     assert!(refused.to_string().contains("At most 10"), "{refused}");
-    assert!(provider.requests()?.is_empty());
+    assert!(provider.requests().is_empty());
     let directory = uploads(&[provider.directory.path().to_path_buf()])
         .err()
         .context("a directory was uploaded")?;
@@ -491,7 +485,7 @@ async fn message_files_are_loaded_locally_and_sent_as_bounded_bytes() -> Result<
         file.to_str().context("temporary path")?,
     ])?;
     call(&provider.config, "discord-private", operation).await?;
-    let requests = provider.requests()?;
+    let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].1["operation"]["attachments"],
@@ -803,9 +797,7 @@ async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_chan
             let kept = kept.clone();
             let answer = answer.clone();
             async move {
-                if let Ok(mut kept) = kept.lock() {
-                    kept.push((headers, body));
-                }
+                kept.lock().push((headers, body));
                 ([("content-type", "application/json")], answer).into_response()
             }
         }),
@@ -823,10 +815,7 @@ async fn a_change_goes_to_the_running_provider_and_only_a_stopped_ones_file_chan
         before,
         "the CLI wrote a running provider's file"
     );
-    let sent = received
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .clone();
+    let sent = received.lock().clone();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0["authorization"], "Bearer operator");
     assert_eq!(serde_json::from_slice::<FileChange>(&sent[0].1)?, change);
@@ -895,9 +884,7 @@ async fn module_changes_keep_a_module_declared_meanwhile() -> Result<()> {
             let kept = kept.clone();
             let answer = answer.clone();
             async move {
-                if let Ok(mut kept) = kept.lock() {
-                    kept.push(body);
-                }
+                kept.lock().push(body);
                 ([("content-type", "application/json")], answer).into_response()
             }
         }),
@@ -906,10 +893,7 @@ async fn module_changes_keep_a_module_declared_meanwhile() -> Result<()> {
     for action in [ModuleAction::Disable, ModuleAction::Enable { file: None }] {
         manage_module(|| Ok(config.clone()), None, Some(action)).await?;
     }
-    let sent = received
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .clone();
+    let sent = received.lock().clone();
     assert_eq!(sent.len(), 2);
     for body in sent {
         let change: FileChange = serde_json::from_slice(&body)?;

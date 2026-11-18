@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     os::unix::fs::PermissionsExt as _,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -75,7 +75,8 @@ pub(crate) async fn serve_cdn(files: HashMap<String, Serve>) -> Result<(u16, Arc
                     }
                     authorized |= header.to_ascii_lowercase().starts_with("authorization:");
                 }
-                if let Ok(mut log) = log.lock() {
+                {
+                    let mut log = log.lock();
                     log.requests.push(path.clone());
                     log.with_authorization += usize::from(authorized);
                 }
@@ -173,9 +174,7 @@ async fn serve_message(
             axum::routing::get(move |State(message): State<Option<Value>>| {
                 let counted = counted.clone();
                 async move {
-                    if let Ok(mut lookups) = counted.lock() {
-                        *lookups += 1;
-                    }
+                    *counted.lock() += 1;
                     match message {
                         Some(message) => Json(message).into_response(),
                         None => (
@@ -356,7 +355,7 @@ async fn files_stream_to_generated_names_without_credentials_and_staging_is_rele
     assert_eq!(staged.manifest.files[0].name, "first.bin");
     assert_eq!(staged.manifest.files[1].size, 19);
     {
-        let log = log.lock().map_err(|_| anyhow!("poisoned"))?;
+        let log = log.lock();
         assert_eq!(log.requests.len(), 2);
         assert_eq!(log.with_authorization, 0);
     }
@@ -435,12 +434,7 @@ async fn policy_refuses_before_any_request() -> Result<()> {
         .err()
         .context("disabled attachments admitted")?;
     assert!(refusal.0.contains("not enabled"));
-    assert!(
-        log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .requests
-            .is_empty()
-    );
+    assert!(log.lock().requests.is_empty());
     Ok(())
 }
 
@@ -492,7 +486,7 @@ async fn bodies_must_match_the_announced_length_and_redirects_are_not_followed()
         assert!(!refusal.0.contains("hm="), "{}", refusal.0);
     }
     wait_until_empty(staging.path()).await?;
-    let log = log.lock().map_err(|_| anyhow!("poisoned"))?;
+    let log = log.lock();
     assert!(!log.requests.iter().any(|path| path.contains("elsewhere")));
     // A short body is worth retrying; the others are refused at once.
     assert_eq!(
@@ -560,7 +554,7 @@ async fn an_expired_address_is_refreshed_once_from_the_same_message() -> Result<
         std::fs::read(staging.path().join(&staged.manifest.batch).join("0"))?,
         b"fresh bytes"
     );
-    assert_eq!(*lookups.lock().map_err(|_| anyhow!("poisoned"))?, 1);
+    assert_eq!(*lookups.lock(), 1);
     drop(staged);
 
     // Replaced (other size), removed, or a deleted message: refused, never
@@ -602,15 +596,10 @@ async fn an_expired_address_is_refreshed_once_from_the_same_message() -> Result<
             "{case}: {}",
             refusal.0
         );
-        assert_eq!(
-            *lookups.lock().map_err(|_| anyhow!("poisoned"))?,
-            1,
-            "{case}"
-        );
+        assert_eq!(*lookups.lock(), 1, "{case}");
     }
     assert!(
         log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
             .requests
             .iter()
             .all(|path| path.starts_with("/attachments/300/60"))
@@ -653,7 +642,7 @@ async fn a_forwarded_files_expired_address_is_refreshed_from_the_forward() -> Re
         std::fs::read(staging.path().join(&staged.manifest.batch).join("0"))?,
         b"OggS"
     );
-    assert_eq!(*lookups.lock().map_err(|_| anyhow!("poisoned"))?, 1);
+    assert_eq!(*lookups.lock(), 1);
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -117,7 +117,7 @@ async fn world(answers: Vec<Answer>, known: Vec<String>) -> Result<World> {
                         &core,
                         format!("thread {message} {}", String::from_utf8_lossy(&body)),
                     );
-                    if core.lock().is_ok_and(|core| core.threads_fail) {
+                    if core.lock().threads_fail {
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
                     Json(
@@ -170,9 +170,7 @@ async fn world(answers: Vec<Answer>, known: Vec<String>) -> Result<World> {
 }
 
 fn record(core: &Shared, entry: String) {
-    if let Ok(mut core) = core.lock() {
-        core.trace.push(entry);
-    }
+    core.lock().trace.push(entry);
 }
 
 fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
@@ -186,9 +184,7 @@ fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
 
 /// Whether this status lookup of `event_id` is one core never answers.
 fn stall(core: &Shared, event_id: &str) -> bool {
-    let Ok(mut core) = core.lock() else {
-        return false;
-    };
+    let mut core = core.lock();
     let Some(index) = core.stalled.iter().position(|stalled| stalled == event_id) else {
         return false;
     };
@@ -198,9 +194,7 @@ fn stall(core: &Shared, event_id: &str) -> bool {
 }
 
 fn status(core: &Shared, event_id: &str) -> Response {
-    let Ok(mut core) = core.lock() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let mut core = core.lock();
     let entry = format!("status {event_id}");
     core.trace.push(entry.clone());
     core.times.push((entry, Instant::now()));
@@ -245,9 +239,7 @@ fn status(core: &Shared, event_id: &str) -> Response {
 }
 
 fn submit(core: &Shared, staging: &std::path::Path, event: &ExternalEvent) -> Response {
-    let Ok(mut core) = core.lock() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let mut core = core.lock();
     let entry = format!("submit {}", event.event_id);
     core.trace.push(entry.clone());
     core.times.push((entry, Instant::now()));
@@ -370,13 +362,8 @@ fn channel_config() -> crate::config::DiscordConfig {
     config
 }
 
-fn trace(world: &World) -> Result<Vec<String>> {
-    Ok(world
-        .core
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .trace
-        .clone())
+fn trace(world: &World) -> Vec<String> {
+    world.core.lock().trace.clone()
 }
 
 fn position(trace: &[String], prefix: &str) -> Result<usize> {
@@ -417,13 +404,8 @@ async fn unauthorized_or_inactive_messages_acquire_nothing() -> Result<()> {
         ],
     )
     .await?;
-    assert!(
-        log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .requests
-            .is_empty()
-    );
-    let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+    assert!(log.lock().requests.is_empty());
+    let core = world.core.lock();
     assert!(core.submissions.is_empty());
     // No explanation, reaction or other Discord call for refused senders,
     // apart from looking up the unrouted channel.
@@ -470,7 +452,7 @@ async fn a_message_with_files_is_accepted_whole_with_metadata_only() -> Result<(
     )
     .await?;
     {
-        let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+        let core = world.core.lock();
         let [event] = core.submissions.as_slice() else {
             return Err(anyhow!("expected one submission, got {:?}", core.trace));
         };
@@ -491,10 +473,7 @@ async fn a_message_with_files_is_accepted_whole_with_metadata_only() -> Result<(
             "PUT /api/v10/channels/300/messages/10/reactions/",
         )?;
         assert!(reacted < submitted);
-        assert_eq!(
-            log.lock().map_err(|_| anyhow!("poisoned"))?.requests.len(),
-            2
-        );
+        assert_eq!(log.lock().requests.len(), 2);
     }
     for _ in 0..200 {
         if std::fs::read_dir(&world.staging)?.count() == 0 {
@@ -535,7 +514,7 @@ async fn a_failed_file_refuses_the_whole_message_with_a_quiet_explanation() -> R
         )],
     )
     .await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"
@@ -597,7 +576,7 @@ async fn retries_reuse_downloaded_files_and_storage_refusals_are_explained_once(
         ],
     )
     .await?;
-    let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+    let core = world.core.lock();
     let batches = core
         .submissions
         .iter()
@@ -613,10 +592,7 @@ async fn retries_reuse_downloaded_files_and_storage_refusals_are_explained_once(
     assert!(batches[..3].iter().all(|batch| *batch == batches[0]));
     assert!(core.staged[..3].iter().all(|files| files[0] == vec![5; 64]));
     assert_eq!(batches[3].0, "31");
-    assert_eq!(
-        log.lock().map_err(|_| anyhow!("poisoned"))?.requests.len(),
-        2
-    );
+    assert_eq!(log.lock().requests.len(), 2);
     let explanation = &core.trace[position(&core.trace, "POST /api/v10/channels/300/messages ")?];
     assert!(explanation.contains("storage is full"), "{explanation}");
     Ok(())
@@ -643,20 +619,8 @@ async fn a_message_core_already_accepted_is_not_downloaded_again() -> Result<()>
         )],
     )
     .await?;
-    assert!(
-        log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .requests
-            .is_empty()
-    );
-    assert!(
-        world
-            .core
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .submissions
-            .is_empty()
-    );
+    assert!(log.lock().requests.is_empty());
+    assert!(world.core.lock().submissions.is_empty());
     Ok(())
 }
 
@@ -685,7 +649,7 @@ async fn a_slow_transfer_keeps_its_conversation_in_order_without_stopping_others
         ],
     )
     .await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     let (slow, after, other) = (
         position(&trace, "submit 50")?,
         position(&trace, "submit 51")?,
@@ -721,7 +685,7 @@ async fn a_full_conversation_lane_refuses_with_an_explanation() -> Result<()> {
         )
     }));
     run(&world, channel_config(), cdn, messages).await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     let overflow = 100 + lanes::MAX_PER_LANE;
     assert!(!trace.contains(&format!("submit {overflow}")), "{trace:?}");
     let explanation = trace
@@ -765,13 +729,13 @@ async fn a_file_only_root_message_starts_a_thread_named_after_its_file() -> Resu
         )],
     )
     .await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     let thread = &trace[position(&trace, "thread 60 ")?];
     assert!(
         thread.contains("\"name\":\"quarterly%20report.pdf\""),
         "{thread}"
     );
-    let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+    let core = world.core.lock();
     assert_eq!(core.submissions[0].delivery_target_id, "60");
     assert_eq!(core.submissions[0].content, "");
     Ok(())
@@ -809,7 +773,7 @@ async fn a_new_thread_holds_its_lane_until_its_first_message_settles() -> Result
         ],
     )
     .await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     let (thread, first, child) = (
         position(&trace, "thread 70 ")?,
         position(&trace, "submit 70")?,
@@ -821,11 +785,8 @@ async fn a_new_thread_holds_its_lane_until_its_first_message_settles() -> Result
         1,
         "{trace:?}"
     );
-    assert_eq!(
-        log.lock().map_err(|_| anyhow!("poisoned"))?.requests.len(),
-        1
-    );
-    let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+    assert_eq!(log.lock().requests.len(), 1);
+    let core = world.core.lock();
     assert_eq!(core.submissions[1].audience_id, "discord-100-70");
     Ok(())
 }
@@ -868,7 +829,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         admitted(&ingress, message("83", "301", "200", "hello", Vec::new())),
     );
     for _ in 0..200 {
-        let trace = trace(&world)?;
+        let trace = trace(&world);
         if trace
             .iter()
             .any(|entry| entry.contains("/messages/83/reactions/"))
@@ -909,7 +870,7 @@ async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -
         crate::application::queue_or_refuse(&send, &ingress, admitted(&ingress, queued))?;
     }
     for _ in 0..200 {
-        let trace = trace(&world)?;
+        let trace = trace(&world);
         if trace
             .iter()
             .any(|entry| entry.contains("/messages/93/reactions/"))
@@ -933,7 +894,7 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
     script(&world, |core| {
         core.replayed = HashMap::from([("150".to_owned(), 2), ("151".to_owned(), 2)]);
         core.refused_status = vec!["151".to_owned()];
-    })?;
+    });
     let mut config = channel_config();
     config.uncertain_emoji = "❓".to_owned();
     let ingress = ingress(&world, config, cdn)?;
@@ -962,7 +923,7 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
         trace.iter().filter(|entry| **entry == status).count()
     };
     for _ in 0..2000 {
-        let trace = trace(&world)?;
+        let trace = trace(&world);
         if looked_up(&trace, "150") >= 2 && looked_up(&trace, "151") >= 2 {
             break;
         }
@@ -970,7 +931,7 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
     }
     stopping.cancel();
     tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     // Each capture's outcome was asked for again, after the stop.
     for id in ["150", "151"] {
         assert_eq!(looked_up(&trace, id), 3, "{trace:?}");
@@ -983,10 +944,7 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
         "{trace:?}"
     );
     assert!(
-        log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .requests
-            .is_empty(),
+        log.lock().requests.is_empty(),
         "downloaded a message core was capturing"
     );
     // The accepted one keeps its feedback; the unanswered one is uncertain.
@@ -1017,7 +975,7 @@ async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()>
     script(&world, |core| {
         core.replayed = HashMap::from([("152".to_owned(), 1)]);
         core.refused_status = vec!["152".to_owned()];
-    })?;
+    });
     let mut config = channel_config();
     config.uncertain_emoji = "❓".to_owned();
     run(
@@ -1033,7 +991,7 @@ async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()>
         )],
     )
     .await?;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     // The capture may still be core's: nothing is fetched or submitted, and
     // the sender is not asked to send it again.
     assert!(
@@ -1041,10 +999,7 @@ async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()>
         "{trace:?}"
     );
     assert!(
-        log.lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .requests
-            .is_empty(),
+        log.lock().requests.is_empty(),
         "downloaded a message core was capturing"
     );
     assert_eq!(explanation(&trace, "152"), None, "{trace:?}");
@@ -1062,21 +1017,19 @@ async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()>
 const PAST_DEADLINE: Duration = Duration::from_mins(45);
 const DEADLINE: Duration = Duration::from_mins(30);
 
-fn script(world: &World, change: impl FnOnce(&mut Core)) -> Result<()> {
-    change(&mut *world.core.lock().map_err(|_| anyhow!("poisoned"))?);
-    Ok(())
+fn script(world: &World, change: impl FnOnce(&mut Core)) {
+    change(&mut world.core.lock());
 }
 
-fn times(world: &World, entry: &str) -> Result<Vec<Instant>> {
-    Ok(world
+fn times(world: &World, entry: &str) -> Vec<Instant> {
+    world
         .core
         .lock()
-        .map_err(|_| anyhow!("poisoned"))?
         .times
         .iter()
         .filter(|(seen, _)| seen == entry)
         .map(|(_, at)| *at)
-        .collect())
+        .collect()
 }
 
 /// The explanation sent in reply to `message`.
@@ -1109,7 +1062,7 @@ async fn preparation_that_outlasts_its_deadline_ends_without_submitting() -> Res
     .await?;
     let world = world(Vec::new(), Vec::new()).await?;
     // The files are staged, but Discord keeps failing to create the thread.
-    script(&world, |core| core.threads_fail = true)?;
+    script(&world, |core| core.threads_fail = true);
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
     config.typing = false;
     let started = Instant::now();
@@ -1132,7 +1085,7 @@ async fn preparation_that_outlasts_its_deadline_ends_without_submitting() -> Res
         elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
         "{elapsed:?}"
     );
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     position(&trace, "thread 85")?;
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
@@ -1160,7 +1113,7 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
     script(&world, |core| {
         core.unavailable = vec!["90".to_owned(), "95".to_owned()];
         core.received.insert("90".to_owned(), 2);
-    })?;
+    });
     let started = Instant::now();
     run_for(
         &world,
@@ -1187,10 +1140,10 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
     )
     .await?;
     let deadline = started + DEADLINE;
-    let calls = trace(&world)?;
+    let calls = trace(&world);
     let last = |entry: &str| calls.iter().rposition(|call| call == entry);
     for event in ["90", "95"] {
-        let submitted = times(&world, &format!("submit {event}"))?;
+        let submitted = times(&world, &format!("submit {event}"));
         // Retried with backoff, none after the deadline; after the last, only core is asked.
         assert!(submitted.len() > 1, "{event}: {submitted:?}");
         assert!(submitted.iter().all(|at| *at < deadline), "{event}");
@@ -1199,13 +1152,7 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
     }
     // The first message's lane waited while core was still capturing it,
     // then moved on once core had accepted it.
-    let capturing = world
-        .core
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .received
-        .get("90")
-        .copied();
+    let capturing = world.core.lock().received.get("90").copied();
     assert_eq!(capturing, Some(0));
     let next = calls.iter().position(|call| call == "submit 91");
     assert!(last("status 90") < next, "{calls:?}");
@@ -1238,7 +1185,7 @@ async fn a_submission_still_waiting_for_a_slot_at_the_deadline_is_never_made() -
     assert!(refusal.0.contains("in time"), "{}", refusal.0);
     assert!(started.elapsed() <= DEADLINE + Duration::from_secs(1));
     // Nothing was sent, so nothing is ambiguous: core is not even asked.
-    assert!(trace(&world)?.is_empty());
+    assert!(trace(&world).is_empty());
     drop(busy);
     Ok(())
 }
@@ -1259,7 +1206,7 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
     script(&world, |core| {
         core.unavailable = vec!["110".to_owned()];
         core.received.insert("110".to_owned(), 2);
-    })?;
+    });
     let ingress = ingress(&world, channel_config(), cdn)?;
     let stopping = ingress.stopping.clone();
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
@@ -1287,11 +1234,10 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
     for _ in 0..2000 {
         let downloading = log
             .lock()
-            .map_err(|_| anyhow!("poisoned"))?
             .requests
             .iter()
             .any(|request| request.contains("stalled"));
-        if downloading && trace(&world)?.iter().any(|entry| entry == "submit 110") {
+        if downloading && trace(&world).iter().any(|entry| entry == "submit 110") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1299,14 +1245,9 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
     stopping.cancel();
     // The stop, not the gateway closing, ends dispatch.
     tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     // What core may have received was settled with core first.
-    let settled = world
-        .core
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .known
-        .contains(&"110".to_owned());
+    let settled = world.core.lock().known.contains(&"110".to_owned());
     assert!(settled, "{trace:?}");
     assert_eq!(explanation(&trace, "110"), None, "{trace:?}");
     // The waiting message is dropped, and the interrupted download is not
@@ -1333,7 +1274,7 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
     script(&world, |core| {
         core.unavailable = vec!["130".to_owned(), "131".to_owned()];
         core.received.insert("130".to_owned(), 0);
-    })?;
+    });
     let ingress = ingress(&world, channel_config(), cdn)?;
     let stopping = ingress.stopping.clone();
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
@@ -1346,7 +1287,7 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
     for _ in 0..2000 {
-        let trace = trace(&world)?;
+        let trace = trace(&world);
         if ["submit 130", "submit 131"]
             .iter()
             .all(|submitted| trace.iter().any(|entry| entry == submitted))
@@ -1357,7 +1298,7 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
     }
     stopping.cancel();
     tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     // Each text handed to core is settled by asking core after its
     // submission, beside the lookup admission makes before it: the accepted
     // one is left to its answer, the other's sender is told.
@@ -1389,7 +1330,7 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
     script(&world, |core| {
         core.stalled = vec!["140".to_owned(), "141".to_owned(), "142".to_owned()];
         core.unanswered = vec!["142".to_owned()];
-    })?;
+    });
     let mut config = channel_config();
     config.failed_emoji = "❌".to_owned();
     config.uncertain_emoji = "❓".to_owned();
@@ -1405,7 +1346,7 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
     for _ in 0..2000 {
-        let trace = trace(&world)?;
+        let trace = trace(&world);
         if ["140", "141", "142"]
             .iter()
             .all(|id| trace.contains(&format!("stalled status {id}")))
@@ -1418,7 +1359,7 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
     tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
     // The settlements are feedback, ended with the connection's reactions.
     assert_eq!(reactions.stop(Duration::from_secs(5)).await, 0);
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     // Nothing is submitted once the provider stops.
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit ")),
@@ -1495,11 +1436,7 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
         elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
         "{elapsed:?}"
     );
-    let requests = log
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .requests
-        .clone();
+    let requests = log.lock().requests.clone();
     // Each attempt was cut off and tried again; the sender was told.
     let attempts = requests
         .iter()
@@ -1512,7 +1449,7 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
             .any(|request| request == "/api/v10/channels/300/messages")
     );
     assert!(
-        !trace(&world)?
+        !trace(&world)
             .iter()
             .any(|entry| entry.starts_with("submit"))
     );
@@ -1554,11 +1491,7 @@ async fn a_route_discord_never_resolves_releases_its_lane_silently() -> Result<(
         elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
         "{elapsed:?}"
     );
-    let requests = log
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .requests
-        .clone();
+    let requests = log.lock().requests.clone();
     // Each lookup was cut off and tried again; nothing was said about a
     // message that was never admitted.
     assert!(requests.len() > 1, "{requests:?}");
@@ -1568,7 +1501,7 @@ async fn a_route_discord_never_resolves_releases_its_lane_silently() -> Result<(
             .all(|request| request == "/api/v10/channels/89"),
         "{requests:?}"
     );
-    assert!(trace(&world)?.is_empty());
+    assert!(trace(&world).is_empty());
     Ok(())
 }
 
@@ -1576,7 +1509,7 @@ async fn a_route_discord_never_resolves_releases_its_lane_silently() -> Result<(
 async fn a_text_whose_conversation_never_opens_is_refused_in_time() -> Result<()> {
     let world = world(Vec::new(), Vec::new()).await?;
     // Discord keeps failing to create the text's thread.
-    script(&world, |core| core.threads_fail = true)?;
+    script(&world, |core| core.threads_fail = true);
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
     config.typing = false;
     let started = Instant::now();
@@ -1593,7 +1526,7 @@ async fn a_text_whose_conversation_never_opens_is_refused_in_time() -> Result<()
         elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
         "{elapsed:?}"
     );
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     position(&trace, "thread 87")?;
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
@@ -1671,17 +1604,13 @@ async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result
     assert_eq!(free.len(), slots, "the files still waited for a slot");
     drop(free);
     tokio::time::timeout(PAST_DEADLINE, dispatcher).await??;
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     position(&trace, "status 188")?;
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"
     );
-    let requests = log
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .requests
-        .clone();
+    let requests = log.lock().requests.clone();
     assert!(
         requests
             .iter()
@@ -1735,11 +1664,7 @@ async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> 
     )
     .await;
     ingress.reactions.stop(Duration::from_secs(5)).await;
-    let requests = log
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .requests
-        .clone();
+    let requests = log.lock().requests.clone();
     assert!(
         requests
             .iter()
@@ -1749,7 +1674,7 @@ async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> 
     assert!(started.elapsed() > Duration::from_secs(1));
     // The window closed during the feedback: core was asked whether it holds
     // the text, but the text was never submitted, and its sender is told.
-    let trace = trace(&world)?;
+    let trace = trace(&world);
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"

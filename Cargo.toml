@@ -59,6 +59,9 @@ redundant_imports = "deny"
 redundant_lifetimes = "deny"
 unused_lifetimes = "deny"
 unused_qualifications = "deny"
+# Clippy's await_holding_lock misses std::sync::nonpoison's guards. This
+# lint catches one held across an await.
+must_not_suspend = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

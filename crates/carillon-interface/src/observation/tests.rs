@@ -3,7 +3,7 @@
 
 use std::{
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, nonpoison::Mutex},
     time::Duration,
 };
 
@@ -47,10 +47,7 @@ async fn core(
     let (seen, asked) = mpsc::unbounded_channel();
     let observe = get(move |uri: Uri, headers: HeaderMap| {
         let _ = seen.send((uri.query().unwrap_or_default().to_owned(), headers));
-        let bytes = stream_of
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        let bytes = stream_of.lock().take();
         let body = stream::unfold(bytes, |mut bytes| async {
             let next = bytes.as_mut()?.recv().await?;
             Some((next, bytes))

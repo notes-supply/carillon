@@ -8,10 +8,10 @@ pub(super) async fn settings_core(
     refusal: Option<(StatusCode, &'static str)>,
 ) -> anyhow::Result<(
     CoreClient,
-    Arc<std::sync::Mutex<Vec<SettingsRequest>>>,
+    Arc<std::sync::nonpoison::Mutex<Vec<SettingsRequest>>>,
     tokio::task::JoinHandle<std::io::Result<()>>,
 )> {
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::new(std::sync::nonpoison::Mutex::new(Vec::new()));
     let recorded = requests.clone();
     let router = Router::new().route(
         "/v1/settings",
@@ -19,9 +19,7 @@ pub(super) async fn settings_core(
             let recorded = recorded.clone();
             async move {
                 let changing = request.change.is_some();
-                if let Ok(mut requests) = recorded.lock() {
-                    requests.push(request);
-                }
+                recorded.lock().push(request);
                 match refusal {
                     Some((status, error)) if changing => {
                         (status, Json(json!({ "error": error }))).into_response()
@@ -89,12 +87,7 @@ async fn the_operator_reads_every_route_page_and_only_the_operator() -> anyhow::
         let (status, _) = operator(&state, method, uri, "token", body).await?;
         assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
     }
-    assert!(
-        requests
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned"))?
-            .is_empty()
-    );
+    assert!(requests.lock().is_empty());
 
     let (status, body) = operator(&state, Method::GET, "/v1/channels", "operator", None).await?;
     assert_eq!(status, StatusCode::OK);
@@ -143,10 +136,7 @@ async fn an_operator_change_answers_the_page_or_the_refusal_as_it_came() -> anyh
     .await?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["title"], "#300");
-    let sent = requests
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .clone();
+    let sent = requests.lock().clone();
     assert_eq!(sent.len(), 1, "a change is answered without another read");
     assert_eq!(
         serde_json::to_value(&sent[0].subject)?,
@@ -181,13 +171,7 @@ async fn an_operator_change_answers_the_page_or_the_refusal_as_it_came() -> anyh
     .await?;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
-    assert_eq!(
-        requests
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned"))?
-            .len(),
-        1
-    );
+    assert_eq!(requests.lock().len(), 1);
     server.abort();
 
     for (refusal, error) in [
@@ -324,7 +308,6 @@ async fn an_operator_route_change_is_written_and_served_unless_the_file_was_edit
     assert!(
         requests
             .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned"))?
             .iter()
             .all(|request| request.change.is_none()),
         "a route change asks the runtime nothing but a read"
@@ -675,14 +658,9 @@ async fn the_operator_routes_direct_messages_on_their_own_page() -> anyhow::Resu
         Some(1),
         "unrouted direct messages are not listed"
     );
-    assert!(
-        requests
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned"))?
-            .iter()
-            .all(|request| serde_json::to_value(&request.subject)
-                .is_ok_and(|subject| subject["channel_id"] == "300"))
-    );
+    assert!(requests.lock().iter().all(|request| {
+        serde_json::to_value(&request.subject).is_ok_and(|subject| subject["channel_id"] == "300")
+    }));
 
     let choose = json!({
         "setting": "agent",

@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::nonpoison::{Mutex, MutexGuard},
 };
 use tracing::warn;
 use twilight_http::{
@@ -164,7 +164,7 @@ impl Participation {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, ParticipationState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock()
     }
 
     pub(crate) fn parent_route(&self, channel_id: &str) -> Option<String> {

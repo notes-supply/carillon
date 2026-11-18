@@ -45,8 +45,8 @@ async fn message_actions_refuse_channels_outside_the_guild_and_allowlisted_direc
                 .err()
                 .with_context(|| format!("admitted {case}"))?;
             assert_eq!(refused.outcome, "rejected", "{case}");
-            server.finished()?;
-            assert_eq!(server.bodies()?.len(), 1, "{case}");
+            server.finished();
+            assert_eq!(server.bodies().len(), 1, "{case}");
         }
     }
     for operation in [
@@ -60,7 +60,7 @@ async fn message_actions_refuse_channels_outside_the_guild_and_allowlisted_direc
             .err()
             .context("admitted someone not allowlisted")?;
         assert_eq!(refused.outcome, "rejected");
-        assert!(server.bodies()?.is_empty());
+        assert!(server.bodies().is_empty());
     }
     Ok(())
 }
@@ -104,8 +104,8 @@ async fn a_reply_to_a_message_outside_the_destination_sends_nothing() -> anyhow:
             .err()
             .context("sent a reply to an unknown message")?;
         assert_eq!(refused.outcome, "rejected");
-        server.finished()?;
-        assert_eq!(server.bodies()?.len(), 2);
+        server.finished();
+        assert_eq!(server.bodies().len(), 2);
     }
     Ok(())
 }
@@ -145,7 +145,7 @@ async fn send_directly(id: &str, content: &str, sender: Value) -> anyhow::Result
         sent["url"],
         format!("https://discord.com/channels/@me/900/{id}")
     );
-    server.finished()?;
+    server.finished();
     Ok(server)
 }
 
@@ -269,19 +269,15 @@ async fn an_edited_or_deleted_direct_message_is_quoted_as_the_person_sees_it() -
         "mention_roles": [], "mentions": [], "pinned": false, "tts": false, "type": 0,
         "timestamp": "2026-11-05T14:03:00.000000+00:00"});
     edited["edited_timestamp"] = json!("2026-11-05T14:04:00.000000+00:00");
-    server
-        .pending
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .extend([
-            get("/api/v10/channels/900", dm.clone()),
-            Step {
-                method: Method::PATCH,
-                path: "/api/v10/channels/900/messages/700",
-                status: StatusCode::OK,
-                body: edited,
-            },
-        ]);
+    server.pending.lock().extend([
+        get("/api/v10/channels/900", dm.clone()),
+        Step {
+            method: Method::PATCH,
+            path: "/api/v10/channels/900/messages/700",
+            status: StatusCode::OK,
+            body: edited,
+        },
+    ]);
     server
         .execute(json!({"action": "messages.edit", "channel_id": "900",
             "message_id": "700", "content": "Deploy staging?"}))
@@ -295,24 +291,20 @@ async fn an_edited_or_deleted_direct_message_is_quoted_as_the_person_sees_it() -
          merge it",
         "an edit is quoted as edited"
     );
-    server
-        .pending
-        .lock()
-        .map_err(|_| anyhow::anyhow!("poisoned"))?
-        .extend([
-            get("/api/v10/channels/900", dm),
-            Step {
-                method: Method::DELETE,
-                path: "/api/v10/channels/900/messages/700",
-                status: StatusCode::NO_CONTENT,
-                body: Value::Null,
-            },
-        ]);
+    server.pending.lock().extend([
+        get("/api/v10/channels/900", dm),
+        Step {
+            method: Method::DELETE,
+            path: "/api/v10/channels/900/messages/700",
+            status: StatusCode::NO_CONTENT,
+            body: Value::Null,
+        },
+    ]);
     server
         .execute(json!({"action": "messages.delete", "channel_id": "900", "message_id": "700"}))
         .await?
         .map_err(|failure| anyhow::anyhow!("{failure}"))?;
-    server.finished()?;
+    server.finished();
     assert_eq!(
         answered(&server, direct_message("800", None))?,
         "merge it",
