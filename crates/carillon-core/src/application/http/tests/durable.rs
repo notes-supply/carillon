@@ -13,11 +13,13 @@ use super::{
     live::{event, lock, ok, operator, submit, submit_event},
 };
 use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
-use carillon_protocol::model::{NATIVE_CONTEXT, RuntimeTurnRequest};
+use carillon_protocol::model::{
+    NATIVE_CONTEXT, RuntimeTurnRequest, StagedAttachments, StagedFile, TURN_REQUEST_LIMIT,
+};
 
-/// A durable runtime that keeps every turn core hands it, answering each
-/// hand-over with the next scripted answer (202 once they run out), and
-/// each control with `control`.
+/// A durable runtime that keeps every turn core hands it, reading as much of
+/// one as runtimes do, answering each hand-over with the next scripted answer
+/// (202 once they run out), and each control with `control`.
 #[derive(Clone)]
 pub(super) struct DurableRuntime {
     pub(super) url: String,
@@ -49,7 +51,8 @@ impl DurableRuntime {
                         .pop_front()
                         .unwrap_or_else(|| (StatusCode::ACCEPTED, json!({})));
                     async move { (answer.0, Json(answer.1)) }
-                }),
+                })
+                .layer(DefaultBodyLimit::max(TURN_REQUEST_LIMIT)),
             )
             .route(
                 "/v1/turns/{id}/control",
@@ -353,6 +356,69 @@ async fn a_refusal_explained_only_by_whitespace_gets_cores_explanation() -> Resu
             .collect::<Vec<_>>(),
         ["The agent's runtime refused that message without saying why."]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_largest_message_core_accepts_reaches_its_runtime() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (mut fixture, _) = durable(directory.path(), &runtime)?;
+    fixture.config.value.core.attachments.max_files = 100;
+    fixture.core = Core::open(core_options(&fixture.config))?;
+    let state = configured(&fixture);
+    // Core adds each file's captured path and digest to the turn.
+    let batch = fixture
+        .config
+        .value
+        .data_dir
+        .join("components/test-interface/incoming/batch");
+    fs::create_dir_all(&batch)?;
+    let mut files = Vec::new();
+    for ordinal in 0..100 {
+        fs::write(batch.join(ordinal.to_string()), "x")?;
+        files.push(StagedFile {
+            name: ordinal.to_string(),
+            size: 1,
+            content_type: None,
+        });
+    }
+    let mut largest = event("largest", "conversation");
+    largest.attachments = Some(StagedAttachments {
+        batch: "batch".to_owned(),
+        files,
+    });
+    let text = EVENT_BODY_LIMIT - serde_json::to_vec(&largest)?.len();
+    largest.content = "x".repeat(text);
+    let accepted = ok(submit_event(&state, largest).await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &accepted.turn_id)?, TurnState::Running);
+    let request = runtime.request(0)?;
+    assert_eq!(request.input.len(), text);
+    assert_eq!(request.attachments.len(), 100);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turn_too_large_for_its_runtime_is_interrupted_and_the_next_is_handed_over() -> Result<()>
+{
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    // Core's intake reads no event this large; a turn queued under other
+    // limits is handed over all the same.
+    let mut oversized = event("oversized", "conversation");
+    oversized.content = "x".repeat(TURN_REQUEST_LIMIT);
+    let oversized = ok(submit_event(&state, oversized).await)?;
+    let next = ok(submit(&state, "next", "elsewhere").await)?;
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(
+        state_of(&state, &oversized.turn_id)?,
+        TurnState::Interrupted
+    );
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(state_of(&state, &next.turn_id)?, TurnState::Running);
+    assert_eq!(runtime.handed(), ["next"]);
     Ok(())
 }
 

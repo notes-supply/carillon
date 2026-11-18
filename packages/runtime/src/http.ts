@@ -8,6 +8,7 @@ import {
   RuntimeTurnControlSchema,
   RuntimeTurnRequestSchema,
   SettingsRequestSchema,
+  TURN_REQUEST_LIMIT,
   type ConversationQuery,
   type RuntimeTurnControl,
   type SettingsRequest,
@@ -162,7 +163,8 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   ): Promise<TurnRequest | undefined> {
     try {
       return Parse(RuntimeTurnRequestSchema, await readJson(request));
-    } catch {
+    } catch (failure) {
+      if (failure instanceof ExplainedFailure) throw failure;
       writeJson(response, 400, { error: "invalid runtime turn request" });
       return undefined;
     }
@@ -177,14 +179,21 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   }
 
   async function readJson(request: IncomingMessage): Promise<unknown> {
-    request.setEncoding("utf8");
-    let body = "";
+    const chunks: Buffer[] = [];
+    let length = 0;
+    // A body over the limit is still read to its end, so core receives the
+    // refusal rather than a connection broken mid-request.
     for await (const chunk of request) {
-      if (typeof chunk !== "string") throw new Error("request body is not UTF-8 text");
-      body += chunk;
-      if (Buffer.byteLength(body) > 1_048_576) throw new Error("request body exceeds 1 MiB");
+      if (!Buffer.isBuffer(chunk)) throw new Error("request body is not bytes");
+      length += chunk.length;
+      if (length <= TURN_REQUEST_LIMIT) chunks.push(chunk);
     }
-    return JSON.parse(body) as unknown;
+    if (length > TURN_REQUEST_LIMIT)
+      throw new ExplainedFailure(
+        413,
+        `That message is too large for this agent's runtime, which takes about ${String(Math.round(TURN_REQUEST_LIMIT / 1024 ** 2))} MiB.`,
+      );
+    return JSON.parse(Buffer.concat(chunks).toString()) as unknown;
   }
 
   /** Names the request by method and path: its query carries caller data. */
