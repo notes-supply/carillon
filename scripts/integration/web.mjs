@@ -439,10 +439,11 @@ async function testOpenedTurn(token, chat) {
 
 /** A pasted log over 1 MiB is answered, and so is the next message its runtime is handed. */
 async function testLargeMessage(token) {
-  const [pasted, next] = [randomUUID(), randomUUID()];
+  const [pasted, next, end] = [randomUUID(), randomUUID(), randomUUID()];
   let log = "";
   for (let line = 0; log.length < 1_100_000; line += 1)
     log += `2026-11-18T09:10:00Z INFO worker ${String(line)} finished a request\n`;
+  log += `end of log ${end}\n`;
   for (const [chat, text] of [
     [pasted, log],
     [next, "after the log"],
@@ -450,8 +451,10 @@ async function testLargeMessage(token) {
     const sent = await send(token, chat, `m-${randomUUID()}`, text);
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
   }
-  for (const chat of [next, pasted])
-    assert.equal((await settled(token, chat))[0].progress.ending.kind, "answered");
+  assert.equal((await settled(token, next))[0].progress.ending.kind, "answered");
+  const [answered] = await settled(token, pasted);
+  assert.equal(answered.progress.ending.kind, "answered");
+  assert.ok(answered.progress.ending.html.includes(end), "the pasted log arrived whole");
 }
 
 try {
