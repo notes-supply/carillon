@@ -28,6 +28,18 @@ function hearing(heard: () => void): TransformStream<Bytes, Bytes> {
   });
 }
 
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => {
+    const { port1, port2 } = new MessageChannel();
+    port1.addEventListener("message", () => {
+      port1.close();
+      resolve();
+    });
+    port1.start();
+    port2.postMessage(null);
+  });
+}
+
 async function* attempt(
   view: View,
   token: string,
@@ -58,6 +70,7 @@ export async function* watch(
       for await (const message of attempt(view, token, either, heardOn(stream))) {
         ending = message.kind;
         if (ending === "snapshot") failures = 0;
+        await nextTask();
         yield message;
         if (ending !== "snapshot") break;
       }
@@ -68,7 +81,10 @@ export async function* watch(
     }
     if (signal.aborted || ending === "signed_out") return;
     if (ending === "snapshot") continue;
-    if (ending === "nothing") yield { kind: "unavailable" };
+    if (ending === "nothing") {
+      await nextTask();
+      yield { kind: "unavailable" };
+    }
     failures += 1;
     await retryPause(failures, signal);
   }

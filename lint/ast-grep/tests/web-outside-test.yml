@@ -55,6 +55,13 @@ invalid:
   - "queueMicrotask(store);"
   - "const late = AbortSignal.timeout(1000);"
 ---
+id: web-task
+valid:
+  - "port.postMessage(null);"
+invalid:
+  - "const { port1, port2 } = new MessageChannel();"
+  - "const channel = new window.MessageChannel();"
+---
 id: web-media-query
 valid:
   - "const wide = route.pane === \"room\";"
@@ -78,3 +85,4 @@ invalid:
   - "<p>{matchMedia(\"(min-width: 46rem)\").matches}</p>"
   - "<div class:wide={new ResizeObserver(follow)}></div>"
   - "<p>{AbortSignal.timeout(1000).aborted}</p>"
+  - "<button onclick={() => new MessageChannel().port2.postMessage(null)}>Wait</button>"

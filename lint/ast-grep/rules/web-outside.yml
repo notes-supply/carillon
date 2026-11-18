@@ -114,6 +114,22 @@ rule:
         - kind: property_identifier
         - kind: shorthand_property_identifier_pattern
 ---
+id: web-task
+language: typescript
+severity: error
+message: A message channel hands work on to a task of its own. It lives in a module this rule lets through, which hands on the stream's messages. Elsewhere it papers over an ordering the code should state.
+note: A new module is added to `ignores` and to the table in packages/web/README.md on purpose.
+files:
+  - packages/web/src/**
+ignores:
+  - packages/web/src/api/watch.ts
+rule:
+  regex: ^MessageChannel$
+  any:
+    - kind: identifier
+    - kind: property_identifier
+    - kind: shorthand_property_identifier_pattern
+---
 id: web-media-query
 language: typescript
 severity: error
@@ -157,4 +173,4 @@ rule:
     - kind: text
     - kind: attribute_name
     - kind: attribute_value
-  regex: "\\b(addEventListener|createSubscriber|setTimeout|setInterval|requestAnimationFrame|requestIdleCallback|queueMicrotask|matchMedia|(Resize|Mutation|Intersection)Observer)\\b|AbortSignal\\.timeout"
+  regex: "\\b(addEventListener|createSubscriber|setTimeout|setInterval|requestAnimationFrame|requestIdleCallback|queueMicrotask|MessageChannel|matchMedia|(Resize|Mutation|Intersection)Observer)\\b|AbortSignal\\.timeout"
