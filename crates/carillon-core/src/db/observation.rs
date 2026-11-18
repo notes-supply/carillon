@@ -10,7 +10,7 @@ use carillon_protocol::{
     conversations::TurnSource,
     model::{TurnActivity, TurnState},
     observation::{
-        Conversation, ConversationKey, Ending, ObservedTurn, OpenView, Opened, Progress,
+        Conversation, ConversationKey, Ending, Limit, ObservedTurn, OpenView, Opened, Progress,
         SNAPSHOT_LIMIT, Snapshot, View,
     },
     turns::Silence,
@@ -134,17 +134,8 @@ impl Database {
         let mut connection = self.read()?;
         let transaction = connection.transaction()?;
         let mut written = Bounded::new(io::sink());
-        let limit = view.conversations.get();
-        let mut conversations = transaction
-            .prepare(&format!(
-                "SELECT {CONVERSATION_COLUMNS} FROM conversations c
-                 WHERE interface_id = ?1 ORDER BY activity DESC LIMIT ?2"
-            ))?
-            .query_map(params![interface_id, u32::from(limit) + 1], conversation)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let more = conversations.len() > usize::from(limit);
-        conversations.truncate(limit.into());
-        written.add(&conversations)?;
+        let (conversations, more) =
+            listed(&transaction, interface_id, view.conversations, &mut written)?;
         let open = view
             .open
             .as_ref()
@@ -156,6 +147,32 @@ impl Database {
             open,
         })
     }
+}
+
+/// The interface's latest active conversations, at most `limit`, and
+/// whether it has more, each counted into `written` before the next is read.
+fn listed(
+    connection: &Connection,
+    interface_id: &str,
+    limit: Limit,
+    written: &mut Bounded<io::Sink>,
+) -> Result<(Vec<Conversation>, bool)> {
+    let limit = limit.get();
+    let mut statement = connection.prepare(&format!(
+        "SELECT {CONVERSATION_COLUMNS} FROM conversations c
+         WHERE interface_id = ?1 ORDER BY activity DESC LIMIT ?2"
+    ))?;
+    let mut rows = statement.query(params![interface_id, u32::from(limit) + 1])?;
+    let mut conversations = Vec::new();
+    while let Some(row) = rows.next()? {
+        if conversations.len() == usize::from(limit) {
+            return Ok((conversations, true));
+        }
+        let shown = conversation(row)?;
+        written.add(&shown)?;
+        conversations.push(shown);
+    }
+    Ok((conversations, false))
 }
 
 fn conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
