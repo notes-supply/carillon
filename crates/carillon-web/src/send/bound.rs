@@ -14,7 +14,9 @@
 //! [`Meter::refuse`] caps every later window at [`REFUSED_DRAIN`] past the
 //! refusal, so the rest of a refused message is read within one budget,
 //! boundaries and headers included. A window a peer overruns ends the request
-//! with [`BodyError::Overrun`], which the handler answers 413.
+//! with [`BodyError::Overrun`]. The handler answers that 413 unless it has
+//! refused the message already, and a refused message keeps its refusal
+//! however its drain ends.
 //!
 //! A window counts bytes fed to the parser, and the parser reads ahead: it
 //! takes all the body has ready and keeps what it has not parsed. While a
