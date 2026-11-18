@@ -338,13 +338,10 @@ pub(super) fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         let _ = fs::remove_file(&staging);
         return Err(failure);
     }
-    // Unlike rename, hard_link fails if the destination appeared meanwhile,
-    // so a finished archive can never overwrite an existing file.
-    if let Err(failure) = fs::hard_link(&staging, &destination) {
+    if let Err(failure) = fs::rename_noreplace(&staging, &destination) {
         let _ = fs::remove_file(&staging);
         return Err(failure.into());
     }
-    let _ = fs::remove_file(&staging);
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
