@@ -90,6 +90,17 @@ it("bounds an explanation at a word, whatever its length", () => {
   expect(kept).toBe(family.repeat(kept.length / family.length));
 });
 
+it.each(["a", "1a", "a:"])(
+  "redacts and explains 256 KiB of %j repeated within a second (timing)",
+  (unit) => {
+    const text = unit.repeat(262_144 / unit.length);
+    const started = performance.now();
+    redactCredentials(text);
+    displayableExplanation(text);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  },
+);
+
 // Logs keep the diagnostic but not the values the display boundary withholds.
 it.each([
   ["Authentication failed: password=short-secret", "Authentication failed: password=[redacted]"],
