@@ -15,7 +15,7 @@ use axum::{
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
 use carillon_protocol::model::{ExternalEvent, StagedAttachments, StagedFile};
-use futures_util::TryStreamExt as _;
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use serde_json::json;
 use tokio::{io::AsyncWriteExt as _, sync::Notify};
 use tokio_util::io::ReaderStream;
@@ -785,5 +785,43 @@ async fn a_refused_message_is_drained_no_further_than_2_mib() -> Result<()> {
         fixture.core().events.is_empty(),
         "a refused message reached core"
     );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_that_pauses_29_seconds_between_pieces_is_taken_whole() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let file = vec![b'f'; 8192];
+    let body = form(&[Part::Text("slow"), Part::File("slow.bin", None, &file)]);
+    let pieces: Vec<_> = body
+        .chunks(body.len().div_ceil(3))
+        .map(<[u8]>::to_vec)
+        .collect();
+    let slow = stream::iter(pieces).then(|piece| async move {
+        tokio::time::sleep(Duration::from_secs(29)).await;
+        Ok::<_, std::io::Error>(piece)
+    });
+    let start = tokio::time::Instant::now();
+    let request = bearer(Method::PUT, &path("assistant", EVENT), &token)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from_stream(slow))?;
+    let sent = fixture.send(request).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.text());
+    assert_eq!(start.elapsed(), Duration::from_secs(3 * 29));
+    let core = fixture.core();
+    let [(event, _)] = core.events.as_slice() else {
+        anyhow::bail!("expected one event, not {}", core.events.len());
+    };
+    let sizes: Vec<_> = event
+        .attachments
+        .iter()
+        .flat_map(|attached| &attached.files)
+        .map(|file| file.size)
+        .collect();
+    assert_eq!(sizes, [8192]);
     Ok(())
 }

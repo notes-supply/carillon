@@ -806,6 +806,44 @@ async fn a_provider_holding_every_connection_it_serves_stops_within_two_seconds_
     Ok(())
 }
 
+#[tokio::test]
+async fn an_upload_that_sends_nothing_for_30_seconds_of_a_paused_clock_loses_its_connection()
+-> Result<()> {
+    let fixture = Fixture::new().await?;
+    let token = fixture.sign_in().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let stop = Arc::new(Notify::new());
+    let asked_to_stop = {
+        let stop = Arc::clone(&stop);
+        async move { stop.notified().await }
+    };
+    let serving = tokio::spawn(until_stopped(
+        listener,
+        Arc::clone(&fixture.web),
+        asked_to_stop,
+    ));
+    let mut browser = hold_an_upload(address, &token).await?;
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    // The paused clock runs on while the read waits, so a wait as long as a
+    // second timeout would let that pass too.
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_millis(500), browser.read_to_end(&mut answer))
+        .await
+        .context("an upload that sent nothing for 30 seconds kept its connection")??;
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+        "{answer}"
+    );
+
+    stop.notify_one();
+    serving.await??;
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_connection_that_never_sends_its_request_is_closed_after_the_header_timeout() -> Result<()>
 {
